@@ -1,7 +1,7 @@
 # Local test setup for `subtun docker`.
 #
 #   docker compose -f test/dev/compose.yaml up -d
-#   bin/subtun docker subtun-dev-target-1 --socks 127.0.0.1:1080
+#   build/subtun docker subtun-dev-target-1 --socks 127.0.0.1:1080
 #   curl --socks5-hostname 127.0.0.1:1080 http://web:8080/
 #   docker compose -f test/dev/compose.yaml down
 #

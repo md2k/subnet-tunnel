@@ -2,18 +2,27 @@
 
 ## Build and test
 
-```sh
-make            # builds the Linux agents, embeds them, writes bin/subtun
-make test       # go test -race ./...
-make vet
-```
+Make targets are listed in the [README](../README.md#build).
 
-`make agents` cross-compiles `cmd/subtun-agent` for linux/amd64 and linux/arm64 into
+`make agents` (part of `make build`) cross-compiles `cmd/subtun-agent` for linux/amd64 and linux/arm64 into
 `internal/agentbin/dist/`, where `go:embed` picks them up. A plain `go build ./cmd/subtun` works
 without them, but then subtun has no agent to upload; pass `--agent-file` (hidden flag) with a
 Linux build of `cmd/subtun-agent` instead.
 
 Unit tests use in-memory connections and stub dialers. They open no sockets.
+
+## Releases
+
+`make release VERSION=vX.Y.Z` runs [scripts/release.sh](../scripts/release.sh): preflight (clean
+tree, on `main`, in sync with origin, tag and release free), Linux agents, then `subtun` for
+darwin/linux/windows × amd64/arm64 with `-trimpath -s -w` and the version stamped in, `.tar.gz` /
+`.zip` archives plus `checksums.txt` in `build/release/`, then the tag and `gh release create`.
+Everything is built before anything is pushed, so a failed build leaves no tag behind.
+`ARGS="--dry-run"` stops after the build and skips the git/gh checks, so it works from any branch.
+`ARGS="--notes-file notes.md"` replaces the generated release notes.
+
+gh doesn't follow git's per-directory identity. If the active gh account can't see the repo, the
+script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 
 ## Layout
 
@@ -40,7 +49,7 @@ Kubernetes (Docker Desktop, kind, ...):
 ```sh
 kubectl apply -k test/dev
 kubectl -n subtun-dev wait --for=condition=Ready pod --all
-bin/subtun k8s -n subtun-dev target --socks 127.0.0.1:1080
+build/subtun k8s -n subtun-dev target --socks 127.0.0.1:1080
 curl --socks5-hostname 127.0.0.1:1080 http://web.subtun-dev.svc.cluster.local:8080/
 kubectl delete namespace subtun-dev
 ```
@@ -49,7 +58,7 @@ Docker:
 
 ```sh
 docker compose -f test/dev/compose.yaml up -d
-bin/subtun docker subtun-dev-target-1 --socks 127.0.0.1:1080
+build/subtun docker subtun-dev-target-1 --socks 127.0.0.1:1080
 curl --socks5-hostname 127.0.0.1:1080 http://web:8080/
 docker compose -f test/dev/compose.yaml down
 ```
@@ -62,6 +71,6 @@ Throughput, through the proxy:
 
 ```sh
 curl --socks5-hostname 127.0.0.1:1080 -o /dev/null -w '%{speed_download}\n' http://web:8080/bytes/524288000
-dd if=/dev/zero of=bin/bench.dat bs=1048576 count=500
-curl --socks5-hostname 127.0.0.1:1080 -o /dev/null -T bin/bench.dat -w '%{speed_upload}\n' http://web:8080/up
+dd if=/dev/zero of=build/bench.dat bs=1048576 count=500
+curl --socks5-hostname 127.0.0.1:1080 -o /dev/null -T build/bench.dat -w '%{speed_upload}\n' http://web:8080/up
 ```

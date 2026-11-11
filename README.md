@@ -13,18 +13,36 @@ reached ~170 MB/s end to end in the same test (see [docs/design.md](docs/design.
 
 ## Build
 
+Needs Go (version in [go.mod](go.mod)), `make` and `git`. No C toolchain: everything builds with
+`CGO_ENABLED=0`.
+
 ```sh
-make            # bin/subtun, with the Linux agents embedded
+git clone https://github.com/md2k/subnet-tunnel.git && cd subnet-tunnel
+make            # runs the tests, then builds build/subtun with the Linux agents embedded
+build/subtun version
 ```
+
+| Target | What it does |
+|---|---|
+| `make` | `make test` then `make build` |
+| `make build` | Linux agents (amd64, arm64) → `internal/agentbin/dist/`, then `build/subtun` for this machine |
+| `make test` | unit tests (`make test-race` adds the race detector, needs a C toolchain) |
+| `make lint` | `go vet` and a gofmt check |
+| `make release VERSION=v0.1.0 ARGS="--dry-run"` | builds archives for macOS, Linux and Windows (amd64, arm64) in `build/release/`, without tagging or publishing |
+| `make release VERSION=v0.1.0` | the same, then tags and publishes a GitHub release (from an up-to-date `main` only) |
+| `make clean` / `make clean-all` | remove the binaries / everything under `build/` |
+
+To run on another machine without building there, take its archive from `build/release/` after a
+dry run.
 
 ## Use
 
 ```sh
 # Kubernetes: any running pod whose container has sh, uname and cat
-bin/subtun k8s -n team-a debug-pod --socks 127.0.0.1:1080
+build/subtun k8s -n team-a debug-pod --socks 127.0.0.1:1080
 
 # Docker: same for a container
-bin/subtun docker my-app --socks 127.0.0.1:1080
+build/subtun docker my-app --socks 127.0.0.1:1080
 
 curl --socks5-hostname 127.0.0.1:1080 http://my-svc.team-a.svc.cluster.local
 ```
@@ -46,7 +64,7 @@ No `kubectl port-forward`, no sshd, no second terminal.
 ## Documentation
 
 - [Design](docs/design.md): measurements, architecture and open questions.
-- [Development](docs/development.md): building, tests and the local test setup.
+- [Development](docs/development.md): tests, code layout and the local test setup.
 
 ## License
 

@@ -3,7 +3,7 @@
 #
 #   kubectl apply -k test/dev
 #   kubectl -n subtun-dev wait --for=condition=Ready pod --all
-#   bin/subtun k8s -n subtun-dev target --socks 127.0.0.1:1080
+#   build/subtun k8s -n subtun-dev target --socks 127.0.0.1:1080
 #   curl --socks5-hostname 127.0.0.1:1080 http://web.subtun-dev.svc.cluster.local:8080/
 #   kubectl delete namespace subtun-dev
 #
