@@ -1,6 +1,6 @@
 # Design
 
-Status: design stage. This document records the measurements that drove the design and the
+Status: early development. This document records the measurements that drove the design and the
 decisions taken so far.
 
 ## Problem
@@ -22,6 +22,8 @@ A SOCKS proxy over the same port-forward was fast in both directions, so the tra
    The issue reproduces without sshuttle, using only the pf rules.
 
 ## Measurements
+
+### Capture
 
 Clean MacBook, macOS 27.0.1, no VPN or endpoint security software. Python test scripts on
 loopback and a local Kubernetes cluster (Docker Desktop). 50 MB transfers.
@@ -45,9 +47,50 @@ Findings:
   remaining upload cost is per packet. tun2socks's own Linux benchmark shows the same ratio
   (upload about 70% of the raw transport).
 
+### Transport: exec stdio vs port-forward
+
+Corporate MacBook (with a VPN client and endpoint security software), Docker Desktop with its
+bundled Kubernetes. 500 MB per transfer, average of three runs, `curl` through subtun's SOCKS5
+proxy to a separate HTTP service behind the agent.
+
+| Path | Download | Upload |
+|---|---|---|
+| `kubectl port-forward` to the service (transport limit) | ~271 MB/s | ~237 MB/s |
+| subtun: exec (WebSocket) → smux → agent → service | ~212–228 MB/s | ~175–182 MB/s |
+| subtun: Docker exec → smux → agent → container | ~255 MB/s | ~177 MB/s |
+
+The exec carrier reaches about 80% of raw port-forward downstream and about 75% upstream, with the
+multiplexer, an extra in-cluster TCP hop and the SOCKS layer included. That is far above what a
+remote cluster's round-trip time will allow, so exec stays the carrier.
+
+## Architecture
+
+```
+app ──► SOCKS5 (later: utun + gVisor) ──► tunnel client ══ carrier ══► agent ──► destination
+         on the laptop                     smux streams    exec stdio   in the target
+```
+
+- **Agent.** A small static Linux binary (`cmd/subtun-agent`, ~3.5 MB), embedded in subtun for
+  amd64 and arm64. subtun probes the target's architecture, uploads the matching agent over exec
+  (`sh` + `cat`, into `/tmp` or `--agent-dir`) and caches it under its checksum, so later
+  connections skip the upload.
+- **Carrier.** The agent's stdin/stdout over the exec API: Kubernetes through client-go (WebSocket,
+  SPDY fallback) with the user's kubeconfig; Docker through the Engine API with the user's docker
+  context. No kubectl, port-forward or sshd involved.
+- **Protocol.** The agent first writes a hello line (`subtun-agent <proto> <version> <sha256>`);
+  subtun checks the protocol version and that the checksum matches the binary it uploaded. Then
+  smux v2 runs over the carrier, one stream per connection: a request (`connect host:port`), a
+  status reply, then raw bytes. Hostnames resolve on the agent side. Half-close passes through.
+- **Flow control.** smux per-stream window 4 MB, session buffer 32 MB, so one stream is not capped
+  at window/RTT on remote clusters.
+- **Lifecycle.** Closing subtun sends EOF on the agent's stdin and the agent exits. If the carrier
+  drops (pod deleted, network lost), subtun notices within seconds and exits with an error.
+
 ## Decisions
 
 - **Capture:** utun / TUN interface plus the gVisor network stack, with utun MTU 9000. Never pf.
+- **Remote side:** the Go agent over exec stdio, not SSH `direct-tcpip`. Containers rarely run sshd,
+  and UDP, remote DNS and host discovery need an agent anyway.
 - **DNS:** macOS supplemental resolvers (`/etc/resolver/<domain>`, or one dynamic entry with a list
   of match domains) send only the selected domains to the tool. Optional regex matching applies
   inside the tool, to the queries that reach it.
@@ -57,10 +100,9 @@ Findings:
 
 ## Open questions
 
-- **Remote side:** SSH `direct-tcpip` channels (only sshd needed, TCP only), or a small static Go
-  agent copied over the transport (needed for UDP, remote DNS, host discovery)?
-- **Transport flow control:** per-stream window of at least bandwidth × round-trip time. Multiple
-  streams or connections to avoid head-of-line blocking on remote clusters.
+- **Agent delivery without a shell** (distroless images): ephemeral debug container, or a sidecar.
+- **Transport flow control on remote clusters:** several carriers in parallel to avoid head-of-line
+  blocking, once measured against a real remote cluster.
 - **Coexistence** with other VPN or security software that owns its own utun interface or pf anchor.
 - **Root step on macOS:** pass the utun file descriptor from a short-lived root helper to the user
   process, or keep a small root helper for the session's lifetime.
