@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/md2k/subnet-tunnel/internal/agentbin"
+	"github.com/md2k/subnet-tunnel/internal/capture"
+	"github.com/md2k/subnet-tunnel/internal/privhelper"
 	"github.com/md2k/subnet-tunnel/internal/socks"
 	"github.com/md2k/subnet-tunnel/internal/transport"
 	"github.com/md2k/subnet-tunnel/internal/transport/docker"
@@ -48,8 +51,34 @@ func newRoot() *cobra.Command {
 		SilenceErrors: true,
 	}
 	root.PersistentFlags().BoolVarP(&g.verbose, "verbose", "v", false, "debug logging")
-	root.AddCommand(newK8sCmd(g), newDockerCmd(g), newVersionCmd())
+	root.AddCommand(newK8sCmd(g), newDockerCmd(g), newVersionCmd(), newHelperCmd())
 	return root
+}
+
+// newHelperCmd is the root helper that `sudo` runs for utun setup. Not for
+// direct use.
+func newHelperCmd() *cobra.Command {
+	var socketPath string
+	cmd := &cobra.Command{
+		Use:    "helper",
+		Short:  "Root helper for utun setup (started by subtun through sudo)",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+				ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+					if len(groups) == 0 && a.Key == slog.TimeKey {
+						return slog.Attr{}
+					}
+					return a
+				},
+			}))
+			return privhelper.Serve(cmd.Context(), socketPath, os.Stdin, log)
+		},
+	}
+	cmd.Flags().StringVar(&socketPath, "socket", "", "subtun's unix socket")
+	_ = cmd.MarkFlagRequired("socket")
+	return cmd
 }
 
 func newVersionCmd() *cobra.Command {
@@ -63,12 +92,25 @@ func newVersionCmd() *cobra.Command {
 	}
 }
 
-// commonOpts are the flags every target command shares.
+// commonOpts are the flags and arguments every target command shares.
 type commonOpts struct {
 	socks     string
 	agent     string
 	agentFile string
 	agentDir  string
+	cidrs     []netip.Prefix
+}
+
+// parseCIDRs turns the positional arguments after the target into routes.
+func (o *commonOpts) parseCIDRs(args []string) error {
+	for _, a := range args {
+		p, err := privhelper.ParseCIDR(a)
+		if err != nil {
+			return err
+		}
+		o.cidrs = append(o.cidrs, p)
+	}
+	return nil
 }
 
 func (o *commonOpts) register(cmd *cobra.Command) {
@@ -93,16 +135,25 @@ func newK8sCmd(g *globalOpts) *cobra.Command {
 	var t k8s.Target
 	var o commonOpts
 	cmd := &cobra.Command{
-		Use:   "k8s POD",
+		Use:   "k8s POD [CIDR...]",
 		Short: "Tunnel through a Kubernetes pod, using the exec API",
 		Long: `Tunnel through a Kubernetes pod. subtun talks to the API server with your
-kubeconfig, uploads its agent into the pod over exec and opens connections
-from there. Nothing needs to be installed in the pod beyond sh, uname and cat.`,
-		Example: `  subtun k8s -n team-a debug-pod --socks 127.0.0.1:1080
+kubeconfig, starts its agent in the pod over exec and opens connections from
+there.
+
+CIDRs (or single IPs) are captured transparently through a utun interface:
+any program on this machine reaches them directly. Setting up the interface
+and routes needs root once, so sudo asks for your password; everything else
+runs as you. --socks adds a SOCKS5 proxy, for example for a browser.`,
+		Example: `  subtun k8s -n team-a debug-pod 10.96.0.0/12 10.244.0.0/16
+  subtun k8s -n team-a debug-pod --socks 127.0.0.1:1080
   curl --socks5-hostname 127.0.0.1:1080 http://my-svc.team-a.svc.cluster.local`,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			t.Pod = strings.TrimPrefix(args[0], "pod/")
+			if err := o.parseCIDRs(args[1:]); err != nil {
+				return err
+			}
 			return run(cmd.Context(), g, o, func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
 				return k8s.Connect(ctx, t, agents, o.transport(g), log)
 			})
@@ -120,17 +171,24 @@ func newDockerCmd(g *globalOpts) *cobra.Command {
 	var t docker.Target
 	var o commonOpts
 	cmd := &cobra.Command{
-		Use:   "docker CONTAINER",
+		Use:   "docker CONTAINER [CIDR...]",
 		Short: "Tunnel through a Docker container, using the exec API",
 		Long: `Tunnel through a Docker container. subtun talks to the Docker daemon (found
 like the docker CLI does: --host, $DOCKER_HOST, then the current docker
-context), uploads its agent over exec and opens connections from there, so
-container IPs and names on its networks become reachable from this machine.`,
-		Example: `  subtun docker my-app --socks 127.0.0.1:1080
+context), starts its agent over exec and opens connections from there, so
+container IPs and names on its networks become reachable from this machine.
+
+CIDRs are captured transparently through a utun interface (sudo asks once);
+--socks adds a SOCKS5 proxy.`,
+		Example: `  subtun docker my-app 172.20.0.0/16
+  subtun docker my-app --socks 127.0.0.1:1080
   curl --socks5-hostname 127.0.0.1:1080 http://db:5432`,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			t.Container = args[0]
+			if err := o.parseCIDRs(args[1:]); err != nil {
+				return err
+			}
 			return run(cmd.Context(), g, o, func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
 				return docker.Connect(ctx, t, agents, o.transport(g), log)
 			})
@@ -146,8 +204,8 @@ type connectFunc func(ctx context.Context, agents []agentbin.Binary, log *slog.L
 
 func run(ctx context.Context, g *globalOpts, f commonOpts, connect connectFunc) error {
 	log := newLogger(g.verbose)
-	if f.socks == "" {
-		return errors.New("nothing to do: pass --socks ADDR (utun capture is not implemented yet)")
+	if f.socks == "" && len(f.cidrs) == 0 {
+		return errors.New("nothing to do: give CIDRs to capture, --socks ADDR, or both")
 	}
 	agents, err := loadAgents(f.agentFile)
 	if err != nil {
@@ -155,13 +213,16 @@ func run(ctx context.Context, g *globalOpts, f commonOpts, connect connectFunc) 
 	}
 
 	// Listen before connecting, so a busy port fails fast.
-	ln, err := net.Listen("tcp", f.socks)
-	if err != nil {
-		return fmt.Errorf("SOCKS listener: %w", err)
-	}
-	defer ln.Close()
-	if host, _, _ := net.SplitHostPort(f.socks); !isLoopback(host) {
-		log.Warn("SOCKS proxy is reachable from other hosts and has no authentication", "addr", ln.Addr())
+	var ln net.Listener
+	if f.socks != "" {
+		ln, err = net.Listen("tcp", f.socks)
+		if err != nil {
+			return fmt.Errorf("SOCKS listener: %w", err)
+		}
+		defer ln.Close()
+		if host, _, _ := net.SplitHostPort(f.socks); !isLoopback(host) {
+			log.Warn("SOCKS proxy is reachable from other hosts and has no authentication", "addr", ln.Addr())
+		}
 	}
 
 	start := time.Now()
@@ -181,11 +242,26 @@ func run(ctx context.Context, g *globalOpts, f commonOpts, connect connectFunc) 
 	}()
 
 	log.Info("tunnel up", "via", carrier.Desc, "agent", client.Agent().Version,
-		"socks", ln.Addr().String(), "took", time.Since(start).Round(time.Millisecond))
+		"took", time.Since(start).Round(time.Millisecond))
 
-	srv := &socks.Server{Dialer: client, Logger: log}
 	errc := make(chan error, 1)
-	go func() { errc <- srv.Serve(ctx, ln) }()
+	if ln != nil {
+		srv := &socks.Server{Dialer: client, Logger: log}
+		go func() { errc <- srv.Serve(ctx, ln) }()
+		log.Info("SOCKS5 proxy ready", "addr", ln.Addr().String())
+	}
+
+	if len(f.cidrs) > 0 {
+		if err := capture.CheckLoop(f.cidrs, carrier.Endpoints); err != nil {
+			return err
+		}
+		c, err := capture.Start(ctx, f.cidrs, client, log)
+		if err != nil {
+			return fmt.Errorf("utun capture: %w", err)
+		}
+		// Closed before the tunnel (deferred above), so routes go first.
+		defer c.Close()
+	}
 
 	select {
 	case <-ctx.Done():

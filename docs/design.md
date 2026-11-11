@@ -63,6 +63,26 @@ The exec carrier reaches about 80% of raw port-forward downstream and about 75% 
 multiplexer, an extra in-cluster TCP hop and the SOCKS layer included. That is far above what a
 remote cluster's round-trip time will allow, so exec stays the carrier.
 
+### Transparent capture: utun vs SOCKS vs port-forward
+
+Clean MacBook (macOS 27.0.1, arm64, no VPN or endpoint security software), Docker Desktop with its
+Kubernetes, 500 MB, best of two runs, to the same HTTP service.
+
+| Path | Download | Upload |
+|---|---|---|
+| raw `kubectl port-forward` (transport limit) | 287 MB/s | 280 MB/s |
+| SOCKS → k8s exec → agent | 249 MB/s (87 %) | 215 MB/s (77 %) |
+| **utun + gVisor → k8s exec → agent** | **232 MB/s (81 %)** | **193 MB/s (69 %)** |
+| utun + gVisor → Docker exec → agent | 210 MB/s | 147 MB/s |
+
+Capture through utun costs about 6–10 % against SOCKS, and upload beats the ~170 MB/s that
+utun + tun2socks reached over port-forward in the capture measurements above. Upload through the
+Docker transport is lower than through Kubernetes (open question below).
+
+Verified in the same run: the helper exits after setup (no root process left), the utun and its
+routes disappear after Ctrl-C and after `kill -9` of subtun, an interrupted or failed sudo leaves
+nothing behind, and a refused destination fails in ~10 ms (TCP reset) instead of timing out.
+
 ### Agent: Go binary vs Python
 
 Same laptop, same `python:3.14-alpine` container, Docker exec, 500 MB, two runs each.
@@ -79,9 +99,20 @@ supported) reached ~92 MB/s up and ~263 MB/s down in a shorter 50 MB run.
 ## Architecture
 
 ```
-app ──► SOCKS5 (later: utun + gVisor) ──► tunnel client ══ carrier ══► agent ──► destination
-         on the laptop                     smux streams    exec stdio   in the target
+app ──► utun + gVisor  ──┐
+        (routed CIDRs)   ├─► tunnel client ══ carrier ══► agent ──► destination
+app ──► SOCKS5 proxy  ───┘   smux streams    exec stdio   in the target
+        on the laptop
 ```
+
+- **Capture** (`internal/capture`, `internal/netstack`, `internal/tundev`). The root helper creates
+  a utun interface (MTU 9000, address 198.18.249.1) with routes for the given CIDRs and passes its
+  file descriptor to subtun. A gVisor stack on the utun runs in promiscuous mode with spoofing, so
+  it terminates TCP connections to any routed destination. Each connection is dialed through the
+  tunnel *before* the handshake with the local app completes: an unreachable destination gets a
+  TCP reset, as on a real network. TCP settings follow tun2socks (SACK, RACK, no Nagle delay).
+  SOCKS and capture call the same `DialContext` on the tunnel client; the agent can't tell them
+  apart. CIDRs that contain the API server or Docker daemon address are refused (routing loop).
 
 - **Agents.** Two implementations of the same protocol; `--agent auto` uses the first that can run.
   - *Binary:* a static Linux Go binary (`cmd/subtun-agent`, ~3.5 MB) embedded in subtun for amd64
@@ -111,6 +142,42 @@ app ──► SOCKS5 (later: utun + gVisor) ──► tunnel client ══ carri
 - **Lifecycle.** Closing subtun sends EOF on the agent's stdin and the agent exits. If the carrier
   drops (pod deleted, network lost), subtun notices within seconds and exits with an error.
 
+## Privileges
+
+subtun runs as the user. Creating a utun interface, adding routes and (later) writing resolver
+entries need root; packet handling never does. Root work is done by a small helper, `subtun helper`,
+that subtun starts through `sudo` (sudo asks for the password on the terminal).
+
+### How the helper is trusted
+
+- subtun creates a unix socket in a private directory (`~/Library/Caches/subtun/run`, mode 0700,
+  socket 0600) and starts `/usr/bin/sudo -- <subtun> helper --socket <path>`, passing a random
+  token on the helper's stdin.
+- The helper refuses to run unless it is root and started through sudo (`SUDO_UID`). It only
+  connects to a socket whose directory and file belong to that user and aren't accessible to
+  anyone else, then proves itself with the token.
+- It accepts three commands, in lock-step: `create_tun` (MTU and address validated), `add_route`
+  (IPv4, host bits zero, never the default route, loopback or multicast) and `done`. It runs
+  `/sbin/ifconfig` and `/sbin/route` with fixed argument lists, never a shell. The utun's file
+  descriptor goes back over the socket (SCM_RIGHTS).
+
+### Modes
+
+| | One-shot (default, implemented) | Session (planned, opt-in) |
+|---|---|---|
+| sudo prompts | one, at start | one, at start |
+| Root process after setup | none: the helper exits | the helper stays up for the session |
+| Changing CIDRs / DNS | restart subtun | at runtime, through subtun's local control API |
+| Cleanup | automatic: routes live on the utun, and macOS removes the utun and its routes when subtun exits, crashes or is killed | the helper undoes its changes when subtun disconnects, including resolver entries |
+| Split DNS (`/etc/resolver`) | entries written at start; removing them needs root again (planned: cleanup on next start, or a sudo at exit) | written and removed by the helper |
+| Risk | smallest: root exists only for the seconds of setup | a root process stays reachable (only by subtun, over the private socket) for the whole session |
+
+Both modes use the same helper and command loop; session mode just doesn't end it after setup. If
+subtun goes away before `done`, the helper removes the routes it added and closes the utun.
+
+How to use: one-shot is what happens when you pass CIDRs. Session mode will be a flag once the
+control API exists.
+
 ## Decisions
 
 - **Capture:** utun / TUN interface plus the gVisor network stack, with utun MTU 9000. Never pf.
@@ -121,8 +188,8 @@ app ──► SOCKS5 (later: utun + gVisor) ──► tunnel client ══ carri
 - **DNS:** macOS supplemental resolvers (`/etc/resolver/<domain>`, or one dynamic entry with a list
   of match domains) send only the selected domains to the tool. Optional regex matching applies
   inside the tool, to the queries that reach it.
-- **Privileges:** the tool runs as the user. It asks for sudo only for the steps that need root:
-  creating the interface, changing routes, writing resolver entries.
+- **Privileges:** the tool runs as the user; root only in the helper, one-shot by default, session
+  mode opt-in (see Privileges).
 - **Pure Go:** `CGO_ENABLED=0`, a single static binary per OS and architecture.
 
 ## Open questions
@@ -135,5 +202,8 @@ app ──► SOCKS5 (later: utun + gVisor) ──► tunnel client ══ carri
 - **Transport flow control on remote clusters:** several carriers in parallel to avoid head-of-line
   blocking, once measured against a real remote cluster.
 - **Coexistence** with other VPN or security software that owns its own utun interface or pf anchor.
-- **Root step on macOS:** pass the utun file descriptor from a short-lived root helper to the user
-  process, or keep a small root helper for the session's lifetime.
+- **Excluding addresses inside captured CIDRs** (sshuttle's `-x`): today a CIDR containing the API
+  server is refused instead.
+- **Docker transport upload** is ~25 % below Kubernetes on the same Mac (147 vs 193 MB/s through
+  utun). Candidate: one write per smux frame straight onto the hijacked Docker connection, where
+  the Kubernetes path batches through client-go.

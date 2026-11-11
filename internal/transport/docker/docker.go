@@ -51,7 +51,12 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 		return nil, fmt.Errorf("container %s is not running", name)
 	}
 	d := &dockerExec{cli: cli, id: c.ID, name: name}
-	return transport.Bootstrap(ctx, d, agents, opts, log.With("container", name))
+	carrier, err := transport.Bootstrap(ctx, d, agents, opts, log.With("container", name))
+	if err != nil {
+		return nil, err
+	}
+	carrier.Endpoints = transport.ResolveEndpoint(ctx, cli.DaemonHost())
+	return carrier, nil
 }
 
 func newClient(t Target) (*client.Client, error) {
