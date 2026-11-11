@@ -1,0 +1,21 @@
+# Test fixture. Only documentation ranges (RFC 5737), so results don't
+# depend on the networks of the machine running the tests.
+profiles:
+  dev:
+    target:
+      k8s:
+        context: kind-dev
+        namespace: tools
+        pod: debug
+    routes:
+      - 198.51.100.0/24
+      - 203.0.113.0/24
+      - 203.0.113.7
+    exclude:
+      - 203.0.113.128/25
+    socks: 127.0.0.1:1080
+  socks-only:
+    target:
+      docker:
+        container: app
+    socks: 127.0.0.1:1081
