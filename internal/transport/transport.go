@@ -56,14 +56,16 @@ func Bootstrap(ctx context.Context, ex Execer, agents []agentbin.Binary, opts Op
 		dir = "/tmp"
 	}
 
-	// One round trip for the architecture and for which agents are cached.
+	// One round trip: architecture, which agents are cached, whether dir is writable.
 	paths := make(map[string]string, len(agents))
-	probe := []string{"sh", "-c", `uname -m; for p do [ -x "$p" ] && echo "have $p"; done; exit 0`, "sh"}
+	probe := []string{"sh", "-c", probeScript, "sh", dir}
 	for _, a := range agents {
 		paths[a.Arch] = AgentPath(dir, a)
 		probe = append(probe, paths[a.Arch])
 	}
-	out, err := ex.Run(ctx, probe, nil)
+	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	out, err := ex.Run(pctx, probe, nil)
+	cancel()
 	if err != nil {
 		return nil, fmt.Errorf("probing %s: %w (the agent upload needs sh and uname in the target)", ex.Describe(), err)
 	}
@@ -82,22 +84,30 @@ func Bootstrap(ctx context.Context, ex Execer, agents []agentbin.Binary, opts Op
 		return nil, fmt.Errorf("%s is linux/%s but no agent for it is available (have: %s)", ex.Describe(), arch, archList(agents))
 	}
 	remote := paths[arch]
-	cached := false
+	cached, writable := false, false
 	for _, l := range lines[1:] {
-		if strings.TrimSpace(l) == "have "+remote {
+		switch strings.TrimSpace(l) {
+		case "have " + remote:
 			cached = true
+		case "writable":
+			writable = true
 		}
 	}
 
-	if cached {
+	switch {
+	case cached:
 		log.Debug("agent already in target", "path", remote)
-	} else {
+	case !writable:
+		return nil, fmt.Errorf("%s: %s is not writable (read-only root filesystem?); "+
+			"pass --agent-dir with a writable, executable path, such as an emptyDir mount", ex.Describe(), dir)
+	default:
 		start := time.Now()
-		upload := []string{"sh", "-c",
-			`set -e; umask 077; mkdir -p "$1"; cat > "$2.part.$$"; chmod 700 "$2.part.$$"; mv -f "$2.part.$$" "$2"`,
-			"sh", dir, remote}
-		if _, err := ex.Run(ctx, upload, bytes.NewReader(bin.Data)); err != nil {
-			return nil, fmt.Errorf("uploading agent to %s in %s: %w (needs a writable directory, see --agent-dir)", remote, ex.Describe(), err)
+		upload := []string{"sh", "-c", uploadScript, "sh", dir, remote}
+		uctx, cancel := context.WithTimeout(ctx, uploadTimeout)
+		_, err := ex.Run(uctx, upload, bytes.NewReader(bin.Data))
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("uploading agent to %s in %s: %w (see --agent-dir)", remote, ex.Describe(), err)
 		}
 		log.Info("agent uploaded", "path", remote, "bytes", len(bin.Data), "took", time.Since(start).Round(time.Millisecond))
 	}
@@ -112,6 +122,40 @@ func Bootstrap(ctx context.Context, ex Execer, agents []agentbin.Binary, opts Op
 		Desc:            fmt.Sprintf("%s, linux/%s", ex.Describe(), arch),
 	}, nil
 }
+
+const (
+	probeTimeout  = 30 * time.Second
+	uploadTimeout = 2 * time.Minute
+)
+
+// probeScript prints the architecture, "have <path>" for each cached agent
+// and "writable" if the agent dir can take a new one. Writability is tested
+// by creating a file (busybox's [ -w ] only checks mode bits and misses a
+// read-only mount), in a subshell because a failed redirect on a special
+// builtin exits a POSIX shell. Args: dir, paths...
+const probeScript = `d=$1; shift
+uname -m
+for p do [ -x "$p" ] && echo "have $p"; done
+mkdir -p "$d" 2>/dev/null
+t="$d/.subtun-probe.$$"
+if (: > "$t") 2>/dev/null; then rm -f "$t"; echo writable; fi
+exit 0`
+
+// uploadScript writes stdin to $2 atomically, then removes other agent
+// builds in the directory (a running agent keeps its open file, so that is
+// safe). On any failure it reads the rest of stdin before exiting: a
+// Kubernetes exec whose process exits with stdin still arriving never
+// completes (kubectl exec hangs the same way). Args: dir, path.
+const uploadScript = `umask 077
+mkdir -p "$1" 2>/dev/null
+t="$2.part.$$"
+if cat > "$t" && chmod 700 "$t" && mv -f "$t" "$2"; then
+  for f in "$1"/subtun-agent-*; do [ "$f" = "$2" ] || rm -f "$f"; done
+  exit 0
+fi
+cat > /dev/null
+rm -f "$t" 2>/dev/null
+exit 1`
 
 // AgentPath is where a given agent build is cached in the target.
 func AgentPath(dir string, b agentbin.Binary) string {

@@ -51,6 +51,11 @@ subtun connects with your kubeconfig or Docker context, uploads a small agent ov
 the target by checksum) and opens connections from inside the target. Hostnames resolve there too.
 No `kubectl port-forward`, no sshd, no second terminal.
 
+The target container needs Linux on amd64 or arm64, `sh` with the basic tools (`uname`, `cat`,
+`mkdir`, `chmod`, `mv`; busybox is enough) and a writable directory that allows exec: `/tmp` by
+default, or `--agent-dir` (for example an emptyDir) when the root filesystem is read-only. Images
+without a shell (distroless, scratch) are not supported yet.
+
 ## Planned
 
 - Capture through a TUN interface (utun on macOS, TUN on Linux, wintun on Windows) with the

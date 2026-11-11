@@ -8,7 +8,9 @@
 #   kubectl delete namespace subtun-dev
 #
 # `target` is where the agent runs: a plain image with nothing but a shell.
-# `web` (web.py) is a separate service reached through it.
+# `locked` is a hardened target (non-root, read-only root filesystem, no
+# capabilities): use it with `--agent-dir /work`, its emptyDir.
+# `web` (web.py) is a separate service reached through them.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -25,6 +27,32 @@ spec:
     - name: target
       image: alpine:3.20
       command: ["sleep", "infinity"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: locked
+  namespace: subtun-dev
+spec:
+  terminationGracePeriodSeconds: 1
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+  containers:
+    - name: locked
+      image: alpine:3.20
+      command: ["sleep", "infinity"]
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+      volumeMounts:
+        - name: work
+          mountPath: /work
+  volumes:
+    - name: work
+      emptyDir: {}
 ---
 apiVersion: apps/v1
 kind: Deployment
