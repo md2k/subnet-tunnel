@@ -1,0 +1,7 @@
+resources:
+  - k8s.yaml
+configMapGenerator:
+  - name: web
+    namespace: subtun-dev
+    files:
+      - web.py

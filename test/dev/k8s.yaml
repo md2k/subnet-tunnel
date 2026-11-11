@@ -1,0 +1,96 @@
+# Local test setup for `subtun k8s` (Docker Desktop, kind, ...). Applied with
+# kustomize so the web ConfigMap is generated from web.py:
+#
+#   kubectl apply -k test/dev
+#   kubectl -n subtun-dev wait --for=condition=Ready pod --all
+#   build/subtun k8s -n subtun-dev target --socks 127.0.0.1:1080
+#   curl --socks5-hostname 127.0.0.1:1080 http://web.subtun-dev.svc.cluster.local:8080/
+#   kubectl delete namespace subtun-dev
+#
+# `target` is where the agent runs: a plain image with nothing but a shell.
+# `locked` is a hardened target (non-root, read-only root filesystem, no
+# capabilities): use it with `--agent-dir /work`, its emptyDir.
+# `web` (web.py) is a separate service reached through them.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: subtun-dev
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: target
+  namespace: subtun-dev
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: target
+      image: alpine:3.20
+      command: ["sleep", "infinity"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: locked
+  namespace: subtun-dev
+spec:
+  terminationGracePeriodSeconds: 1
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+  containers:
+    - name: locked
+      image: alpine:3.20
+      command: ["sleep", "infinity"]
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+      volumeMounts:
+        - name: work
+          mountPath: /work
+  volumes:
+    - name: work
+      emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: subtun-dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: web
+          image: python:3.12-alpine
+          command: ["python", "-u", "/app/web.py"]
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            tcpSocket: {port: 8080}
+            periodSeconds: 1
+          volumeMounts:
+            - name: code
+              mountPath: /app
+      volumes:
+        - name: code
+          configMap: {name: web}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: subtun-dev
+spec:
+  selector: {app: web}
+  ports:
+    - port: 8080
+      targetPort: 8080

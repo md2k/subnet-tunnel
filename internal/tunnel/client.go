@@ -1,0 +1,143 @@
+// Package tunnel is the laptop end of the tunnel: it checks the agent's hello,
+// runs the multiplexer over the carrier and opens connections through it.
+package tunnel
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"time"
+
+	"github.com/xtaci/smux"
+
+	"github.com/md2k/subnet-tunnel/internal/proto"
+)
+
+// Options configures NewClient.
+type Options struct {
+	// ExpectSHA256, if set, must match the sha256 the agent reports for its
+	// own binary. It catches truncated uploads and stale agents.
+	ExpectSHA256 string
+	Logger       *slog.Logger
+}
+
+// Client opens connections through one agent session.
+type Client struct {
+	sess  *smux.Session
+	hello proto.Hello
+	log   *slog.Logger
+}
+
+// NewClient reads the agent hello from conn and starts the multiplexer.
+// ctx bounds the hello wait only; once NewClient returns, the session lives
+// until Close or until the carrier fails. conn is closed if NewClient fails.
+func NewClient(ctx context.Context, conn io.ReadWriteCloser, opts Options) (*Client, error) {
+	if opts.Logger == nil {
+		opts.Logger = slog.New(slog.DiscardHandler)
+	}
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	hello, err := proto.ReadHello(conn)
+	if !stop() {
+		_ = conn.Close()
+		return nil, fmt.Errorf("waiting for agent hello: %w", ctx.Err())
+	}
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if hello.Proto != proto.Version {
+		_ = conn.Close()
+		return nil, fmt.Errorf("agent speaks protocol %d, this subtun speaks %d", hello.Proto, proto.Version)
+	}
+	if opts.ExpectSHA256 != "" && hello.SHA256 != "" && hello.SHA256 != opts.ExpectSHA256 {
+		_ = conn.Close()
+		return nil, fmt.Errorf("agent binary checksum mismatch: running %s, uploaded %s", short(hello.SHA256), short(opts.ExpectSHA256))
+	}
+	sess, err := smux.Client(conn, proto.MuxConfig())
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	c := &Client{sess: sess, hello: hello, log: opts.Logger}
+	go c.watch()
+	return c, nil
+}
+
+// watch ends the session as soon as the carrier fails. smux only records a
+// carrier read error and leaves closing to the keepalive timeout; blocking in
+// AcceptStream surfaces it immediately. The agent never opens streams.
+func (c *Client) watch() {
+	for {
+		st, err := c.sess.AcceptStream()
+		if err != nil {
+			_ = c.sess.Close()
+			return
+		}
+		c.log.Warn("agent opened an unexpected stream, closing it", "stream", st.ID())
+		_ = st.Close()
+	}
+}
+
+// Agent returns the hello the agent sent.
+func (c *Client) Agent() proto.Hello { return c.hello }
+
+// Done is closed when the session ends (carrier lost or Close called).
+func (c *Client) Done() <-chan struct{} { return c.sess.CloseChan() }
+
+// Close ends the session and every stream in it.
+func (c *Client) Close() error { return c.sess.Close() }
+
+// DialContext opens a TCP connection to addr from the agent's side. addr may
+// use a hostname; it is resolved by the agent. A failure reported by the
+// agent is a *proto.DialError.
+func (c *Client) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+	default:
+		return nil, fmt.Errorf("tunnel: unsupported network %q", network)
+	}
+	st, err := c.sess.OpenStream()
+	if err != nil {
+		return nil, fmt.Errorf("tunnel: open stream: %w", err)
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		_ = st.SetDeadline(dl)
+	}
+	stop := context.AfterFunc(ctx, func() { _ = st.SetDeadline(time.Now()) })
+
+	resp, err := handshake(st, addr)
+	if !stop() {
+		_ = st.Close()
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		_ = st.Close()
+		if errors.Is(err, smux.ErrTimeout) && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("tunnel: dial %s: %w", addr, err)
+	}
+	if resp.Status != proto.StatusOK {
+		_ = st.Close()
+		return nil, &proto.DialError{Addr: addr, Status: resp.Status, Msg: resp.Msg}
+	}
+	_ = st.SetDeadline(time.Time{})
+	return st, nil
+}
+
+func handshake(st *smux.Stream, addr string) (proto.Response, error) {
+	if err := proto.WriteRequest(st, proto.Request{Cmd: proto.CmdConnectTCP, Addr: addr}); err != nil {
+		return proto.Response{}, err
+	}
+	return proto.ReadResponse(st)
+}
+
+func short(sum string) string {
+	if len(sum) > 12 {
+		return sum[:12]
+	}
+	return sum
+}

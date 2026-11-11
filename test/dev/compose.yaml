@@ -1,0 +1,55 @@
+# Local test setup for `subtun docker`.
+#
+#   docker compose -f test/dev/compose.yaml up -d
+#   build/subtun docker subtun-dev-target-1 --socks 127.0.0.1:1080
+#   curl --socks5-hostname 127.0.0.1:1080 http://web:8080/
+#   docker compose -f test/dev/compose.yaml down
+#
+# `target` runs the agent; `web` is another container on the same network,
+# reachable by name or IP through the tunnel. Container IPs are not routable
+# from macOS, which is the point.
+#
+# Python agent targets, with `--profile python` (up and down):
+#   py36        oldest supported Python      --agent python
+#   py314       newest Python                --agent python
+#   hardened    read-only root, noexec /tmp and /dev/shm, non-root:
+#               the binary agent can't run, auto falls back to Python
+#   distroless  Python but no shell: auto goes straight to Python
+name: subtun-dev
+services:
+  target:
+    image: alpine:3.20
+    command: ["sleep", "infinity"]
+    init: true
+  web:
+    image: python:3.12-alpine
+    command: ["python", "-u", "/app/web.py"]
+    init: true
+    volumes:
+      - ./web.py:/app/web.py:ro
+
+  py36:
+    profiles: [python]
+    image: python:3.6-alpine
+    command: ["sleep", "infinity"]
+    init: true
+  py314:
+    profiles: [python]
+    image: python:3.14-alpine
+    command: ["sleep", "infinity"]
+    init: true
+  hardened:
+    profiles: [python]
+    image: python:3.12-alpine
+    command: ["sleep", "infinity"]
+    init: true
+    read_only: true
+    user: "1000:1000"
+    environment:
+      HOME: /home/app
+    tmpfs:
+      - /tmp:rw,noexec,nosuid
+  distroless:
+    profiles: [python]
+    image: gcr.io/distroless/python3-debian12
+    command: ["-c", "import time; time.sleep(10**9)"]
