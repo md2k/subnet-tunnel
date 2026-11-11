@@ -64,6 +64,46 @@ func TestPassDescriptor(t *testing.T) {
 	}
 }
 
+// A received descriptor must end up non-blocking (Go's poller), so closing
+// it interrupts a pending Read. Otherwise subtun's shutdown would hang on
+// the utun reader. The sender here uses Fd(), which flips the shared open
+// file to blocking mode: the worst case the receiver has to repair.
+func TestPassedDescriptorCloseInterruptsRead(t *testing.T) {
+	a, b := socketPair(t)
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	go func() {
+		_ = writeMsg(a, Response{OK: true}, int(r.Fd())) // Fd() sets blocking mode
+		_ = r.Close()
+	}()
+	var resp Response
+	files, err := readMsg(b, &resp, time.Now().Add(5*time.Second))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("got %d files, %v", len(files), err)
+	}
+	got := files[0]
+
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := got.Read(make([]byte, 16)) // nothing is ever written: blocks
+		readDone <- err
+	}()
+	time.Sleep(50 * time.Millisecond) // let the Read start
+	_ = got.Close()
+	select {
+	case err := <-readDone:
+		if err == nil {
+			t.Fatal("Read returned data from an empty pipe")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not interrupt Read: the passed descriptor is blocking")
+	}
+}
+
 func TestMessageWithoutDescriptor(t *testing.T) {
 	a, b := socketPair(t)
 	go func() { _ = writeMsg(a, Request{Op: OpAddRoute, CIDR: "10.244.0.0/16"}) }()
