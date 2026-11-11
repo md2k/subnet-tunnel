@@ -43,6 +43,9 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/transport/k8s`, `.../docker` | exec into a pod / container |
 | `internal/socks` | SOCKS5 frontend |
 | `internal/capture` | utun capture setup: helper → utun + routes → netstack |
+| `internal/routes` | route planning: excludes by subtraction, cleanup, safety checks |
+| `internal/config` | YAML config profiles |
+| `internal/netinfo` | local interface networks and default gateway (read-only) |
 | `internal/netstack` | gVisor stack on a packet device; dials each captured connection through the tunnel |
 | `internal/tundev` | utun as a netstack device (macOS) |
 | `internal/privhelper` | the root helper (`subtun helper`) and subtun's side of it |

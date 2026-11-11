@@ -72,6 +72,25 @@ Two agents speak the same protocol; `--agent auto` (the default) picks the first
 Both reach about the same speed in our tests. Images with neither a shell nor Python (distroless
 static, scratch) are not supported yet.
 
+**Excludes and profiles.** `-x/--exclude` keeps addresses out of the tunnel; the most specific rule
+wins, like sshuttle. `--dry-run` prints the routes subtun would install. Settings can live in named
+profiles in `~/.config/subtun/config.yaml`:
+
+```yaml
+profiles:
+  dev-cluster:
+    target: {k8s: {context: dev, namespace: tools, pod: debug}}
+    routes: [10.0.0.0/8, 172.16.0.0/12]
+    exclude: [10.1.0.0/16]
+    socks: 127.0.0.1:1080
+```
+
+```sh
+build/subtun up dev-cluster            # flags still override, extra CIDRs and -x are added
+```
+
+See [Configuration](docs/config.md).
+
 ## Planned
 
 - Split DNS: only the domains you list resolve through the tunnel.
@@ -81,6 +100,7 @@ static, scratch) are not supported yet.
 
 ## Documentation
 
+- [Configuration](docs/config.md): profiles, routes and excludes, safety checks.
 - [Design](docs/design.md): measurements, architecture and open questions.
 - [Development](docs/development.md): tests, code layout and the local test setup.
 

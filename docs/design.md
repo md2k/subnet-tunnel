@@ -112,7 +112,14 @@ app ──► SOCKS5 proxy  ───┘   smux streams    exec stdio   in the t
   tunnel *before* the handshake with the local app completes: an unreachable destination gets a
   TCP reset, as on a real network. TCP settings follow tun2socks (SACK, RACK, no Nagle delay).
   SOCKS and capture call the same `DialContext` on the tunnel client; the agent can't tell them
-  apart. CIDRs that contain the API server or Docker daemon address are refused (routing loop).
+  apart.
+- **Routes** (`internal/routes`). Routes and excludes combine like sshuttle's: for any address the
+  most specific rule decides. Excludes are carved out of the routes rather than installed via the
+  normal gateway, so every route stays on the utun and disappears with it. Redundant rules are
+  dropped and reported, siblings merged. Before connecting, routes covering subtun's utun address
+  or the default gateway are refused and overlaps with local interface networks are reported. At
+  connect time the API server or Docker daemon address is excluded automatically. Details:
+  [Configuration](config.md).
 
 - **Agents.** Two implementations of the same protocol; `--agent auto` uses the first that can run.
   - *Binary:* a static Linux Go binary (`cmd/subtun-agent`, ~3.5 MB) embedded in subtun for amd64
@@ -202,8 +209,6 @@ control API exists.
 - **Transport flow control on remote clusters:** several carriers in parallel to avoid head-of-line
   blocking, once measured against a real remote cluster.
 - **Coexistence** with other VPN or security software that owns its own utun interface or pf anchor.
-- **Excluding addresses inside captured CIDRs** (sshuttle's `-x`): today a CIDR containing the API
-  server is refused instead.
 - **Docker transport upload** is ~25 % below Kubernetes on the same Mac (147 vs 193 MB/s through
   utun). Candidate: one write per smux frame straight onto the hijacked Docker connection, where
   the Kubernetes path batches through client-go.
