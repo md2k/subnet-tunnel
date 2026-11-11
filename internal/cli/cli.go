@@ -66,19 +66,23 @@ func newVersionCmd() *cobra.Command {
 // commonOpts are the flags every target command shares.
 type commonOpts struct {
 	socks     string
+	agent     string
 	agentFile string
 	agentDir  string
 }
 
 func (o *commonOpts) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&o.socks, "socks", "", "start a SOCKS5 proxy on this address (e.g. 127.0.0.1:1080)")
-	cmd.Flags().StringVar(&o.agentDir, "agent-dir", "/tmp", "writable, executable directory in the target for the agent")
+	cmd.Flags().StringVar(&o.agent, "agent", transport.AgentAuto,
+		"agent to run in the target: auto (binary if it can run, else Python), binary, or python (python3 3.6+, writes nothing)")
+	cmd.Flags().StringVar(&o.agentDir, "agent-dir", "",
+		"directory for the binary agent in the target (default: first usable of ~/.cache/subtun, /tmp/subtun-<uid>, /var/tmp/subtun-<uid>, /dev/shm/subtun-<uid>)")
 	cmd.Flags().StringVar(&o.agentFile, "agent-file", "", "upload this agent binary instead of the embedded one (development)")
 	_ = cmd.Flags().MarkHidden("agent-file")
 }
 
 func (o *commonOpts) transport(g *globalOpts) transport.Options {
-	opts := transport.Options{AgentDir: o.agentDir}
+	opts := transport.Options{Agent: o.agent, AgentDir: o.agentDir, Version: version.Version}
 	if g.verbose {
 		opts.AgentArgs = []string{"-v"}
 	}

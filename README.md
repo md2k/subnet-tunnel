@@ -47,14 +47,19 @@ build/subtun docker my-app --socks 127.0.0.1:1080
 curl --socks5-hostname 127.0.0.1:1080 http://my-svc.team-a.svc.cluster.local
 ```
 
-subtun connects with your kubeconfig or Docker context, uploads a small agent over exec (cached in
-the target by checksum) and opens connections from inside the target. Hostnames resolve there too.
-No `kubectl port-forward`, no sshd, no second terminal.
+subtun connects with your kubeconfig or Docker context, starts a small agent in the target over exec
+and opens connections from inside the target. Hostnames resolve there too. No `kubectl
+port-forward`, no sshd, no second terminal.
 
-The target container needs Linux on amd64 or arm64, `sh` with the basic tools (`uname`, `cat`,
-`mkdir`, `chmod`, `mv`; busybox is enough) and a writable directory that allows exec: `/tmp` by
-default, or `--agent-dir` (for example an emptyDir) when the root filesystem is read-only. Images
-without a shell (distroless, scratch) are not supported yet.
+Two agents speak the same protocol; `--agent auto` (the default) picks the first that can run:
+
+| `--agent` | Target needs | Writes to the target |
+|---|---|---|
+| `binary` | Linux amd64/arm64, `sh` with basic tools (busybox is enough), a writable directory that allows exec | one cached ~3.5 MB binary in a private directory: `~/.cache/subtun`, else `/tmp/subtun-<uid>`, `/var/tmp/subtun-<uid>`, `/dev/shm/subtun-<uid>`, or `--agent-dir` |
+| `python` | Python 3.6+ (no shell needed) | nothing: the source is sent over exec and run from memory, like sshuttle |
+
+Both reach about the same speed in our tests. Images with neither a shell nor Python (distroless
+static, scratch) are not supported yet.
 
 ## Planned
 

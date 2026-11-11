@@ -23,6 +23,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/klog/v2"
 
 	"github.com/md2k/subnet-tunnel/internal/agentbin"
 	"github.com/md2k/subnet-tunnel/internal/transport"
@@ -42,6 +43,9 @@ const defaultContainerAnnotation = "kubectl.kubernetes.io/default-container"
 // Connect starts the agent in the target pod and returns its stdio.
 // Cancelling ctx tears the carrier down.
 func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts transport.Options, log *slog.Logger) (*transport.Carrier, error) {
+	// client-go reports stream teardown noise through klog; keep it in our
+	// log, at debug level.
+	klog.SetSlogLogger(slog.New(debugOnly{log.Handler()}).With("src", "client-go"))
 	k, err := newKube(ctx, t)
 	if err != nil {
 		return nil, err
@@ -167,12 +171,14 @@ func (k *kube) Run(ctx context.Context, cmd []string, stdin io.Reader) (string, 
 
 // Stream implements transport.Execer. The exec runs in the background;
 // failures to start it surface as read errors on the returned connection.
+// It is detached from ctx: only Close ends it, after giving the agent a
+// clean EOF, so Ctrl-C doesn't tear the stream down mid-flight.
 func (k *kube) Stream(ctx context.Context, cmd []string, stderr io.Writer) (io.ReadWriteCloser, error) {
 	ex, err := k.executor(cmd, true)
 	if err != nil {
 		return nil, err
 	}
-	sctx, cancel := context.WithCancel(ctx)
+	sctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	c := &execConn{stdin: inW, stdout: outR, cancel: cancel, done: make(chan struct{})}
@@ -187,6 +193,21 @@ func (k *kube) Stream(ctx context.Context, cmd []string, stderr io.Writer) (io.R
 	}()
 	return c, nil
 }
+
+// debugOnly logs every record at debug level.
+type debugOnly struct{ slog.Handler }
+
+func (d debugOnly) Enabled(ctx context.Context, _ slog.Level) bool {
+	return d.Handler.Enabled(ctx, slog.LevelDebug)
+}
+
+func (d debugOnly) Handle(ctx context.Context, r slog.Record) error {
+	r.Level = slog.LevelDebug
+	return d.Handler.Handle(ctx, r)
+}
+
+func (d debugOnly) WithAttrs(a []slog.Attr) slog.Handler { return debugOnly{d.Handler.WithAttrs(a)} }
+func (d debugOnly) WithGroup(n string) slog.Handler      { return debugOnly{d.Handler.WithGroup(n)} }
 
 type execConn struct {
 	stdin  *io.PipeWriter

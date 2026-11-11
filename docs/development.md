@@ -9,7 +9,11 @@ Make targets are listed in the [README](../README.md#build).
 without them, but then subtun has no agent to upload; pass `--agent-file` (hidden flag) with a
 Linux build of `cmd/subtun-agent` instead.
 
-Unit tests use in-memory connections and stub dialers. They open no sockets.
+Unit tests use in-memory connections and stub dialers. They open no network sockets. The Python
+agent tests in `internal/agentpy` run the real `agent.py` with the local `python3` over pipes, with
+dialing replaced by in-process socket pairs (`testdata/fakenet.py`), against the Go tunnel client;
+they skip when there is no Python 3.6+. Older interpreters are covered by the `py36` compose target
+below.
 
 ## Releases
 
@@ -30,10 +34,12 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 |---|---|
 | `cmd/subtun` | the CLI |
 | `cmd/subtun-agent` | the remote agent (Linux, static) |
+| `internal/agentbin` | embedded Linux agent binaries |
+| `internal/agentpy` | the Python agent (`agent.py`) and its loader |
 | `internal/proto` | hello line, per-stream request/response, smux settings |
 | `internal/agent` | agent side: serve smux on stdio, dial on request |
 | `internal/tunnel` | laptop side: check the hello, open streams through the agent |
-| `internal/transport` | get the agent running in a target (probe, upload, start) |
+| `internal/transport` | get an agent running in a target (probe, choose binary or Python, start) |
 | `internal/transport/k8s`, `.../docker` | exec into a pod / container |
 | `internal/socks` | SOCKS5 frontend |
 | `internal/relay` | bidirectional copy with half-close |
@@ -61,6 +67,17 @@ docker compose -f test/dev/compose.yaml up -d
 build/subtun docker subtun-dev-target-1 --socks 127.0.0.1:1080
 curl --socks5-hostname 127.0.0.1:1080 http://web:8080/
 docker compose -f test/dev/compose.yaml down
+```
+
+Agent selection: the Kubernetes `locked` pod (non-root, read-only root, `HOME=/`) gets the binary
+agent in `/dev/shm/subtun-65534`. The compose `python` profile adds Python targets:
+
+```sh
+docker compose -f test/dev/compose.yaml --profile python up -d
+build/subtun docker subtun-dev-hardened-1 --socks 127.0.0.1:1080      # auto -> Python (no exec-able dir)
+build/subtun docker subtun-dev-distroless-1 --socks 127.0.0.1:1080    # auto -> Python (no shell)
+build/subtun docker subtun-dev-py36-1 --agent python --socks 127.0.0.1:1080
+docker compose -f test/dev/compose.yaml --profile python down
 ```
 
 If the Kubernetes node can't pull images (for example behind a TLS-inspecting proxy), pull them
