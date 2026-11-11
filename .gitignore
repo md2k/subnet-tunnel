@@ -1,6 +1,7 @@
 # build output
 /bin/
 /dist/
+/internal/agentbin/dist/subtun-agent-*
 *.test
 *.out
 coverage.*
