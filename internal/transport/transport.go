@@ -24,6 +24,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/netip"
+	"net/url"
 	"path"
 	"strings"
 	"sync"
@@ -51,6 +54,40 @@ type Carrier struct {
 	io.ReadWriteCloser
 	SHA256 string // checksum the agent must report in its hello
 	Desc   string // target and agent description
+	// Endpoints are the addresses the carrier itself connects to (the API
+	// server, a remote Docker daemon). Routing them into the tunnel would
+	// cut the tunnel's own connection.
+	Endpoints []netip.Addr
+}
+
+// ResolveEndpoint returns the IP addresses of a URL or host[:port]; nothing
+// for unix sockets or names that don't resolve.
+func ResolveEndpoint(ctx context.Context, raw string) []netip.Addr {
+	host := raw
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		if u.Scheme == "unix" || u.Scheme == "npipe" {
+			return nil
+		}
+		host = u.Hostname()
+	} else if h, _, err := net.SplitHostPort(raw); err == nil {
+		host = h
+	}
+	if host == "" {
+		return nil
+	}
+	if a, err := netip.ParseAddr(host); err == nil {
+		return []netip.Addr{a.Unmap()}
+	}
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupNetIP(rctx, "ip", host)
+	if err != nil {
+		return nil
+	}
+	for i := range addrs {
+		addrs[i] = addrs[i].Unmap()
+	}
+	return addrs
 }
 
 // Agent kinds for Options.Agent.
@@ -371,9 +408,10 @@ func archList(agents []agentbin.Binary) string {
 
 // LineLog relays the agent's stderr into our log, one record per line.
 type LineLog struct {
-	Log *slog.Logger
-	mu  sync.Mutex
-	buf []byte
+	Log    *slog.Logger
+	Prefix string // default "agent: "
+	mu     sync.Mutex
+	buf    []byte
 }
 
 func (l *LineLog) Write(p []byte) (int, error) {
@@ -400,14 +438,18 @@ func (l *LineLog) emit(line string) {
 	if line == "" {
 		return
 	}
+	p := l.Prefix
+	if p == "" {
+		p = "agent: "
+	}
 	switch {
 	case strings.Contains(line, "level=ERROR"):
-		l.Log.Error("agent: " + line)
+		l.Log.Error(p + line)
 	case strings.Contains(line, "level=WARN"):
-		l.Log.Warn("agent: " + line)
+		l.Log.Warn(p + line)
 	case strings.Contains(line, "level=DEBUG"):
-		l.Log.Debug("agent: " + line)
+		l.Log.Debug(p + line)
 	default:
-		l.Log.Info("agent: " + line)
+		l.Log.Info(p + line)
 	}
 }

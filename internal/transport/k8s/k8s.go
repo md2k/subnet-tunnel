@@ -50,7 +50,12 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	if err != nil {
 		return nil, err
 	}
-	return transport.Bootstrap(ctx, k, agents, opts, log.With("pod", k.ns+"/"+k.pod, "container", k.container))
+	c, err := transport.Bootstrap(ctx, k, agents, opts, log.With("pod", k.ns+"/"+k.pod, "container", k.container))
+	if err != nil {
+		return nil, err
+	}
+	c.Endpoints = transport.ResolveEndpoint(ctx, k.cfg.Host)
+	return c, nil
 }
 
 type kube struct {

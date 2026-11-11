@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/md2k/subnet-tunnel/internal/agentbin"
 	"github.com/md2k/subnet-tunnel/internal/agentpy"
@@ -30,7 +31,8 @@ type fakeTarget struct {
 	mu       sync.Mutex
 	uploaded map[string][]byte
 	started  []string
-	sent     bytes.Buffer // what was written to the started agent
+	sent     bytes.Buffer  // what was written to the started agent
+	readDone chan struct{} // closed when the reader of sent has stopped
 }
 
 func (f *fakeTarget) Describe() string { return "fake" }
@@ -81,7 +83,9 @@ func (f *fakeTarget) Stream(_ context.Context, cmd []string, _ io.Writer) (io.Re
 	f.started = cmd
 	f.mu.Unlock()
 	local, remote := testutil.Pair()
+	f.readDone = make(chan struct{})
 	go func() {
+		defer close(f.readDone)
 		buf := make([]byte, 32<<10)
 		for {
 			n, err := remote.Read(buf)
@@ -153,6 +157,11 @@ func TestAutoFallsBackToPython(t *testing.T) {
 				t.Fatalf("started %q", f.started)
 			}
 			_ = c.Close()
+			select { // the reader records bytes after the write returns
+			case <-f.readDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("fake agent reader did not stop")
+			}
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			if !bytes.Equal(f.sent.Bytes(), src) {

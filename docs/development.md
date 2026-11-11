@@ -42,8 +42,16 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/transport` | get an agent running in a target (probe, choose binary or Python, start) |
 | `internal/transport/k8s`, `.../docker` | exec into a pod / container |
 | `internal/socks` | SOCKS5 frontend |
+| `internal/capture` | utun capture setup: helper → utun + routes → netstack |
+| `internal/netstack` | gVisor stack on a packet device; dials each captured connection through the tunnel |
+| `internal/tundev` | utun as a netstack device (macOS) |
+| `internal/privhelper` | the root helper (`subtun helper`) and subtun's side of it |
 | `internal/relay` | bidirectional copy with half-close |
 | `test/dev` | local test setup for both targets |
+
+The netstack tests drive the capture stack from a second gVisor stack over an in-memory wire. The
+helper tests cover validation and descriptor passing over an in-process socket pair. The parts that
+need root (creating the utun, routes) are tested by hand, below.
 
 ## Local test setup
 
@@ -91,3 +99,19 @@ curl --socks5-hostname 127.0.0.1:1080 -o /dev/null -w '%{speed_download}\n' http
 dd if=/dev/zero of=build/bench.dat bs=1048576 count=500
 curl --socks5-hostname 127.0.0.1:1080 -o /dev/null -T build/bench.dat -w '%{speed_upload}\n' http://web:8080/up
 ```
+
+### utun capture (needs sudo, run by hand)
+
+Docker Desktop's pod and service IPs aren't reachable from macOS, which makes them a good test.
+Use single IPs or narrow ranges: wide 10.x ranges can overlap corporate networks your VPN routes.
+
+```sh
+WEB_POD=$(kubectl -n subtun-dev get pod -l app=web -o jsonpath='{.items[0].status.podIP}')
+WEB_SVC=$(kubectl -n subtun-dev get svc web -o jsonpath='{.spec.clusterIP}')
+build/subtun k8s -n subtun-dev target $WEB_POD $WEB_SVC        # sudo asks once
+curl http://$WEB_SVC:8080/                                     # in another terminal
+netstat -rn -f inet | grep utun                                # routes on the utun
+```
+
+After Ctrl-C, and also after `kill -9` of subtun, `ifconfig | grep utun` and
+`netstat -rn -f inet | grep utun` must no longer show subtun's interface or routes.

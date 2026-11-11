@@ -8,8 +8,8 @@ Inspired by [sshuttle](https://github.com/sshuttle/sshuttle). Built because on m
 pf-based capture caps upload at a few MB/s, while a utun interface with a userspace TCP/IP stack
 reached ~170 MB/s end to end in the same test (see [docs/design.md](docs/design.md)).
 
-> **Status:** early development. Kubernetes and Docker targets work through a local SOCKS5 proxy.
-> Transparent capture (utun + gVisor, routes, split DNS) is next.
+> **Status:** early development. Kubernetes and Docker targets, transparent capture of CIDRs on
+> macOS (utun + gVisor) and a SOCKS5 proxy. Split DNS is next.
 
 ## Build
 
@@ -38,18 +38,29 @@ dry run.
 ## Use
 
 ```sh
-# Kubernetes: any running pod whose container has sh, uname and cat
+# Capture CIDRs (or single IPs): every program on this machine reaches them directly (macOS)
+build/subtun k8s -n team-a debug-pod 10.96.0.0/12 10.244.0.0/16
+curl http://10.96.12.34:8080/
+
+# SOCKS5 proxy, for example for a browser; hostnames resolve inside the target
 build/subtun k8s -n team-a debug-pod --socks 127.0.0.1:1080
-
-# Docker: same for a container
-build/subtun docker my-app --socks 127.0.0.1:1080
-
 curl --socks5-hostname 127.0.0.1:1080 http://my-svc.team-a.svc.cluster.local
+
+# Both at once, and the same for a Docker container
+build/subtun docker my-app 172.20.0.0/16 --socks 127.0.0.1:1080
 ```
 
 subtun connects with your kubeconfig or Docker context, starts a small agent in the target over exec
-and opens connections from inside the target. Hostnames resolve there too. No `kubectl
-port-forward`, no sshd, no second terminal.
+and opens connections from inside the target. No `kubectl port-forward`, no sshd, no second
+terminal.
+
+**Capture and root.** subtun runs as your user. With CIDRs, sudo asks for your password once: a
+short-lived helper creates a utun interface (MTU 9000), adds routes for your CIDRs, hands the
+interface to subtun and exits. Traffic is only ever handled by the subtun process running as you.
+The routes live and die with the interface: when subtun exits, crashes or is killed, macOS removes
+both, so nothing is left behind. To change CIDRs, restart subtun. See
+[Privileges](docs/design.md#privileges) for how this works and the planned session mode for
+changes without a restart.
 
 Two agents speak the same protocol; `--agent auto` (the default) picks the first that can run:
 
@@ -63,13 +74,10 @@ static, scratch) are not supported yet.
 
 ## Planned
 
-- Capture through a TUN interface (utun on macOS, TUN on Linux, wintun on Windows) with the
-  [gVisor](https://gvisor.dev) userspace network stack. No pf or iptables redirects.
-- Split routing: only the CIDRs you list go through the tunnel.
 - Split DNS: only the domains you list resolve through the tunnel.
 - SSH transport to any host.
-- Runs as your user. sudo is requested only for the steps that need root (interface, routes,
-  resolver entries).
+- Capture on Linux (TUN) and Windows (wintun); IPv6 and UDP.
+- Session mode for the root helper: change CIDRs and DNS at runtime without a restart (opt-in).
 
 ## Documentation
 
