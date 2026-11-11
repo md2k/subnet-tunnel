@@ -63,6 +63,26 @@ The exec carrier reaches about 80% of raw port-forward downstream and about 75% 
 multiplexer, an extra in-cluster TCP hop and the SOCKS layer included. That is far above what a
 remote cluster's round-trip time will allow, so exec stays the carrier.
 
+### Transparent capture: utun vs SOCKS vs port-forward
+
+Clean MacBook (macOS 27.0.1, arm64, no VPN or endpoint security software), Docker Desktop with its
+Kubernetes, 500 MB, best of two runs, to the same HTTP service.
+
+| Path | Download | Upload |
+|---|---|---|
+| raw `kubectl port-forward` (transport limit) | 287 MB/s | 280 MB/s |
+| SOCKS → k8s exec → agent | 249 MB/s (87 %) | 215 MB/s (77 %) |
+| **utun + gVisor → k8s exec → agent** | **232 MB/s (81 %)** | **193 MB/s (69 %)** |
+| utun + gVisor → Docker exec → agent | 210 MB/s | 147 MB/s |
+
+Capture through utun costs about 6–10 % against SOCKS, and upload beats the ~170 MB/s that
+utun + tun2socks reached over port-forward in the capture measurements above. Upload through the
+Docker transport is lower than through Kubernetes (open question below).
+
+Verified in the same run: the helper exits after setup (no root process left), the utun and its
+routes disappear after Ctrl-C and after `kill -9` of subtun, an interrupted or failed sudo leaves
+nothing behind, and a refused destination fails in ~10 ms (TCP reset) instead of timing out.
+
 ### Agent: Go binary vs Python
 
 Same laptop, same `python:3.14-alpine` container, Docker exec, 500 MB, two runs each.
@@ -184,3 +204,6 @@ control API exists.
 - **Coexistence** with other VPN or security software that owns its own utun interface or pf anchor.
 - **Excluding addresses inside captured CIDRs** (sshuttle's `-x`): today a CIDR containing the API
   server is refused instead.
+- **Docker transport upload** is ~25 % below Kubernetes on the same Mac (147 vs 193 MB/s through
+  utun). Candidate: one write per smux frame straight onto the hijacked Docker connection, where
+  the Kubernetes path batches through client-go.

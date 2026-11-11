@@ -115,3 +115,9 @@ netstat -rn -f inet | grep utun                                # routes on the u
 
 After Ctrl-C, and also after `kill -9` of subtun, `ifconfig | grep utun` and
 `netstat -rn -f inet | grep utun` must no longer show subtun's interface or routes.
+
+Tips:
+- sudo caches your password (or Touch ID) for a few minutes. To test the prompt itself (Ctrl-C at
+  the prompt, wrong password), start with `sudo -k && build/subtun …`.
+- To keep a log, use `build/subtun … 2>&1 | tee -i build/run.log`: without `-i`, Ctrl-C also kills
+  `tee` and subtun's last lines (shutdown) are lost.
