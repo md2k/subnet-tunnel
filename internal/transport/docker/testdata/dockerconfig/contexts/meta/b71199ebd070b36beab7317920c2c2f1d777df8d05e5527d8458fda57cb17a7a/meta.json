@@ -1,0 +1,1 @@
+{"Name":"remote","Metadata":{},"Endpoints":{"docker":{"Host":"tcp://10.0.0.5:2375","SkipTLSVerify":false}}}

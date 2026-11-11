@@ -1,0 +1,68 @@
+# Local test setup for `subtun k8s` (Docker Desktop, kind, ...). Applied with
+# kustomize so the web ConfigMap is generated from web.py:
+#
+#   kubectl apply -k test/dev
+#   kubectl -n subtun-dev wait --for=condition=Ready pod --all
+#   bin/subtun k8s -n subtun-dev target --socks 127.0.0.1:1080
+#   curl --socks5-hostname 127.0.0.1:1080 http://web.subtun-dev.svc.cluster.local:8080/
+#   kubectl delete namespace subtun-dev
+#
+# `target` is where the agent runs: a plain image with nothing but a shell.
+# `web` (web.py) is a separate service reached through it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: subtun-dev
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: target
+  namespace: subtun-dev
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: target
+      image: alpine:3.20
+      command: ["sleep", "infinity"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: subtun-dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: web
+          image: python:3.12-alpine
+          command: ["python", "-u", "/app/web.py"]
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            tcpSocket: {port: 8080}
+            periodSeconds: 1
+          volumeMounts:
+            - name: code
+              mountPath: /app
+      volumes:
+        - name: code
+          configMap: {name: web}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: subtun-dev
+spec:
+  selector: {app: web}
+  ports:
+    - port: 8080
+      targetPort: 8080

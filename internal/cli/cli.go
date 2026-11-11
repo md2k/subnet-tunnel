@@ -17,6 +17,8 @@ import (
 
 	"github.com/md2k/subnet-tunnel/internal/agentbin"
 	"github.com/md2k/subnet-tunnel/internal/socks"
+	"github.com/md2k/subnet-tunnel/internal/transport"
+	"github.com/md2k/subnet-tunnel/internal/transport/docker"
 	"github.com/md2k/subnet-tunnel/internal/transport/k8s"
 	"github.com/md2k/subnet-tunnel/internal/tunnel"
 	"github.com/md2k/subnet-tunnel/internal/version"
@@ -46,7 +48,7 @@ func newRoot() *cobra.Command {
 		SilenceErrors: true,
 	}
 	root.PersistentFlags().BoolVarP(&g.verbose, "verbose", "v", false, "debug logging")
-	root.AddCommand(newK8sCmd(g), newVersionCmd())
+	root.AddCommand(newK8sCmd(g), newDockerCmd(g), newVersionCmd())
 	return root
 }
 
@@ -61,20 +63,31 @@ func newVersionCmd() *cobra.Command {
 	}
 }
 
-type frontendOpts struct {
+// commonOpts are the flags every target command shares.
+type commonOpts struct {
 	socks     string
 	agentFile string
+	agentDir  string
 }
 
-func (f *frontendOpts) register(cmd *cobra.Command) {
-	cmd.Flags().StringVar(&f.socks, "socks", "", "start a SOCKS5 proxy on this address (e.g. 127.0.0.1:1080)")
-	cmd.Flags().StringVar(&f.agentFile, "agent-file", "", "upload this agent binary instead of the embedded one (development)")
+func (o *commonOpts) register(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&o.socks, "socks", "", "start a SOCKS5 proxy on this address (e.g. 127.0.0.1:1080)")
+	cmd.Flags().StringVar(&o.agentDir, "agent-dir", "/tmp", "writable, executable directory in the target for the agent")
+	cmd.Flags().StringVar(&o.agentFile, "agent-file", "", "upload this agent binary instead of the embedded one (development)")
 	_ = cmd.Flags().MarkHidden("agent-file")
+}
+
+func (o *commonOpts) transport(g *globalOpts) transport.Options {
+	opts := transport.Options{AgentDir: o.agentDir}
+	if g.verbose {
+		opts.AgentArgs = []string{"-v"}
+	}
+	return opts
 }
 
 func newK8sCmd(g *globalOpts) *cobra.Command {
 	var t k8s.Target
-	var f frontendOpts
+	var o commonOpts
 	cmd := &cobra.Command{
 		Use:   "k8s POD",
 		Short: "Tunnel through a Kubernetes pod, using the exec API",
@@ -86,11 +99,8 @@ from there. Nothing needs to be installed in the pod beyond sh, uname and cat.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			t.Pod = strings.TrimPrefix(args[0], "pod/")
-			if g.verbose {
-				t.AgentArgs = []string{"-v"}
-			}
-			return run(cmd.Context(), g, f, func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*k8s.Carrier, error) {
-				return k8s.Connect(ctx, t, agents, log)
+			return run(cmd.Context(), g, o, func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
+				return k8s.Connect(ctx, t, agents, o.transport(g), log)
 			})
 		},
 	}
@@ -98,14 +108,39 @@ from there. Nothing needs to be installed in the pod beyond sh, uname and cat.`,
 	cmd.Flags().StringVarP(&t.Container, "container", "c", "", "container (default: kubectl's default container)")
 	cmd.Flags().StringVar(&t.Context, "context", "", "kubeconfig context (default: current)")
 	cmd.Flags().StringVar(&t.Kubeconfig, "kubeconfig", "", "kubeconfig file (default: $KUBECONFIG or ~/.kube/config)")
-	cmd.Flags().StringVar(&t.AgentDir, "agent-dir", "/tmp", "writable, executable directory in the container for the agent")
-	f.register(cmd)
+	o.register(cmd)
 	return cmd
 }
 
-type connectFunc func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*k8s.Carrier, error)
+func newDockerCmd(g *globalOpts) *cobra.Command {
+	var t docker.Target
+	var o commonOpts
+	cmd := &cobra.Command{
+		Use:   "docker CONTAINER",
+		Short: "Tunnel through a Docker container, using the exec API",
+		Long: `Tunnel through a Docker container. subtun talks to the Docker daemon (found
+like the docker CLI does: --host, $DOCKER_HOST, then the current docker
+context), uploads its agent over exec and opens connections from there, so
+container IPs and names on its networks become reachable from this machine.`,
+		Example: `  subtun docker my-app --socks 127.0.0.1:1080
+  curl --socks5-hostname 127.0.0.1:1080 http://db:5432`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			t.Container = args[0]
+			return run(cmd.Context(), g, o, func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
+				return docker.Connect(ctx, t, agents, o.transport(g), log)
+			})
+		},
+	}
+	cmd.Flags().StringVarP(&t.Host, "host", "H", "", "Docker daemon address (default: $DOCKER_HOST, then the docker context)")
+	cmd.Flags().StringVar(&t.Context, "context", "", "docker context (default: $DOCKER_CONTEXT, then the current context)")
+	o.register(cmd)
+	return cmd
+}
 
-func run(ctx context.Context, g *globalOpts, f frontendOpts, connect connectFunc) error {
+type connectFunc func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error)
+
+func run(ctx context.Context, g *globalOpts, f commonOpts, connect connectFunc) error {
 	log := newLogger(g.verbose)
 	if f.socks == "" {
 		return errors.New("nothing to do: pass --socks ADDR (utun capture is not implemented yet)")
