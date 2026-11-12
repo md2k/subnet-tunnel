@@ -20,6 +20,7 @@ type fakePfctl struct {
 	stdin []string
 	lo0   string
 	rules string
+	ours  string // our anchor's current NAT rules
 	fail  string // fail calls starting with this
 }
 
@@ -45,6 +46,8 @@ func (f *fakePfctl) run(stdin string, args ...string) (string, error) {
 			return altq + f.lo0, nil
 		}
 		return altq + "lo0\n", nil
+	case "-a com.apple/subtun -s nat":
+		return altq + f.ours, nil
 	case "-s Anchors":
 		return altq + "  com.apple\n  com.example.vpn\n", nil
 	case "-E":
@@ -77,7 +80,7 @@ func TestPFApplyAndFlush(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"-s rules", "-s nat", "-s Interfaces -i lo0 -v", "-s Anchors",
+		"-s rules", "-s nat", "-a com.apple/subtun -s nat", "-s Interfaces -i lo0 -v", "-s Anchors",
 		"-a com.apple/subtun -f /dev/stdin", "-E",
 		"-a com.apple/subtun -f /dev/stdin",
 		"-a com.apple/subtun -F rules", "-a com.apple/subtun -F nat", "-a com.apple/subtun -F Tables",
@@ -109,6 +112,7 @@ func TestPFRefusesUnusableSetups(t *testing.T) {
 	cases := map[string]*fakePfctl{
 		"com.apple/* anchors": {rules: "anchor \"custom\" all\n"},
 		"skip lo0":            {lo0: "lo0 (skip)\n"},
+		"already has rules":   {ours: "rdr pass on lo0 inet proto udp from any to <subtun_dns> port = 53 -> 127.0.0.1 port 61000\n"},
 	}
 	for want, f := range cases {
 		err := (&PF{Run: f.run}).Apply(dnsRules())

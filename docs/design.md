@@ -293,7 +293,8 @@ dns:
   ```
 
   Every filter rule is `quick`, so other software's anchors can't override them (sshuttle#1253).
-  The driver refuses to run if the main ruleset doesn't evaluate `com.apple/*` or pf skips `lo0`
+  The driver refuses to run if its anchor already holds rules (another subtun, or leftovers from a
+  killed helper), if the main ruleset doesn't evaluate `com.apple/*` or if pf skips `lo0`
   (sshuttle replaces the main ruleset in that case), warns when other anchors exist, enables pf
   with a reference token (`pfctl -E`) and releases it (`-X`), so pf ends up as it was. It flushes
   only its anchor's rules, NAT rules and tables: `pfctl -a <anchor> -F all` would also clear pf's

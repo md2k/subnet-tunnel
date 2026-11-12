@@ -155,7 +155,8 @@ fallback queries leave from a port the rules let through, so they can't loop bac
 when the fallback is one of the captured servers.
 
 **Limits.**
-- One DNS-capturing subtun at a time (they would share the anchor).
+- One DNS-capturing subtun at a time: a second one refuses to start, since it would take over the
+  first one's rules.
 - If the fallback resolver is inside one of your routes, unmatched names fail: their UDP queries go
   into the utun, which carries TCP only so far. `--dry-run` warns; exclude the resolver's address or
   match every name with `.`.

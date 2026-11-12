@@ -86,9 +86,9 @@ func (p *PF) Flush() error {
 	return errors.Join(errs...)
 }
 
-// check makes sure the main ruleset evaluates com.apple/* anchors and that
-// pf doesn't skip lo0, where the redirect happens. It reports other
-// software's anchors, whose rules could interfere.
+// check makes sure the main ruleset evaluates com.apple/* anchors, that our
+// anchor is free and that pf doesn't skip lo0, where the redirect happens.
+// It reports other software's anchors, whose rules could interfere.
 func (p *PF) check() error {
 	rules, err := p.run("", "-s", "rules")
 	if err != nil {
@@ -100,6 +100,12 @@ func (p *PF) check() error {
 	}
 	if !strings.Contains(rules, `anchor "com.apple/*"`) || !strings.Contains(nat, `rdr-anchor "com.apple/*"`) {
 		return errors.New(`pf's main ruleset doesn't evaluate the com.apple/* anchors (see /etc/pf.conf); DNS capture can't add its rules`)
+	}
+	// Someone else's rules in our anchor: another subtun with DNS capture,
+	// or leftovers from a helper that was killed. Replacing them would
+	// silently break the other one.
+	if mine, err := p.run("", "-a", Anchor, "-s", "nat"); err == nil && strings.Contains(mine, "rdr ") {
+		return fmt.Errorf("pf anchor %s already has rules: another subtun with DNS capture is running, or one was killed without cleaning up; if none is running, remove them with: sudo pfctl -a %s -F nat && sudo pfctl -a %s -F rules", Anchor, Anchor, Anchor)
 	}
 	lo, err := p.run("", "-s", "Interfaces", "-i", "lo0", "-v")
 	if err != nil {
