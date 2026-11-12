@@ -91,3 +91,71 @@ func TestParseRejects(t *testing.T) {
 		}
 	}
 }
+
+const withDefaults = `
+defaults:
+  exclude: [192.168.1.0/24]
+  agent: python
+  killSwitch: {mode: on, dns: allow}
+  blockIPv6: true
+  dns: {domains: [company.com], fallback: 192.168.1.1}
+profiles:
+  plain:
+    target: {k8s: {pod: p}}
+    routes: [10.0.0.0/8]
+  strict:
+    target: {docker: {container: c}}
+    routes: [0.0.0.0/1, 128.0.0.0/1]
+    exclude: [10.1.0.0/16]
+    agent: binary
+    killSwitch: {mode: lockdown}
+    blockIPv6: auto
+    dns: {domains: [cluster.local]}
+  loose:
+    target: {k8s: {pod: p}}
+    routes: [10.0.0.0/8]
+    killSwitch: {mode: off}
+    blockIPv6: false
+`
+
+// Defaults fill in what a profile doesn't set; lists add up.
+func TestDefaults(t *testing.T) {
+	f, err := Parse([]byte(withDefaults), "defaults")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, _ := f.Profile("plain")
+	if plain.Agent != "python" || plain.KillSwitch.Mode != "on" || plain.KillSwitch.DNS != "allow" || plain.BlockIPv6 != "true" ||
+		strings.Join(plain.Exclude, ",") != "192.168.1.0/24" || strings.Join(plain.DNS.Domains, ",") != "company.com" || plain.DNS.Fallback != "192.168.1.1" {
+		t.Errorf("plain: %+v", plain)
+	}
+	strict, _ := f.Profile("strict")
+	if strict.Agent != "binary" || strict.KillSwitch.Mode != "lockdown" || strict.KillSwitch.DNS != "allow" || strict.BlockIPv6 != "auto" ||
+		strings.Join(strict.Exclude, ",") != "192.168.1.0/24,10.1.0.0/16" || strings.Join(strict.DNS.Domains, ",") != "company.com,cluster.local" {
+		t.Errorf("strict: %+v", strict)
+	}
+	// YAML reads bare off/false as booleans.
+	loose, _ := f.Profile("loose")
+	if loose.KillSwitch.Mode != "off" || loose.BlockIPv6 != "false" {
+		t.Errorf("loose: %+v", loose)
+	}
+}
+
+func TestDefaultsRejects(t *testing.T) {
+	cases := map[string]string{
+		"target in defaults": `{defaults: {target: {k8s: {pod: p}}}, profiles: {a: {target: {k8s: {pod: p}}, socks: x}}}`,
+		"bad default":        `{defaults: {agent: perl}, profiles: {a: {target: {k8s: {pod: p}}, socks: x}}}`,
+		"bad mode":           `{profiles: {a: {target: {k8s: {pod: p}}, socks: x, killSwitch: {mode: always}}}}`,
+		"bad ks dns":         `{profiles: {a: {target: {k8s: {pod: p}}, socks: x, killSwitch: {dns: maybe}}}}`,
+		"bad blockIPv6":      `{profiles: {a: {target: {k8s: {pod: p}}, socks: x, blockIPv6: sometimes}}}`,
+	}
+	for name, doc := range cases {
+		if _, err := Parse([]byte(doc), name); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// Routes from defaults count for "nothing to do".
+	if _, err := Parse([]byte(`{defaults: {routes: [10.0.0.0/8]}, profiles: {a: {target: {k8s: {pod: p}}}}}`), "routes"); err != nil {
+		t.Errorf("routes from defaults: %v", err)
+	}
+}
