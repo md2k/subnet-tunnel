@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -26,7 +27,11 @@ type fakeNet struct {
 	dialed   []string
 }
 
-func (f *fakeNet) DialContext(_ context.Context, _, addr string) (net.Conn, error) {
+// DialContext keys handlers by address, and by "udp/" + address for UDP.
+func (f *fakeNet) DialContext(_ context.Context, network, addr string) (net.Conn, error) {
+	if strings.HasPrefix(network, "udp") {
+		addr = "udp/" + addr
+	}
 	f.mu.Lock()
 	f.dialed = append(f.dialed, addr)
 	h, ok := f.handlers[addr]
@@ -51,7 +56,7 @@ func startSession(t *testing.T, fn *fakeNet, opts tunnel.Options, agentSum strin
 	clientEnd, agentEnd := testutil.Pair()
 	done := make(chan error, 1)
 	go func() {
-		done <- agent.Serve(ctx, agentEnd, agent.Config{Version: "test", SHA256: agentSum, Dialer: fn})
+		done <- agent.Serve(ctx, agentEnd, agent.Config{Version: "test", SHA256: agentSum, Dialer: fn, ResolvConf: "testdata/resolv.conf"})
 	}()
 	t.Cleanup(func() {
 		cancel()

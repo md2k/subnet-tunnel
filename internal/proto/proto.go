@@ -2,9 +2,10 @@
 //
 // The agent starts by writing one hello line on its stdout. After that the
 // carrier (exec stdio, SSH channel, ...) runs an smux session. Every smux
-// stream opened by subtun carries one Request, the agent answers with one
-// Response, and from then on the stream is a raw byte pipe to the connection
-// the agent opened.
+// stream opened by subtun carries one Request and the agent answers with one
+// Response. For CmdConnectTCP the stream then is a raw byte pipe to the
+// connection the agent opened; for CmdDNS it carries one query and one
+// answer.
 package proto
 
 import (
@@ -43,6 +44,21 @@ type Cmd byte
 // Commands.
 const (
 	CmdConnectTCP Cmd = 1
+	// CmdDNS sends one DNS query to a resolver in the target. Addr names the
+	// resolver; ResolverSystem means the target's own (its /etc/resolv.conf).
+	// After the request subtun writes the query, framed by WriteDNS; on
+	// StatusOK the agent writes the answer the same way and closes the stream.
+	CmdDNS Cmd = 2
+)
+
+// ResolverSystem as the Addr of a CmdDNS request: the target's own resolver.
+const ResolverSystem = "-"
+
+// DNS messages on a stream are framed like DNS over TCP: a uint16 length,
+// then the message.
+const (
+	MinDNSLen = 12 // the header
+	MaxDNSLen = 65535
 )
 
 // Status is the agent's answer to a Request.
@@ -231,6 +247,35 @@ func ReadResponse(r io.Reader) (Response, error) {
 		return Response{}, err
 	}
 	return Response{Status: Status(hdr[0]), Msg: string(msg)}, nil
+}
+
+// WriteDNS writes one framed DNS message.
+func WriteDNS(w io.Writer, msg []byte) error {
+	if len(msg) < MinDNSLen || len(msg) > MaxDNSLen {
+		return fmt.Errorf("DNS message of %d bytes", len(msg))
+	}
+	buf := make([]byte, 0, 2+len(msg))
+	buf = binary.BigEndian.AppendUint16(buf, uint16(len(msg)))
+	buf = append(buf, msg...)
+	_, err := w.Write(buf)
+	return err
+}
+
+// ReadDNS reads one framed DNS message.
+func ReadDNS(r io.Reader) ([]byte, error) {
+	var hdr [2]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return nil, err
+	}
+	n := int(binary.BigEndian.Uint16(hdr[:]))
+	if n < MinDNSLen {
+		return nil, fmt.Errorf("DNS message of %d bytes", n)
+	}
+	msg := make([]byte, n)
+	if _, err := io.ReadFull(r, msg); err != nil {
+		return nil, err
+	}
+	return msg, nil
 }
 
 // DialError is a failed Request as reported by the agent.
