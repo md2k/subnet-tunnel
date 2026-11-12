@@ -3,6 +3,7 @@
 package privhelper
 
 import (
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -120,5 +121,26 @@ func TestReadMsgRejectsGarbage(t *testing.T) {
 	var req Request
 	if _, err := readMsg(b, &req, time.Now().Add(5*time.Second)); err == nil {
 		t.Fatal("garbage accepted")
+	}
+}
+
+// An interrupted read (deadline, or the connection closed by our own side)
+// returns an error. The OS reports n = -1 alongside the error, which must
+// not be used as a length.
+func TestReadMsgInterrupted(t *testing.T) {
+	a, _ := socketPair(t)
+	var req Request
+	_, err := readMsg(a, &req, time.Now().Add(50*time.Millisecond))
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("deadline: got %v", err)
+	}
+
+	b, _ := socketPair(t)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		_ = b.Close()
+	}()
+	if _, err := readMsg(b, &req, time.Time{}); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("closed: got %v", err)
 	}
 }

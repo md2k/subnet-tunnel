@@ -1,7 +1,6 @@
 package privhelper
 
 import (
-	"net/netip"
 	"strings"
 	"testing"
 )
@@ -46,17 +45,5 @@ func TestValidateTunAddrAndMTU(t *testing.T) {
 	}
 	if ValidateMTU(9000) != nil || ValidateMTU(100) == nil || ValidateMTU(70000) == nil {
 		t.Error("MTU bounds")
-	}
-}
-
-func TestRouteArgs(t *testing.T) {
-	cases := map[string]string{
-		"10.244.0.0/16": "-n add -net 10.244.0.0/16 -interface utun7",
-		"10.96.0.10/32": "-n add -host 10.96.0.10 -interface utun7",
-	}
-	for cidr, want := range cases {
-		if got := strings.Join(routeArgs("add", netip.MustParsePrefix(cidr), "utun7"), " "); got != want {
-			t.Errorf("%s: got %q, want %q", cidr, got, want)
-		}
 	}
 }

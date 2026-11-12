@@ -49,12 +49,15 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/netstack` | gVisor stack on a packet device; dials each captured connection through the tunnel |
 | `internal/tundev` | utun as a netstack device (macOS) |
 | `internal/privhelper` | the root helper (`subtun helper`) and subtun's side of it |
+| `internal/platform` | OS driver interfaces used by the helper (`Tun`, `Routes`) |
+| `internal/platform/darwin`, `.../fake` | macOS drivers (utun, `/sbin/route`); recording fakes for tests |
 | `internal/relay` | bidirectional copy with half-close |
 | `test/dev` | local test setup for both targets |
 
 The netstack tests drive the capture stack from a second gVisor stack over an in-memory wire. The
-helper tests cover validation and descriptor passing over an in-process socket pair. The parts that
-need root (creating the utun, routes) are tested by hand, below.
+helper tests cover validation, descriptor passing and the helper's command loop (with recording fake
+drivers) over an in-process socket pair. The macOS drivers themselves need root (creating the utun,
+routes) and are tested by hand, below.
 
 ## Local test setup
 
