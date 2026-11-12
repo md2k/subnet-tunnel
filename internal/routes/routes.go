@@ -136,7 +136,9 @@ func walk(p netip.Prefix, routed bool, rules []rule, out *[]netip.Prefix) {
 }
 
 // merge joins sibling prefixes (two halves of one parent) until none are
-// left, e.g. two routed /25s become their /24. Input must not overlap.
+// left, e.g. two routed /25s become their /24. Input must not overlap. It
+// never produces 0.0.0.0/0: a full tunnel is 0.0.0.0/1 + 128.0.0.0/1, more
+// specific than the real default route, which stays untouched.
 func merge(ps []netip.Prefix) []netip.Prefix {
 	set := make(map[netip.Prefix]bool, len(ps))
 	for _, p := range ps {
@@ -145,7 +147,7 @@ func merge(ps []netip.Prefix) []netip.Prefix {
 	for changed := true; changed; {
 		changed = false
 		for p := range set {
-			if p.Bits() == 0 || !set[p] {
+			if p.Bits() <= 1 || !set[p] {
 				continue
 			}
 			parent := netip.PrefixFrom(p.Addr(), p.Bits()-1).Masked()

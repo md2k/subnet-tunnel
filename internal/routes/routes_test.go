@@ -98,6 +98,30 @@ func TestBothRoutedAndExcluded(t *testing.T) {
 	}
 }
 
+// A full tunnel must stay two /1 routes: merged into 0.0.0.0/0 it would
+// collide with (or replace) the real default route.
+func TestFullTunnelStaysTwoHalves(t *testing.T) {
+	plan, err := Compute(pfx("0.0.0.0/1", "128.0.0.0/1"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := join(plan.Routes); got != "0.0.0.0/1 128.0.0.0/1" {
+		t.Fatalf("got %s", got)
+	}
+	plan, err = Compute(pfx("0.0.0.0/1", "128.0.0.0/1"), pfx("203.0.113.10/32"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range plan.Routes {
+		if p.Bits() == 0 {
+			t.Fatalf("default route produced: %s", join(plan.Routes))
+		}
+	}
+	if _, ok := plan.Routed(netip.MustParseAddr("203.0.113.10")); ok {
+		t.Fatal("excluded address routed in full tunnel")
+	}
+}
+
 func TestRejectsBadInput(t *testing.T) {
 	if _, err := Compute([]netip.Prefix{netip.PrefixFrom(netip.MustParseAddr("10.1.2.3"), 8)}, nil); err == nil {
 		t.Error("host bits accepted")

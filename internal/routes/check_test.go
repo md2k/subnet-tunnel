@@ -12,8 +12,8 @@ func TestCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	reserved := []Reserved{
-		{netip.MustParseAddr("198.18.249.1"), "subtun's utun address"},
-		{netip.MustParseAddr("192.168.1.1"), "the default gateway"},
+		{Addr: netip.MustParseAddr("198.18.249.1"), What: "subtun's utun address"},
+		{Addr: netip.MustParseAddr("192.168.1.1"), What: "the default gateway", ViaLocal: true},
 	}
 	locals := []Local{
 		{"en0", netip.MustParsePrefix("192.168.1.0/24")},
@@ -33,6 +33,43 @@ func TestCheck(t *testing.T) {
 		if !strings.Contains(all, want) {
 			t.Errorf("missing warning %q in\n%s", want, all)
 		}
+	}
+}
+
+// The default gateway may sit inside a broad route (10.0.0.0/8 in an office
+// whose router is 10.x, or a full tunnel's 0.0.0.0/1 + 128.0.0.0/1): its LAN
+// route is more specific and wins. Only a route at least as specific as the
+// gateway's own network would capture it.
+func TestGatewayInsideBroaderRoute(t *testing.T) {
+	gw := []Reserved{{Addr: netip.MustParseAddr("10.20.30.1"), What: "the default gateway", ViaLocal: true}}
+	lan := []Local{{"en0", netip.MustParsePrefix("10.20.30.0/24")}}
+	for routes, wantErr := range map[string]bool{
+		"10.0.0.0/8":                false, // broader than the LAN: fine
+		"0.0.0.0/1 128.0.0.0/1":     false, // full tunnel: fine
+		"10.20.30.0/24":             true,  // same as the LAN: refuse
+		"10.20.30.0/25":             true,  // more specific: refuse
+		"10.20.30.1/32":             true,  // the gateway itself: refuse
+		"192.0.2.0/24 10.20.0.0/16": false,
+	} {
+		plan, err := Compute(pfx(strings.Fields(routes)...), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		errs, _ := Check(plan, gw, lan)
+		if (len(errs) > 0) != wantErr {
+			t.Errorf("%s: errs %v, want error=%v", routes, errs, wantErr)
+		}
+	}
+	// No local network holds the gateway (e.g. a point-to-point VPN route):
+	// any route containing it is refused.
+	plan, _ := Compute(pfx("10.0.0.0/8"), nil)
+	if errs, _ := Check(plan, gw, nil); len(errs) == 0 {
+		t.Error("gateway outside any local network accepted inside a route")
+	}
+	// subtun's own address is never allowed inside a route.
+	own := []Reserved{{Addr: netip.MustParseAddr("10.20.30.200"), What: "subtun's utun address"}}
+	if errs, _ := Check(plan, own, lan); len(errs) == 0 {
+		t.Error("own address accepted inside a route")
 	}
 }
 

@@ -85,12 +85,11 @@ func TestK8sDryRunWithoutConfig(t *testing.T) {
 
 func TestRouteSafetyChecks(t *testing.T) {
 	cases := map[string][]string{
-		"tun address inside a route": {"k8s", "debug", "198.18.0.0/15", "--dry-run"},
-		"bad tun address":            {"k8s", "debug", "203.0.113.0/24", "--tun-addr", "127.0.0.1", "--dry-run"},
-		"bad MTU":                    {"k8s", "debug", "203.0.113.0/24", "--mtu", "100", "--dry-run"},
-		"host bits":                  {"k8s", "debug", "203.0.113.1/24", "--dry-run"},
-		"excludes remove all":        {"k8s", "debug", "203.0.113.0/24", "-x", "203.0.113.0/24", "--dry-run"},
-		"nothing to do":              {"k8s", "debug", "--dry-run"},
+		"bad tun address":     {"k8s", "debug", "203.0.113.0/24", "--tun-addr", "127.0.0.1", "--dry-run"},
+		"bad MTU":             {"k8s", "debug", "203.0.113.0/24", "--mtu", "100", "--dry-run"},
+		"host bits":           {"k8s", "debug", "203.0.113.1/24", "--dry-run"},
+		"excludes remove all": {"k8s", "debug", "203.0.113.0/24", "-x", "203.0.113.0/24", "--dry-run"},
+		"nothing to do":       {"k8s", "debug", "--dry-run"},
 	}
 	for name, args := range cases {
 		if _, err := runCLI(t, args...); err == nil {
@@ -124,5 +123,23 @@ func TestExcludeEndpoints(t *testing.T) {
 		if p.Contains(api) {
 			t.Fatalf("API server %s still routed via %s", api, p)
 		}
+	}
+}
+
+// A full tunnel: two /1 halves (never merged into 0.0.0.0/0), with subtun's
+// own address carved out automatically instead of refused.
+func TestFullTunnelDryRun(t *testing.T) {
+	out, err := runCLI(t, "k8s", "debug", "0.0.0.0/1", "128.0.0.0/1", "--dry-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "  0.0.0.0/0\n") {
+		t.Fatalf("default route in plan:\n%s", out)
+	}
+	if !strings.Contains(out, "198.18.249.1/32: subtun's own utun address, excluded automatically") {
+		t.Fatalf("own address not auto-excluded:\n%s", out)
+	}
+	if !strings.Contains(out, "  0.0.0.0/1\n") {
+		t.Fatalf("lower half missing:\n%s", out)
 	}
 }

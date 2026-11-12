@@ -317,12 +317,23 @@ func planRoutes(s settings) (*routePlan, []string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	// subtun's own utun address can't go through the tunnel; the utun's own
+	// host route covers it. Inevitable in a full tunnel (0.0.0.0/1 +
+	// 128.0.0.0/1), so exclude it rather than refuse.
+	if _, ok := plan.Routed(tunAddr); ok {
+		exc = append(exc, netip.PrefixFrom(tunAddr, 32))
+		if plan, err = routes.Compute(inc, exc); err != nil {
+			return nil, nil, err
+		}
+		plan.Redundant = append(plan.Redundant, routes.Note{Prefix: netip.PrefixFrom(tunAddr, 32), Exclude: true,
+			Reason: "subtun's own utun address, excluded automatically"})
+	}
 	if len(plan.Routes) == 0 {
 		return nil, nil, errors.New("the excludes remove every route")
 	}
 	reserved := []routes.Reserved{{Addr: tunAddr, What: "subtun's utun address"}}
 	if gw, ok := netinfo.DefaultGateway(); ok {
-		reserved = append(reserved, routes.Reserved{Addr: gw, What: "the default gateway"})
+		reserved = append(reserved, routes.Reserved{Addr: gw, What: "the default gateway", ViaLocal: true})
 	}
 	errs, warns := routes.Check(plan, reserved, netinfo.LocalNetworks())
 	if len(errs) > 0 {

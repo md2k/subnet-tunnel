@@ -75,22 +75,30 @@ subtun cleans up the list and reports what it dropped: duplicates, routes alread
 broader route, and excludes that match nothing. Adjacent prefixes are merged. `--dry-run` prints
 the result.
 
+## Full tunnel
+
+Route `0.0.0.0/1` and `128.0.0.0/1` to send everything through the tunnel. The two halves are more
+specific than the real default route, which stays untouched, so when subtun exits or crashes the
+machine is back to normal. Your LAN stays local (its own route is more specific), and subtun's own
+connection to the API server or Docker daemon is excluded automatically. IPv6 and DNS are not
+redirected yet, so they still leave directly in this mode.
+
 ## Safety checks
 
-Before connecting or asking for sudo, subtun refuses a route that would contain:
-
-- its own utun address (`tun.address`), which would loop;
-- your default gateway, which would cut this machine's connection, and the tunnel's.
+Before connecting or asking for sudo, subtun refuses a route that would capture your default
+gateway: one at least as specific as the local network holding it (`192.168.1.0/24` when that is
+your LAN). Broader routes such as `10.0.0.0/8` or a full tunnel are fine, because the LAN's own route
+is more specific and keeps the gateway reachable.
 
 It warns when a route overlaps a network of one of this machine's interfaces (your LAN, a VPN
 client's interface). The more specific route wins, and the warning says which side that is.
 
-When the tunnel is up, the address subtun itself connects to (the Kubernetes API server, a remote
-Docker daemon) is excluded from the routes automatically.
+Excluded automatically, and listed by `--dry-run`: subtun's own utun address, and, when the tunnel
+is up, the address subtun itself connects to (the Kubernetes API server, a remote Docker daemon).
 
 ## subtun's own addresses
 
 `tun.address` (`--tun-addr`) is the utun's point-to-point address, by default `198.18.249.1`. The
 range 198.18.0.0/15 is reserved for benchmarking (RFC 2544), so real networks, VPN clients and
-corporate address plans don't use it. Change it if yours does. It must be a unicast IPv4 address
-outside your routes.
+corporate address plans don't use it. Change it if yours does. It must be a unicast IPv4 address;
+if your routes contain it, it is excluded from them.

@@ -9,6 +9,11 @@ import (
 type Reserved struct {
 	Addr netip.Addr
 	What string // e.g. "subtun's utun address", "default gateway"
+	// ViaLocal: the address is fine inside a route that is broader than the
+	// local network holding it, because that network's own route is more
+	// specific and wins (the default gateway on a LAN). Without it, any
+	// route containing the address is refused (subtun's own address).
+	ViaLocal bool
 }
 
 // Local is a network attached to one of this machine's interfaces.
@@ -25,9 +30,16 @@ func Check(plan Plan, reserved []Reserved, locals []Local) (errs, warns []string
 		if !r.Addr.IsValid() {
 			continue
 		}
-		if p, ok := plan.Routed(r.Addr); ok {
-			errs = append(errs, fmt.Sprintf("route %s contains %s %s; exclude it or use narrower routes", p, r.What, r.Addr))
+		p, ok := plan.Routed(r.Addr)
+		if !ok {
+			continue
 		}
+		if r.ViaLocal {
+			if l, found := mostSpecificLocal(locals, r.Addr); found && p.Bits() < l.Network.Bits() {
+				continue // the local network's route is more specific: the address stays reachable
+			}
+		}
+		errs = append(errs, fmt.Sprintf("route %s contains %s %s; exclude it or use narrower routes", p, r.What, r.Addr))
 	}
 	for _, l := range locals {
 		for _, p := range plan.Routes {
@@ -42,6 +54,17 @@ func Check(plan Plan, reserved []Reserved, locals []Local) (errs, warns []string
 		}
 	}
 	return errs, warns
+}
+
+func mostSpecificLocal(locals []Local, a netip.Addr) (Local, bool) {
+	var best Local
+	found := false
+	for _, l := range locals {
+		if l.Network.Contains(a) && (!found || l.Network.Bits() > best.Network.Bits()) {
+			best, found = l, true
+		}
+	}
+	return best, found
 }
 
 // HostPrefixes turns addresses into /32 prefixes, skipping invalid and
