@@ -30,6 +30,11 @@ profiles:
     tun:
       address: 198.18.249.1        # subtun's own utun address (default)
       mtu: 9000                    # default
+    dns:                           # split DNS, see below
+      domains: [svc.cluster.local, company.com]
+      patterns: ['^db-[0-9]+\.prod\.']
+      servers: auto                # default
+      fallback: system             # default
 
   local-app:
     target:
@@ -52,9 +57,9 @@ subtun up dev-cluster 10.50.0.0/16 -x 10.50.1.0/24 --socks 127.0.0.1:1082
 ```
 
 Flags given on the command line override the profile's values (`--socks`, `--agent`,
-`--agent-dir`, `--tun-addr`, `--mtu`). CIDRs and `-x/--exclude` given on the command line are
-**added** to the profile's. Without a config file, the same flags work on `subtun k8s` and
-`subtun docker`.
+`--agent-dir`, `--tun-addr`, `--mtu`, `--dns-capture`, `--dns-servers`, `--dns-fallback`). CIDRs,
+`-x/--exclude`, `--dns-domain` and `--dns-pattern` given on the command line are **added** to the
+profile's. Without a config file, the same flags work on `subtun k8s` and `subtun docker`.
 
 ## Routes and excludes
 
@@ -80,8 +85,9 @@ the result.
 Route `0.0.0.0/1` and `128.0.0.0/1` to send everything through the tunnel. The two halves are more
 specific than the real default route, which stays untouched, so when subtun exits or crashes the
 machine is back to normal. Your LAN stays local (its own route is more specific), and subtun's own
-connection to the API server or Docker daemon is excluded automatically. IPv6 and DNS are not
-redirected yet, so they still leave directly in this mode.
+connection to the API server or Docker daemon is excluded automatically. Add `--dns-domain .` (or
+`dns.domains: ["."]`) to resolve every name through the tunnel as well. IPv6 is not redirected yet,
+so it still leaves directly in this mode.
 
 ## Safety checks
 
@@ -102,3 +108,59 @@ is up, the address subtun itself connects to (the Kubernetes API server, a remot
 range 198.18.0.0/15 is reserved for benchmarking (RFC 2544), so real networks, VPN clients and
 corporate address plans don't use it. Change it if yours does. It must be a unicast IPv4 address;
 if your routes contain it, it is excluded from them.
+
+## DNS
+
+subtun answers the DNS queries your Mac sends to its DNS servers. Names under your `domains` or
+matching your `patterns` are resolved through the tunnel by the target's own resolver (kube-dns in
+a pod, Docker's DNS in a container), so you get exactly the answer the target would. Every other
+name goes to a fallback resolver, as before. This is sshuttle's `--dns` with the pattern patch
+(`--dns-domains`, `--dns-to`), and any number of domains costs one setting, not one file each.
+
+```sh
+build/subtun k8s -n team-a debug-pod 10.96.0.0/12 10.244.0.0/16 --dns-domain cluster.local
+curl http://web.team-a.svc.cluster.local:8080/      # any program, no proxy settings
+```
+
+| YAML (`dns:`) | Flag | Default | Meaning |
+|---|---|---|---|
+| `domains` | `--dns-domain` (repeatable, comma-separated) | none | suffixes resolved through the tunnel; `.` = every name |
+| `patterns` | `--dns-pattern` (repeatable) | none | regular expressions resolved through the tunnel |
+| `servers` | `--dns-servers` | `auto` | DNS servers whose queries are captured: `auto` (the system's) or IPv4 addresses |
+| `fallback` | `--dns-fallback` | `system` | resolver for everything else: `system` (the servers the query was meant for) or `IP[:port]` |
+| `capture` | `--dns-capture` | `firewall` | `firewall` (pf on macOS) or `off` |
+
+DNS capture is on as soon as `domains` or `patterns` are set, and it needs routes: it runs with the
+utun capture, and the addresses it returns are reached through your routes.
+
+**Matching.** A domain matches itself and every name below it: `company.com` matches
+`company.com` and `db.eu.company.com`, not `badcompany.com`. A leading `*.`, `.` or `.*.` (sshuttle's
+pattern form) is ignored, so `.*.company.com` from an sshuttle file works as is. Patterns are Go
+regular expressions, matched against the lowercase name without the trailing dot. They aren't
+anchored, so write `^` and `$` where you need them (sshuttle used Python's `re.match`, which anchors
+at the start only).
+
+**Servers.** With `auto`, subtun reads the system's IPv4 DNS servers from `/etc/resolv.conf` and
+follows them when the network changes (Wi-Fi switch, VPN up or down). IPv6 DNS servers and local
+ones (`127.0.0.1`) are reported and not captured. Resolvers that only a VPN client uses for its own
+domains aren't in that file and keep working as before.
+
+**How it works on macOS.** The root helper puts a few pf rules into subtun's own anchor,
+`com.apple/subtun`. The stock `/etc/pf.conf` evaluates every anchor under `com.apple/`, so the main
+ruleset is never touched. The rules hand queries to those servers (UDP and TCP port 53) to subtun's
+DNS listener on 127.0.0.1. Your traffic itself never goes through pf. Because the rules must be
+removed again, the helper stays up for the session (one sudo prompt, as before). It removes them
+when subtun exits, crashes or is killed, on Ctrl-C, and when the terminal closes. subtun's own
+fallback queries leave from a port the rules let through, so they can't loop back into subtun even
+when the fallback is one of the captured servers.
+
+**Limits.**
+- One DNS-capturing subtun at a time (they would share the anchor).
+- If the fallback resolver is inside one of your routes, unmatched names fail: their UDP queries go
+  into the utun, which carries TCP only so far. `--dry-run` warns; exclude the resolver's address or
+  match every name with `.`.
+- If the helper itself is killed (`kill -9`), the rules stay and DNS for the captured servers stops
+  working once subtun exits; subtun says so. Remove them with
+  `sudo pfctl -a com.apple/subtun -F nat && sudo pfctl -a com.apple/subtun -F rules`.
+- macOS only for now; `override` and `supplemental` capture modes (via the system resolver
+  configuration instead of the firewall) are planned.
