@@ -176,25 +176,122 @@ that subtun starts through `sudo` (sudo asks for the password on the terminal).
 | Root process after setup | none: the helper exits | the helper stays up for the session |
 | Changing CIDRs / DNS | restart subtun | at runtime, through subtun's local control API |
 | Cleanup | automatic: routes live on the utun, and macOS removes the utun and its routes when subtun exits, crashes or is killed | the helper undoes its changes when subtun disconnects, including resolver entries |
-| Split DNS (`/etc/resolver`) | entries written at start; removing them needs root again (planned: cleanup on next start, or a sudo at exit) | written and removed by the helper |
+| DNS capture, kill switch (planned, see below) | not available: firewall rules must be managed during the session | helper applies firewall rules and removes them on disconnect (or keeps the kill switch's block rules on purpose) |
 | Risk | smallest: root exists only for the seconds of setup | a root process stays reachable (only by subtun, over the private socket) for the whole session |
 
 Both modes use the same helper and command loop; session mode just doesn't end it after setup. If
 subtun goes away before `done`, the helper removes the routes it added and closes the utun.
 
-How to use: one-shot is what happens when you pass CIDRs. Session mode will be a flag once the
-control API exists.
+How to use: one-shot is what happens when you pass CIDRs only. DNS capture and the kill switch will
+switch the helper to session mode, since their firewall rules live for the whole session.
+
+## Platform drivers (planned)
+
+Everything that differs per operating system goes behind small interfaces, implemented once per OS
+and chosen by configuration (with a default per OS). The app describes **intent**; each driver
+translates it into its OS's mechanism, so app code never contains pf, nftables or route syntax.
+
+```go
+// internal/platform: what subtun needs from the OS.
+type Tun interface {      // capture interface: macOS utun, Linux TUN, Windows wintun
+    Create(mtu int, addr netip.Addr) (Device, error)
+}
+type Routes interface {   // routes on the tunnel interface
+    Add(p netip.Prefix, iface string) error
+    Delete(p netip.Prefix, iface string) error
+}
+type Firewall interface { // macOS pf, Linux nftables / iptables, Windows WFP
+    Apply(r Rules) error  // atomically replaces subtun's own rules (pf anchor, nft table, ...)
+    Flush() error
+}
+type Resolver interface { // system DNS configuration: scutil, systemd-resolved, NRPT
+    Supplemental(domains []string, server netip.AddrPort) error // only these domains to subtun
+    Override(server netip.AddrPort) error                       // subtun as the system resolver
+    Restore() error
+}
+
+type Rules struct {       // intent, not syntax
+    TunIface    string
+    DNSRedirect *DNSRedirect   // capture DNS sent to these servers
+    KillSwitch  []netip.Prefix // allow only via the tunnel; blocked otherwise, even if subtun dies
+    BlockIPv6   bool           // full tunnel, until IPv6 is supported
+}
+```
+
+| | macOS (first) | Linux (later) | Windows (later) |
+|---|---|---|---|
+| Tun | utun (wireguard-go) | TUN (wireguard-go) | wintun (wireguard-go) |
+| Routes | `/sbin/route` | netlink | IP helper API |
+| Firewall | pf | nftables, iptables as fallback | WFP |
+| Resolver | dynamic store (`scutil`) | systemd-resolved (per-link domains) | NRPT |
+
+- Drivers run inside the root helper, because they all need root. The helper protocol carries the
+  same intents (`apply_firewall` with `Rules`, `set_resolver`, ...) and validates them; subtun never
+  sends raw firewall text, so the helper still accepts only fixed, validated commands.
+- Unsupported combinations fail with a clear message. Tests use fake drivers, so the logic is tested
+  without root on any OS.
+- First step: move the existing macOS utun and route code (today inline in the helper) behind `Tun`
+  and `Routes`, with no change in behaviour.
+
+## DNS (planned)
+
+Split DNS by **capturing the system's DNS queries and deciding per name**, as sshuttle `--dns` does
+with a regex-pattern patch (`--dns-domains`, `--dns-to`): names matching your domains or patterns go
+through the tunnel and are resolved by the target's resolver; everything else goes to a fallback
+resolver.
+
+```yaml
+dns:
+  capture: firewall          # firewall (default) | override | supplemental | off
+  servers: auto              # the system's DNS servers, re-read on network change; or a list
+  domains: [company.com, azurecr.io]   # suffixes (sshuttle's '.*.x' patterns)
+  patterns: ['^db-.*\.prod\..*$']      # optional regular expressions
+  fallback: system           # or an address, e.g. 192.168.1.1:53 (like the sshuttle pattern patch's --dns-to)
+```
+
+- **DNS engine** (OS-independent, runs as the user): parses each query, matches it, sends matches
+  through the tunnel (a new request type, answered by the target's resolver; both agents) and the rest
+  to the fallback. Unmatched queries must leave through the physical interface so they can't loop.
+- **How queries reach it** is a driver choice:
+
+| `capture` | Mechanism | Notes |
+|---|---|---|
+| `firewall` (default) | the firewall driver redirects DNS (UDP/TCP 53) sent to the DNS servers into subtun, like sshuttle's pf `rdr` | matches by port, so a DNS server that is also the default gateway (most home routers) works; data never goes through pf |
+| `override` | the resolver driver makes subtun the system resolver while it runs | no firewall; interplay with other VPN clients' DNS to test |
+| `supplemental` | the resolver driver sends only the listed suffixes to subtun | smallest footprint; suffixes only at the OS level |
+| — | routing the DNS server's IP into the utun | rejected: at home the DNS server is usually the default gateway, and a route for it would capture all traffic |
+
+- One entry covers any number of domains; no file per domain.
+- Lessons from sshuttle 2.0 for the pf driver: rules in subtun's own anchor (under `com.apple/*`,
+  which the stock ruleset evaluates), every rule `quick` so other software's anchors (VPN clients)
+  can't override them (sshuttle#1253), and a warning when other anchors are present.
+
+## Kill switch and full tunnel (planned)
+
+- **Full tunnel** works today through route planning: route `0.0.0.0/1` and `128.0.0.0/1`. The real
+  default route stays untouched, the LAN stays local and subtun's own connection is excluded. Until
+  DNS capture and IPv6 handling exist, DNS and IPv6 still leave directly in this mode.
+- **Kill switch** (`killSwitch: true`): firewall rules allow the routed CIDRs (and captured DNS) only
+  through subtun's utun. If subtun dies, its routes vanish with the utun, and without these rules that
+  traffic would fall back to the normal default route, which would leak it. With the kill switch, the
+  block rules deliberately stay in place until `subtun up` replaces them or a cleanup command removes
+  them (fail-closed). Without it, the helper removes all firewall rules on exit (fail-open).
+- **IPv6** is blocked by the firewall driver in full-tunnel mode until subtun carries IPv6.
 
 ## Decisions
 
-- **Capture:** utun / TUN interface plus the gVisor network stack, with utun MTU 9000. Never pf.
+- **Capture:** utun / TUN interface plus the gVisor network stack, with utun MTU 9000. Data never
+  goes through pf; the firewall (pf, nftables, WFP) is only used for DNS capture, the kill switch and
+  blocking IPv6, through a firewall driver.
+- **OS-specific code behind drivers** (tun, routes, firewall, resolver), chosen by configuration.
 - **Remote side:** an agent over exec stdio, not SSH `direct-tcpip`. Containers rarely run sshd,
   and UDP, remote DNS and host discovery need an agent anyway. The Go binary by default, the
   Python edition where the binary can't run.
 - **Agent location:** never a shared, world-writable path. Per-user 0700 directories, `$HOME` first.
-- **DNS:** macOS supplemental resolvers (`/etc/resolver/<domain>`, or one dynamic entry with a list
-  of match domains) send only the selected domains to the tool. Optional regex matching applies
-  inside the tool, to the queries that reach it.
+- **DNS:** capture the system's queries (firewall redirect by default) and decide per name in
+  subtun: domains and patterns through the tunnel, the rest to a fallback. Supplemental and override
+  modes as resolver drivers. Not one file per domain.
+- **Every setting works from the command line** and from the YAML config.
 - **Privileges:** the tool runs as the user; root only in the helper, one-shot by default, session
   mode opt-in (see Privileges).
 - **Pure Go:** `CGO_ENABLED=0`, a single static binary per OS and architecture.
@@ -208,7 +305,10 @@ control API exists.
   Both agents behave the same; needs a reset signal in the protocol.
 - **Transport flow control on remote clusters:** several carriers in parallel to avoid head-of-line
   blocking, once measured against a real remote cluster.
-- **Coexistence** with other VPN or security software that owns its own utun interface or pf anchor.
+- **Coexistence** with other VPN or security software that owns its own utun interface or pf anchor
+  (pf driver: own anchor, `quick` rules, warn on other anchors; to be tested next to Zscaler).
+- **DNS over the tunnel:** UDP to the target's resolver from the agent, TCP on truncation; how the
+  agent finds its resolver (resolv.conf) for both agents.
 - **Docker transport upload** is ~25 % below Kubernetes on the same Mac (147 vs 193 MB/s through
   utun). Candidate: one write per smux frame straight onto the hijacked Docker connection, where
   the Kubernetes path batches through client-go.
