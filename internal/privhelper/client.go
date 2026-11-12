@@ -74,7 +74,7 @@ func Start(ctx context.Context, helperLog io.Writer, log *slog.Logger) (*Client,
 	if err != nil {
 		return nil, err
 	}
-	log.Info("asking sudo for the utun setup")
+	log.Info("asking sudo for the root helper")
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting sudo: %w", err)
 	}

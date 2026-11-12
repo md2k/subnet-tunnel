@@ -477,11 +477,12 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 	// Rules an earlier session may have left (kill switch, a killed helper)
 	// can block DNS, which connecting needs: take them over first.
 	var early *privhelper.Client
+	marker := &leftovers{mark: privhelper.MarkLeftovers, clear: privhelper.ClearLeftovers}
 	if privhelper.LeftoversMarked() {
 		if rp == nil {
-			log.Warn("an earlier session may have left firewall rules in place; if networking misbehaves, run: subtun cleanup")
+			log.Warn("firewall rules from another subtun session may be in place; if networking misbehaves and none is running, run: subtun cleanup")
 		} else {
-			log.Info("an earlier session may have left firewall rules; taking them over before connecting")
+			log.Info("firewall rules from another subtun session may be in place; checking with the root helper before connecting")
 			if early, err = privhelper.Start(ctx, &transport.LineLog{Log: log, Prefix: "helper: "}, log); err != nil {
 				return err
 			}
@@ -491,9 +492,7 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 				return fmt.Errorf("taking over firewall rules: %w", err)
 			}
 			log.Info(res.Message)
-			if !res.Kept && !res.Running {
-				privhelper.ClearLeftovers()
-			}
+			marker.adopted(res)
 			// Until capture takes it, closing it puts the rules back.
 			defer func() {
 				if early != nil {
@@ -568,21 +567,19 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		opts.Helper, early = early, nil
 		if opts.DNS != nil || gp.on() || gp.blockIPv6 {
 			// Firewall rules may outlive this process; the next run looks.
-			_ = privhelper.MarkLeftovers()
+			marker.firewall()
 		}
 		c, err := capture.Start(ctx, final, opts, client, log)
 		if err != nil {
-			if opts.Helper == nil {
-				privhelper.ClearLeftovers() // nothing taken over, nothing left
-			}
+			marker.startFailed()
 			return fmt.Errorf("utun capture: %w", err)
 		}
 		// Stopped before the tunnel (deferred above): firewall rules and
 		// routes go first.
 		defer func() {
-			if !c.Stop(deliberate) {
-				privhelper.ClearLeftovers()
-			} else {
+			leftBehind := c.Stop(deliberate)
+			marker.stopped(leftBehind)
+			if leftBehind {
 				log.Warn("kill switch: blocking rules stay in place; the next subtun run takes them over, or remove them with: subtun cleanup")
 			}
 		}()

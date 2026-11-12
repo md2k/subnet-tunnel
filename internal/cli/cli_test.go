@@ -5,6 +5,8 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+
+	"github.com/md2k/subnet-tunnel/internal/privhelper"
 )
 
 // runCLI executes subtun with args and returns stdout and the error. Only
@@ -323,5 +325,47 @@ func TestIPv6Endpoint(t *testing.T) {
 	}
 	if a, ok := ipv6Endpoint(append(v4, netip.MustParseAddr("2001:db8::10"))); !ok || a.String() != "2001:db8::10" {
 		t.Error("global IPv6 endpoint not found")
+	}
+}
+
+// The leftovers marker is shared between runs: only a run that loaded
+// firewall rules, or took over the ones it was set for, removes it.
+func TestLeftoversMarker(t *testing.T) {
+	type tc struct {
+		name       string
+		adopt      *privhelper.AdoptResult // nil: no marker at start
+		firewall   bool
+		startFails bool
+		leftBehind bool
+		want       bool // marker present at the end
+	}
+	cases := []tc{
+		{name: "routes only, no marker", want: false},
+		{name: "routes only beside a running firewall session", adopt: &privhelper.AdoptResult{Running: true}, want: true},
+		{name: "firewall session ends cleanly", firewall: true, want: false},
+		{name: "kill switch leaves blocks", firewall: true, leftBehind: true, want: true},
+		{name: "firewall start fails", firewall: true, startFails: true, want: false},
+		{name: "took over, start fails: blocks put back", adopt: &privhelper.AdoptResult{Kept: true}, firewall: true, startFails: true, want: true},
+		{name: "took over, session without firewall removes them", adopt: &privhelper.AdoptResult{Kept: true}, want: false},
+		{name: "nothing was left", adopt: &privhelper.AdoptResult{}, want: false},
+		{name: "refused beside a running session", adopt: &privhelper.AdoptResult{Running: true}, firewall: true, startFails: true, want: true},
+	}
+	for _, c := range cases {
+		present := c.adopt != nil
+		l := &leftovers{mark: func() error { present = true; return nil }, clear: func() { present = false }}
+		if c.adopt != nil {
+			l.adopted(*c.adopt)
+		}
+		if c.firewall {
+			l.firewall()
+		}
+		if c.startFails {
+			l.startFailed()
+		} else {
+			l.stopped(c.leftBehind)
+		}
+		if present != c.want {
+			t.Errorf("%s: marker present = %v, want %v", c.name, present, c.want)
+		}
 	}
 }

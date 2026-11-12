@@ -140,3 +140,52 @@ without starting one.`,
 		},
 	}
 }
+
+// leftovers decides about the marker that tells the next run firewall rules
+// may outlive this one. Runs share it, so only a run that loaded firewall
+// rules itself, or took over the rules it was set for, may remove it; a run
+// that only adds routes must leave another session's marker alone.
+type leftovers struct {
+	mark  func() error
+	clear func()
+
+	ours     bool // set for our rules, or for rules we took over
+	tookOver bool // an earlier session's blocking rules were taken over
+	running  bool // it belongs to a session that is running
+}
+
+// adopted records what the helper found before connecting.
+func (l *leftovers) adopted(r privhelper.AdoptResult) {
+	switch {
+	case r.Running:
+		l.running = true
+	case r.Kept:
+		l.ours, l.tookOver = true, true
+	default:
+		l.clear() // nothing was left, or it didn't block anything and is gone
+	}
+}
+
+// firewall is called before this run loads firewall rules.
+func (l *leftovers) firewall() {
+	if l.running {
+		return // another session's rules: this run will be refused
+	}
+	_ = l.mark()
+	l.ours = true
+}
+
+// startFailed: rules taken over were put back by the helper; fresh ones
+// were removed.
+func (l *leftovers) startFailed() {
+	if l.ours && !l.tookOver {
+		l.clear()
+	}
+}
+
+// stopped: leftBehind reports whether blocking rules stayed.
+func (l *leftovers) stopped(leftBehind bool) {
+	if l.ours && !leftBehind {
+		l.clear()
+	}
+}

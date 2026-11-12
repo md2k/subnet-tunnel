@@ -35,6 +35,7 @@ type helper struct {
 	firewall bool            // our rules are loaded
 	persist  *platform.Rules // what stays if the tunnel goes away; nil: nothing
 	adopted  bool            // rules taken over from an earlier session
+	applied  bool            // this session applied rules of its own
 	session  atomic.Bool     // setup done, staying up for the session
 	until    atomic.Int64    // read deadline after a signal (unix nanos), 0: none
 }
@@ -113,6 +114,11 @@ func (h *helper) deadline() time.Time {
 // session mode the helper stays up (end is false) to look after the
 // firewall rules.
 func (h *helper) finishSetup(session bool) (end bool, err error) {
+	if !session && h.firewall && h.adopted && !h.applied {
+		// Leftovers taken over by a session that needs no firewall rules:
+		// it replaces them with nothing.
+		h.flushFirewall()
+	}
 	if h.firewall && !session {
 		if err := writeMsg(h.conn, Response{Error: "firewall rules need session mode"}); err != nil {
 			h.undo()
@@ -128,7 +134,11 @@ func (h *helper) finishSetup(session bool) (end bool, err error) {
 		_ = h.dev.Release()
 		h.dev = nil
 	}
-	h.log.Info("setup complete", "utun", name, "routes", len(h.routes), "session", session)
+	if name != "" {
+		h.log.Info("setup complete", "utun", name, "routes", len(h.routes), "session", session)
+	} else {
+		h.log.Info("done")
+	}
 	if err := writeMsg(h.conn, Response{OK: true}); err != nil {
 		h.leave("connection lost")
 		return true, err
@@ -205,7 +215,7 @@ func (h *helper) handle(req Request) (Response, []int) {
 			// rules (if any) are still in place and still ours to remove.
 			return fail(err)
 		}
-		h.firewall = true
+		h.firewall, h.applied = true, true
 		h.persist = req.Persist
 		h.saveState()
 		h.log.Info("firewall rules applied", "dns", req.Rules.DNS != nil, "kill_switch", req.Rules.KillSwitch != nil,

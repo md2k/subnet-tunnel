@@ -580,3 +580,23 @@ func TestHelperAdoptLeavesARunningSessionAlone(t *testing.T) {
 		t.Fatalf("the running session's state changed: %+v", got)
 	}
 }
+
+// Leftovers taken over by a session without a kill switch or DNS capture:
+// that session replaces them with nothing.
+func TestHelperAdoptedLeftoversGoWithASessionWithoutFirewall(t *testing.T) {
+	d := &fake.Drivers{Busy: true}
+	st := &memState{st: &state{Owner: 99, Token: "old", Persist: killSwitchReq("").Persist}}
+	c, done := startHelperOpts(t, context.Background(), d, helperOpts{state: st})
+	if r := call(t, c, Request{Op: OpAdopt}); !r.Kept {
+		t.Fatalf("adopt: %+v", r)
+	}
+	call(t, c, createReq)
+	if r := call(t, c, Request{Op: OpDone}); !r.OK {
+		t.Fatalf("one-shot done after adopting: %+v", r)
+	}
+	wait(t, done)
+	checkCalls(t, d, "adopt old", "firewall guard - [10.0.0.0/8] ipv6", created, "flush", "release utun0")
+	if st.get() != nil {
+		t.Fatal("state left behind")
+	}
+}
