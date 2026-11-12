@@ -216,11 +216,11 @@ func (h *helper) handle(req Request) (Response, []int) {
 		if h.owned || h.dev != nil {
 			return fail(errors.New("adopt must be the first command"))
 		}
-		msg, err := h.adoptLeftovers()
+		msg, running, err := h.adoptLeftovers()
 		if err != nil {
 			return fail(err)
 		}
-		return Response{OK: true, Message: msg, Kept: h.adopted}, nil
+		return Response{OK: true, Message: msg, Kept: h.adopted, Running: running}, nil
 
 	case OpCleanup:
 		if h.owned || h.dev != nil {
@@ -275,13 +275,20 @@ func (h *helper) claim() error {
 
 // adoptLeftovers runs before subtun connects: blocking rules an earlier
 // session left stay, except a DNS block, so subtun can resolve its API
-// server. Leftovers that don't block anything are removed.
-func (h *helper) adoptLeftovers() (string, error) {
+// server. Leftovers that don't block anything are removed. A running
+// session's rules are left alone (running): this session can still go
+// ahead without firewall rules of its own.
+func (h *helper) adoptLeftovers() (msg string, running bool, err error) {
+	if busy, err := h.drivers.Firewall.Busy(); err == nil && busy {
+		if st, _ := h.state.load(); st != nil && h.alive(st.Owner) {
+			return fmt.Sprintf("another subtun session (helper pid %d) is running; its firewall rules are left alone", st.Owner), true, nil
+		}
+	}
 	if err := h.claim(); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if !h.adopted {
-		return "nothing left behind", nil
+		return "nothing left behind", false, nil
 	}
 	var relaxed platform.Rules
 	if h.persist != nil {
@@ -291,13 +298,13 @@ func (h *helper) adoptLeftovers() (string, error) {
 	if relaxed.Empty() {
 		h.flushFirewall()
 		h.adopted = false
-		return "removed firewall rules an earlier session left", nil
+		return "removed firewall rules an earlier session left", false, nil
 	}
 	if err := h.drivers.Firewall.Apply(relaxed); err != nil {
-		return "", err
+		return "", false, err
 	}
 	h.saveState()
-	return "kill switch from an earlier session taken over (DNS allowed while connecting)", nil
+	return "kill switch from an earlier session taken over (DNS allowed while connecting)", false, nil
 }
 
 // cleanup removes whatever an earlier session left (subtun cleanup).

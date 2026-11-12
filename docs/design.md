@@ -205,7 +205,8 @@ How a session ends:
 **Rules an earlier session left.** The helper records in a root-only file
 (`/var/run/subtun/state.json`) which helper holds subtun's rules, pf's enable reference and the
 blocking rules meant to stay. When a session finds subtun's anchor in use:
-- the recorded helper is still running: refused (another subtun session);
+- the recorded helper is still running: another session's rules, left alone; a session that needs
+  firewall rules of its own is refused, one that only adds routes goes ahead;
 - it is gone: the rules and pf's reference are taken over and replaced by the new session's;
 - nothing was recorded: refused, with a pointer to `subtun cleanup`.
 

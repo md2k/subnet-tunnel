@@ -178,12 +178,19 @@ func (c *Client) End(keep bool) error {
 	return err
 }
 
+// AdoptResult says what Adopt found.
+type AdoptResult struct {
+	Kept    bool   // an earlier session's blocking rules are in place (DNS allowed)
+	Running bool   // the rules belong to a running session and were left alone
+	Message string // for the log
+}
+
 // Adopt takes over firewall rules an earlier session left behind, keeping
-// its blocking rules but allowing DNS, so subtun can connect. kept reports
-// whether such rules are in place. It must be the first command.
-func (c *Client) Adopt() (kept bool, msg string, err error) {
+// its blocking rules but allowing DNS, so subtun can connect. It must be
+// the first command.
+func (c *Client) Adopt() (AdoptResult, error) {
 	resp, _, err := c.call(Request{Op: OpAdopt})
-	return resp.Kept, resp.Message, err
+	return AdoptResult{Kept: resp.Kept, Running: resp.Running, Message: resp.Message}, err
 }
 
 // Cleanup removes firewall rules an earlier session left behind and ends

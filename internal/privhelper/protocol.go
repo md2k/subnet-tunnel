@@ -61,6 +61,7 @@ type Response struct {
 	Name    string `json:"name,omitempty"`    // utun interface name
 	Message string `json:"message,omitempty"` // adopt, cleanup: what was done
 	Kept    bool   `json:"kept,omitempty"`    // adopt: an earlier session's blocking rules are in place
+	Running bool   `json:"running,omitempty"` // adopt: the rules belong to a session that is running
 }
 
 // Limits.

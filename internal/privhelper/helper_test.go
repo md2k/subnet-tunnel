@@ -556,3 +556,27 @@ func TestValidatePersist(t *testing.T) {
 		}
 	}
 }
+
+// A running session's rules aren't leftovers: adopt leaves them alone and
+// this session may go ahead, as long as it needs no firewall rules itself.
+func TestHelperAdoptLeavesARunningSessionAlone(t *testing.T) {
+	d := &fake.Drivers{Busy: true}
+	st := &memState{st: &state{Owner: 99, Token: "theirs"}}
+	c, done := startHelperOpts(t, context.Background(), d, helperOpts{state: st, alive: func(pid int) bool { return pid == 99 }})
+	if r := call(t, c, Request{Op: OpAdopt}); !r.OK || !r.Running || r.Kept {
+		t.Fatalf("adopt: %+v", r)
+	}
+	call(t, c, createReq)
+	call(t, c, Request{Op: OpAddRoute, CIDR: "192.0.2.0/24"})
+	if r := call(t, c, firewallReq("192.168.1.1")); r.OK || !strings.Contains(r.Error, "another subtun session") {
+		t.Fatalf("firewall rules of its own: %+v", r)
+	}
+	if r := call(t, c, Request{Op: OpDone}); !r.OK {
+		t.Fatalf("routes-only setup: %+v", r)
+	}
+	wait(t, done)
+	checkCalls(t, d, created, "add 192.0.2.0/24 utun0", "release utun0")
+	if got := st.get(); got == nil || got.Owner != 99 || got.Token != "theirs" {
+		t.Fatalf("the running session's state changed: %+v", got)
+	}
+}

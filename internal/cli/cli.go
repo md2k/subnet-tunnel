@@ -485,13 +485,13 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 			if early, err = privhelper.Start(ctx, &transport.LineLog{Log: log, Prefix: "helper: "}, log); err != nil {
 				return err
 			}
-			kept, msg, err := early.Adopt()
+			res, err := early.Adopt()
 			if err != nil {
 				_ = early.Close()
 				return fmt.Errorf("taking over firewall rules: %w", err)
 			}
-			log.Info(msg)
-			if !kept {
+			log.Info(res.Message)
+			if !res.Kept && !res.Running {
 				privhelper.ClearLeftovers()
 			}
 			// Until capture takes it, closing it puts the rules back.

@@ -34,7 +34,13 @@ func (*Client) ApplyFirewall(platform.Rules, *platform.Rules) error { return err
 func (*Client) End(bool) error { return errUnsupported }
 
 // Adopt is not implemented on this platform yet.
-func (*Client) Adopt() (bool, string, error) { return false, "", errUnsupported }
+func (*Client) Adopt() (AdoptResult, error) { return AdoptResult{}, errUnsupported }
+
+// AdoptResult says what Adopt found.
+type AdoptResult struct {
+	Kept, Running bool
+	Message       string
+}
 
 // Cleanup is not implemented on this platform yet.
 func (*Client) Cleanup() (string, error) { return "", errUnsupported }
