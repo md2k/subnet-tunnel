@@ -17,10 +17,12 @@ type Drivers struct {
 	CreateErr error
 	AddErr    map[netip.Prefix]error
 	ApplyErr  error
+	Busy      bool // firewall rules already loaded (left by an earlier session)
 
 	mu    sync.Mutex
 	calls []string
 	n     int
+	token string
 }
 
 // Platform returns d as a platform.Drivers.
@@ -103,15 +105,59 @@ func (f firewall) Apply(r platform.Rules) error {
 	if f.d.ApplyErr != nil {
 		return f.d.ApplyErr
 	}
-	if r.DNS == nil {
-		f.d.record("firewall none")
-		return nil
+	desc := "firewall"
+	if r.Empty() {
+		desc += " none"
 	}
-	f.d.record("firewall dns %v %d %d", r.DNS.Servers, r.DNS.ListenPort, r.DNS.BypassPort)
+	if r.DNS != nil {
+		desc += fmt.Sprintf(" dns %v %d %d", r.DNS.Servers, r.DNS.ListenPort, r.DNS.BypassPort)
+	}
+	if len(r.DNSBlock) > 0 {
+		desc += fmt.Sprintf(" dnsblock %v", r.DNSBlock)
+	}
+	if k := r.KillSwitch; k != nil {
+		iface := k.TunIface
+		if iface == "" {
+			iface = "-"
+		}
+		desc += fmt.Sprintf(" guard %s %v", iface, k.Prefixes)
+	}
+	if r.BlockIPv6 {
+		desc += " ipv6"
+	}
+	f.d.mu.Lock()
+	if f.d.token == "" {
+		f.d.token = "fake-token"
+	}
+	f.d.mu.Unlock()
+	f.d.record("%s", desc)
 	return nil
 }
 
 func (f firewall) Flush() error {
+	f.d.mu.Lock()
+	f.d.token = ""
+	f.d.Busy = false
+	f.d.mu.Unlock()
 	f.d.record("flush")
 	return nil
+}
+
+func (f firewall) Busy() (bool, error) {
+	f.d.mu.Lock()
+	defer f.d.mu.Unlock()
+	return f.d.Busy, nil
+}
+
+func (f firewall) Token() string {
+	f.d.mu.Lock()
+	defer f.d.mu.Unlock()
+	return f.d.token
+}
+
+func (f firewall) Adopt(token string) {
+	f.d.mu.Lock()
+	f.d.token = token
+	f.d.mu.Unlock()
+	f.d.record("adopt %s", token)
 }

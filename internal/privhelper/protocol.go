@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"time"
 
 	"github.com/md2k/subnet-tunnel/internal/platform"
@@ -35,6 +36,9 @@ const (
 	OpAddRoute      = "add_route"
 	OpApplyFirewall = "apply_firewall"
 	OpDone          = "done"
+	OpEnd           = "end"     // session: end it, keeping the persist rules or not
+	OpAdopt         = "adopt"   // first: take over rules an earlier session left, DNS relaxed
+	OpCleanup       = "cleanup" // first: remove rules an earlier session left
 )
 
 // Request is one command from subtun to the helper.
@@ -44,15 +48,20 @@ type Request struct {
 	Addr    string          `json:"addr,omitempty"` // utun address (IPv4, point-to-point to itself)
 	CIDR    string          `json:"cidr,omitempty"`
 	Rules   *platform.Rules `json:"rules,omitempty"`   // apply_firewall
+	Persist *platform.Rules `json:"persist,omitempty"` // apply_firewall: what stays if the tunnel goes away
 	Session bool            `json:"session,omitempty"` // done: stay up for the session
+	Keep    bool            `json:"keep,omitempty"`    // end: leave the persist rules in place
 }
 
 // Response answers one Request. create_tun also carries the utun file
 // descriptor as SCM_RIGHTS ancillary data.
 type Response struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
-	Name  string `json:"name,omitempty"` // utun interface name
+	OK      bool   `json:"ok"`
+	Error   string `json:"error,omitempty"`
+	Name    string `json:"name,omitempty"`    // utun interface name
+	Message string `json:"message,omitempty"` // adopt, cleanup: what was done
+	Kept    bool   `json:"kept,omitempty"`    // adopt: an earlier session's blocking rules are in place
+	Running bool   `json:"running,omitempty"` // adopt: the rules belong to a session that is running
 }
 
 // Limits.
@@ -64,6 +73,7 @@ const (
 	ioTimeout   = 30 * time.Second
 	connTimeout = 3 * time.Minute // includes typing the sudo password
 	maxServers  = 16
+	maxGuarded  = 8192 // kill switch prefixes
 )
 
 // ValidateMTU checks an MTU for the utun.
@@ -115,17 +125,62 @@ func ValidateRules(r *platform.Rules) error {
 	if r == nil {
 		return errors.New("no rules")
 	}
+	if r.Empty() {
+		return errors.New("empty rules")
+	}
+	if r.DNS != nil && len(r.DNSBlock) > 0 {
+		return errors.New("DNS redirect and DNS block are exclusive")
+	}
 	if d := r.DNS; d != nil {
-		if len(d.Servers) == 0 || len(d.Servers) > maxServers {
-			return fmt.Errorf("DNS redirect: %d servers, want 1-%d", len(d.Servers), maxServers)
-		}
-		for _, a := range d.Servers {
-			if !a.Is4() || a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() {
-				return fmt.Errorf("DNS redirect: server %s is not a unicast IPv4 address", a)
-			}
+		if err := validateServers("DNS redirect", d.Servers); err != nil {
+			return err
 		}
 		if d.ListenPort < 1024 || d.BypassPort < 1024 || d.ListenPort == d.BypassPort {
 			return fmt.Errorf("DNS redirect: ports %d and %d must be different and at least 1024", d.ListenPort, d.BypassPort)
+		}
+	}
+	if len(r.DNSBlock) > 0 {
+		if err := validateServers("DNS block", r.DNSBlock); err != nil {
+			return err
+		}
+	}
+	if k := r.KillSwitch; k != nil {
+		if len(k.Prefixes) == 0 || len(k.Prefixes) > maxGuarded {
+			return fmt.Errorf("kill switch: %d prefixes, want 1-%d", len(k.Prefixes), maxGuarded)
+		}
+		for _, p := range k.Prefixes {
+			if !p.IsValid() || !p.Addr().Is4() || p.Masked() != p || p.Bits() == 0 || p.Addr().IsLoopback() {
+				return fmt.Errorf("kill switch: %s is not an IPv4 prefix with host bits zero (and not the default route)", p)
+			}
+		}
+		if k.TunIface != "" && !utunName.MatchString(k.TunIface) {
+			return fmt.Errorf("kill switch: interface %q is not a utun", k.TunIface)
+		}
+	}
+	return nil
+}
+
+// ValidatePersist checks the rules meant to stay when the tunnel is gone:
+// they may only block.
+func ValidatePersist(r *platform.Rules) error {
+	if err := ValidateRules(r); err != nil {
+		return err
+	}
+	if r.DNS != nil || r.KillSwitch != nil && r.KillSwitch.TunIface != "" {
+		return errors.New("rules left behind can only block")
+	}
+	return nil
+}
+
+var utunName = regexp.MustCompile(`^utun[0-9]{1,5}$`)
+
+func validateServers(what string, servers []netip.Addr) error {
+	if len(servers) == 0 || len(servers) > maxServers {
+		return fmt.Errorf("%s: %d servers, want 1-%d", what, len(servers), maxServers)
+	}
+	for _, a := range servers {
+		if !a.Is4() || a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() {
+			return fmt.Errorf("%s: server %s is not a unicast IPv4 address", what, a)
 		}
 	}
 	return nil

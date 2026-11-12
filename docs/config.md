@@ -10,6 +10,10 @@ Location: `--config FILE`, else `$SUBTUN_CONFIG`, else `$XDG_CONFIG_HOME/subtun/
 silently drop a setting.
 
 ```yaml
+defaults:                          # optional: any profile key except target, for every profile
+  exclude: [192.168.1.0/24]
+  killSwitch: {mode: on}
+
 profiles:
   dev-cluster:                     # lowercase letters, digits, '.', '_', '-'
     target:                        # exactly one of k8s / docker
@@ -35,6 +39,10 @@ profiles:
       patterns: ['^db-[0-9]+\.prod\.']
       servers: auto                # default
       fallback: system             # default
+    killSwitch:                    # see below
+      mode: off                    # off (default) | on | lockdown
+      dns: block                   # block (default) | allow
+    blockIPv6: auto                # auto (default: in a full tunnel) | true | false
 
   local-app:
     target:
@@ -45,7 +53,12 @@ profiles:
     socks: 127.0.0.1:1081
 ```
 
-A profile needs `routes`, `socks` or both.
+A profile needs `routes`, `socks` or both (its own or from `defaults`).
+
+**Defaults.** Settings under `defaults` apply to every profile. A profile's own value wins; lists
+(`routes`, `exclude`, `dns.domains`, `dns.patterns`) add up, so a home-LAN exclude in `defaults`
+applies everywhere. YAML treats bare `on`, `off`, `yes` and `no` as booleans; subtun reads them as
+the words you meant (`mode: off` works).
 
 ## Command line and profiles together
 
@@ -56,10 +69,11 @@ subtun up dev-cluster --dry-run            # show the planned routes and exit
 subtun up dev-cluster 10.50.0.0/16 -x 10.50.1.0/24 --socks 127.0.0.1:1082
 ```
 
-Flags given on the command line override the profile's values (`--socks`, `--agent`,
-`--agent-dir`, `--tun-addr`, `--mtu`, `--dns-capture`, `--dns-servers`, `--dns-fallback`). CIDRs,
-`-x/--exclude`, `--dns-domain` and `--dns-pattern` given on the command line are **added** to the
-profile's. Without a config file, the same flags work on `subtun k8s` and `subtun docker`.
+Flags given on the command line override the profile's (and defaults') values (`--socks`,
+`--agent`, `--agent-dir`, `--tun-addr`, `--mtu`, `--dns-capture`, `--dns-servers`, `--dns-fallback`,
+`--kill-switch`, `--kill-switch-dns`, `--block-ipv6`). CIDRs, `-x/--exclude`, `--dns-domain` and
+`--dns-pattern` given on the command line are **added** to the profile's. Without a config file,
+the same flags work on `subtun k8s` and `subtun docker`.
 
 ## Routes and excludes
 
@@ -86,8 +100,8 @@ Route `0.0.0.0/1` and `128.0.0.0/1` to send everything through the tunnel. The t
 specific than the real default route, which stays untouched, so when subtun exits or crashes the
 machine is back to normal. Your LAN stays local (its own route is more specific), and subtun's own
 connection to the API server or Docker daemon is excluded automatically. Add `--dns-domain .` (or
-`dns.domains: ["."]`) to resolve every name through the tunnel as well. IPv6 is not redirected yet,
-so it still leaves directly in this mode.
+`dns.domains: ["."]`) to resolve every name through the tunnel as well. subtun doesn't carry IPv6
+yet, so in a full tunnel it blocks outgoing IPv6 (see [IPv6](#ipv6)); apps fall back to IPv4.
 
 ## Safety checks
 
@@ -160,10 +174,64 @@ when the fallback is one of the captured servers.
 - If the fallback resolver is inside one of your routes, unmatched names fail: their UDP queries go
   into the utun, which carries TCP only so far. `--dry-run` warns; exclude the resolver's address or
   match every name with `.`.
-- If the helper itself is killed (`kill -9`), the rules stay and DNS for the captured servers stops
-  working once subtun exits; subtun says so. Remove them with
-  `sudo pfctl -a com.apple/subtun -F nat && sudo pfctl -a com.apple/subtun -F rules`. pf itself
-  then stays enabled (with only macOS's own rules) until the next reboot, since the helper's
-  reference to it was never released.
+- If the helper itself is killed (`kill -9`), its rules stay and DNS for the captured servers stops
+  working once subtun exits; subtun says so. The next subtun run takes them over by itself;
+  `subtun cleanup` removes them without starting a session.
 - macOS only for now; `override` and `supplemental` capture modes (via the system resolver
   configuration instead of the firewall) are planned.
+
+## Kill switch
+
+Without a kill switch, when subtun stops or crashes its routes disappear with the utun, and traffic
+for those CIDRs goes out the normal way again (your LAN, your ISP, another VPN). That's fine for
+reaching a dev cluster; it's a leak when the point is that this traffic must never leave any other
+way. The kill switch blocks it with firewall rules.
+
+| `killSwitch.mode` / `--kill-switch` | While running | subtun crashes, is killed, or the tunnel is lost | You stop it (Ctrl-C, terminal closed) |
+|---|---|---|---|
+| `off` (default) | no blocking | normal networking | normal networking |
+| `on` | traffic for the routes can only leave through the tunnel | blocks stay | blocks removed |
+| `lockdown` | the same | blocks stay | blocks stay |
+
+| `killSwitch.dns` / `--kill-switch-dns` | While the blocks stay, with DNS capture |
+|---|---|
+| `block` (default) | DNS to the captured servers is blocked too: no name leaks to your normal resolver, and a private-link name can't resolve to a public endpoint. All DNS through those servers fails until subtun runs again or you clean up |
+| `allow` | DNS works normally (names may leak); only the routed traffic stays blocked |
+
+What is guarded: your routes minus local networks more specific than them. Your LAN inside a full
+tunnel stays reachable, as it does through the routing table, and a VPN client's own network stays
+with that client. A route more specific than such a network (a CGNAT /24 inside a VPN client's
+/16) stays guarded, since without subtun it would fall back to that network. subtun's own
+connection to the API server or Docker daemon is never blocked. With `--dry-run`, subtun shows how
+many prefixes it would guard.
+
+While the blocks stay, the next run of subtun takes them over: it asks for sudo before connecting,
+keeps blocking but allows DNS (so it can resolve the API server) and replaces them once the tunnel is
+up. If that start fails, the blocks are put back. To get back to normal without starting a session:
+
+```sh
+subtun cleanup      # sudo asks once; refuses while a subtun session is running
+```
+
+Notes:
+- In a full tunnel with a kill switch, other VPN clients' own connections (to their servers on the
+  internet) are blocked too: everything outside the tunnel is.
+- After a reboot the blocks are gone (pf rules live in memory).
+- The kill switch needs routes, and keeps the root helper running for the session.
+
+## IPv6
+
+subtun captures IPv4 only so far. On a dual-stack network, apps would prefer IPv6 for names that
+have both, and that traffic would bypass a full tunnel entirely. So subtun blocks outgoing IPv6:
+
+| `blockIPv6` / `--block-ipv6` | Effect |
+|---|---|
+| `auto` (default) | blocked when the routes cover all of IPv4 (`0.0.0.0/1` + `128.0.0.0/1`), not for split routes |
+| `true` | blocked whenever subtun captures |
+| `false` | never blocked |
+
+Link-local (`fe80::/10`), multicast (`ff00::/8`) and loopback stay allowed, so the local network
+keeps working; blocked connections are refused at once, so apps fall back to IPv4 quickly. If
+subtun's own connection to the API server uses IPv6, IPv6 is left alone, with a warning. The block
+is removed when subtun stops, unless a kill switch keeps its blocks in place (then IPv6 stays blocked
+with them).

@@ -61,7 +61,7 @@ func newRoot() *cobra.Command {
 	}
 	root.PersistentFlags().BoolVarP(&g.verbose, "verbose", "v", false, "debug logging")
 	root.PersistentFlags().StringVar(&g.config, "config", "", "config file (default: $SUBTUN_CONFIG or ~/.config/subtun/config.yaml)")
-	root.AddCommand(newUpCmd(g), newK8sCmd(g), newDockerCmd(g), newVersionCmd(), newHelperCmd())
+	root.AddCommand(newUpCmd(g), newK8sCmd(g), newDockerCmd(g), newCleanupCmd(g), newVersionCmd(), newHelperCmd())
 	return root
 }
 
@@ -121,6 +121,10 @@ type settings struct {
 	dnsDomains  []string
 	dnsPatterns []string
 	dnsFallback string
+
+	killSwitch    string
+	killSwitchDNS string
+	blockIPv6     string
 }
 
 func (s *settings) register(cmd *cobra.Command) {
@@ -143,6 +147,9 @@ func (s *settings) register(cmd *cobra.Command) {
 	f.StringVar(&s.dnsCapture, "dns-capture", "", "how DNS is captured: firewall (default, pf on macOS) or off")
 	f.StringVar(&s.dnsListen, "dns-listen", "", "answer DNS on this address instead of capturing it, no root needed (development)")
 	_ = f.MarkHidden("dns-listen")
+	f.StringVar(&s.killSwitch, "kill-switch", "", "keep routed traffic from leaving outside the tunnel: off (default), on (blocks stay after a crash or a lost tunnel), lockdown (also after Ctrl-C)")
+	f.StringVar(&s.killSwitchDNS, "kill-switch-dns", "", "while the kill switch holds, DNS to the captured servers is: block (default) or allow")
+	f.StringVar(&s.blockIPv6, "block-ipv6", "", "block outgoing IPv6: auto (default: in a full tunnel), true or false")
 }
 
 // applyProfile fills settings from a profile; flags given on the command
@@ -177,6 +184,15 @@ func (s *settings) applyProfile(p config.Profile, flags *pflag.FlagSet) {
 	}
 	s.dnsDomains = append(append([]string{}, p.DNS.Domains...), s.dnsDomains...)
 	s.dnsPatterns = append(append([]string{}, p.DNS.Patterns...), s.dnsPatterns...)
+	if !set("kill-switch") {
+		s.killSwitch = string(p.KillSwitch.Mode)
+	}
+	if !set("kill-switch-dns") {
+		s.killSwitchDNS = p.KillSwitch.DNS
+	}
+	if !set("block-ipv6") {
+		s.blockIPv6 = string(p.BlockIPv6)
+	}
 }
 
 func (s *settings) transport(g *globalOpts) transport.Options {
@@ -395,10 +411,14 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 	}
 	rp, warns, err := planRoutes(s)
 	var dnsOpts *capture.DNSOptions
+	var gp *guardPlan
 	if err == nil {
 		var notes []string
 		dnsOpts, notes, err = planDNS(s, rp)
 		warns = append(warns, notes...)
+	}
+	if err == nil {
+		gp, err = planGuard(s, rp)
 	}
 	if s.dryRun {
 		if err != nil {
@@ -414,6 +434,13 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		printPlan(out, rp, warns)
 		if dnsOpts != nil {
 			printDNSPlan(out, dnsOpts, s.dnsDomains, s.dnsPatterns)
+		}
+		if gp != nil {
+			guarded, err := guardPrefixes(rp.plan.Routes, localPrefixes())
+			if err != nil {
+				return err
+			}
+			printGuardPlan(out, gp, len(guarded), dnsOpts != nil)
 		}
 		return nil
 	}
@@ -444,6 +471,34 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		defer ln.Close()
 		if host, _, _ := net.SplitHostPort(s.socks); !isLoopback(host) {
 			log.Warn("SOCKS proxy is reachable from other hosts and has no authentication", "addr", ln.Addr())
+		}
+	}
+
+	// Rules an earlier session may have left (kill switch, a killed helper)
+	// can block DNS, which connecting needs: take them over first.
+	var early *privhelper.Client
+	marker := &leftovers{mark: privhelper.MarkLeftovers, clear: privhelper.ClearLeftovers}
+	if privhelper.LeftoversMarked() {
+		if rp == nil {
+			log.Warn("firewall rules from another subtun session may be in place; if networking misbehaves and none is running, run: subtun cleanup")
+		} else {
+			log.Info("firewall rules from another subtun session may be in place; checking with the root helper before connecting")
+			if early, err = privhelper.Start(ctx, &transport.LineLog{Log: log, Prefix: "helper: "}, log); err != nil {
+				return err
+			}
+			res, err := early.Adopt()
+			if err != nil {
+				_ = early.Close()
+				return fmt.Errorf("taking over firewall rules: %w", err)
+			}
+			log.Info(res.Message)
+			marker.adopted(res)
+			// Until capture takes it, closing it puts the rules back.
+			defer func() {
+				if early != nil {
+					_ = early.Close()
+				}
+			}()
 		}
 	}
 
@@ -483,6 +538,7 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 	}
 
 	var helperExited <-chan struct{}
+	deliberate := false // the user stopped subtun (signal), as opposed to a failure
 	if rp != nil {
 		final, err := excludeEndpoints(rp, carrier.Endpoints, log)
 		if err != nil {
@@ -493,18 +549,46 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 			dnsOpts.Tunnel = dns.UpstreamFunc(client.ExchangeDNS)
 			opts.DNS = dnsOpts
 		}
+		opts.KillSwitch, opts.AllowDNS, opts.BlockIPv6 = gp.killSwitch, gp.allowDNS, gp.blockIPv6
+		if opts.BlockIPv6 {
+			if a, ok := ipv6Endpoint(carrier.Endpoints); ok {
+				log.Warn("not blocking IPv6: subtun's own connection may use it", "endpoint", a)
+				opts.BlockIPv6, gp.blockIPv6 = false, false
+			}
+		}
+		if gp.on() {
+			if opts.Guarded, err = guardPrefixes(final, localPrefixes()); err != nil {
+				return err
+			}
+			if len(opts.Guarded) == 0 {
+				log.Warn("kill switch has nothing to guard: every route is a local network")
+			}
+		}
+		opts.Helper, early = early, nil
+		if opts.DNS != nil || gp.on() || gp.blockIPv6 {
+			// Firewall rules may outlive this process; the next run looks.
+			marker.firewall()
+		}
 		c, err := capture.Start(ctx, final, opts, client, log)
 		if err != nil {
+			marker.startFailed()
 			return fmt.Errorf("utun capture: %w", err)
 		}
-		// Closed before the tunnel (deferred above): firewall rules and
+		// Stopped before the tunnel (deferred above): firewall rules and
 		// routes go first.
-		defer c.Close()
+		defer func() {
+			leftBehind := c.Stop(deliberate)
+			marker.stopped(leftBehind)
+			if leftBehind {
+				log.Warn("kill switch: blocking rules stay in place; the next subtun run takes them over, or remove them with: subtun cleanup")
+			}
+		}()
 		helperExited = c.HelperExited()
 	}
 
 	select {
 	case <-ctx.Done():
+		deliberate = true
 		log.Info("shutting down")
 		return nil
 	case <-client.Done():
@@ -515,17 +599,14 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		// Ctrl-C reaches the helper too; that's a normal shutdown.
 		select {
 		case <-ctx.Done():
+			deliberate = true
 			log.Info("shutting down")
 			return nil
 		case <-time.After(300 * time.Millisecond):
 		}
-		return fmt.Errorf("the root helper exited unexpectedly, so DNS capture stopped. If DNS fails afterwards, remove the redirect with: sudo pfctl -a %s -F nat && sudo pfctl -a %s -F rules", pfAnchor, pfAnchor)
+		return errors.New("the root helper exited unexpectedly; its firewall rules may still be in place: the next subtun run takes them over, or remove them with: subtun cleanup")
 	}
 }
-
-// pfAnchor is where the macOS firewall driver keeps subtun's rules (see
-// internal/platform/darwin).
-const pfAnchor = "com.apple/subtun"
 
 // excludeEndpoints carves the carrier's own addresses (API server, Docker
 // daemon) out of the routes, so capture can't cut the tunnel.
@@ -555,6 +636,17 @@ func excludeEndpoints(rp *routePlan, endpoints []netip.Addr, log *slog.Logger) (
 		return nil, errors.New(strings.Join(errs, "; "))
 	}
 	return final.Routes, nil
+}
+
+// ipv6Endpoint finds an IPv6 address subtun itself connects to (API
+// server, Docker daemon); blocking IPv6 would cut the tunnel.
+func ipv6Endpoint(endpoints []netip.Addr) (netip.Addr, bool) {
+	for _, a := range endpoints {
+		if a.Unmap().Is6() && !a.IsLoopback() && !a.IsLinkLocalUnicast() {
+			return a, true
+		}
+	}
+	return netip.Addr{}, false
 }
 
 func loadAgents(file string) ([]agentbin.Binary, error) {

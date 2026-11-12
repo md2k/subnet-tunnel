@@ -1,7 +1,8 @@
 // Package config reads subtun's YAML config file: named profiles, each with
-// a target and the same settings the command line accepts. Command-line
-// flags override a profile's values; routes and excludes given on the
-// command line are added to the profile's.
+// a target and the same settings the command line accepts, plus optional
+// defaults for every profile. A profile's own value wins over the default;
+// lists (routes, excludes, DNS domains and patterns) add up. Command-line
+// flags override both, and lists given on the command line are added.
 package config
 
 import (
@@ -22,6 +23,7 @@ import (
 
 // File is the whole config file.
 type File struct {
+	Defaults Profile            `json:"defaults,omitempty"` // every key except target
 	Profiles map[string]Profile `json:"profiles"`
 }
 
@@ -35,6 +37,73 @@ type Profile struct {
 	AgentDir string   `json:"agentDir,omitempty"`
 	Tun      Tun      `json:"tun,omitempty"`
 	DNS      DNS      `json:"dns,omitempty"`
+
+	KillSwitch KillSwitch `json:"killSwitch,omitempty"`
+	BlockIPv6  Toggle     `json:"blockIPv6,omitempty"` // auto (default: in a full tunnel), true, false
+}
+
+// KillSwitch keeps traffic for the routed CIDRs from leaving any other way
+// when the tunnel is gone.
+type KillSwitch struct {
+	// Mode: off (default); on: blocks stay after a crash or a lost tunnel;
+	// lockdown: they also stay after a deliberate stop (Ctrl-C).
+	Mode Mode `json:"mode,omitempty"`
+	// DNS while the blocks stay, with DNS capture: block (default) or allow.
+	DNS string `json:"dns,omitempty"`
+}
+
+// Mode is a kill switch mode. YAML 1.1 reads bare on/off/yes/no as
+// booleans (and the YAML library hands them to string fields as "true" /
+// "false"), so those are mapped back.
+type Mode string
+
+// UnmarshalJSON accepts off, on, lockdown, and booleans.
+func (m *Mode) UnmarshalJSON(b []byte) error {
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	switch t := v.(type) {
+	case bool:
+		*m = "off"
+		if t {
+			*m = "on"
+		}
+	case string:
+		switch t {
+		case "true":
+			t = "on"
+		case "false":
+			t = "off"
+		}
+		*m = Mode(t)
+	default:
+		return errors.New("killSwitch.mode: use off, on or lockdown")
+	}
+	return nil
+}
+
+// Toggle is auto, true or false; YAML booleans and strings both work.
+type Toggle string
+
+// UnmarshalJSON accepts true, false or a string.
+func (t *Toggle) UnmarshalJSON(b []byte) error {
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	switch x := v.(type) {
+	case bool:
+		*t = "false"
+		if x {
+			*t = "true"
+		}
+	case string:
+		*t = Toggle(x)
+	default:
+		return errors.New("use auto, true or false")
+	}
+	return nil
 }
 
 // Target is where the agent runs: exactly one of K8s or Docker.
@@ -129,21 +198,65 @@ func Parse(data []byte, name string) (*File, error) {
 	if len(f.Profiles) == 0 {
 		return nil, fmt.Errorf("%s: no profiles", name)
 	}
+	if f.Defaults.Target.K8s != nil || f.Defaults.Target.Docker != nil {
+		return nil, fmt.Errorf("%s: defaults: target can only be set in a profile", name)
+	}
+	if err := f.Defaults.validateSettings(); err != nil {
+		return nil, fmt.Errorf("%s: defaults: %w", name, err)
+	}
 	for n, p := range f.Profiles {
-		if err := p.validate(n); err != nil {
+		if err := merge(f.Defaults, p).validate(n); err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
 	}
 	return &f, nil
 }
 
-// Profile returns the named profile, or an error listing the known ones.
+// merge applies defaults d to profile p: p's own values win, lists add up.
+func merge(d, p Profile) Profile {
+	pick := func(own, def string) string {
+		if own != "" {
+			return own
+		}
+		return def
+	}
+	cat := func(def, own []string) []string {
+		if len(def) == 0 {
+			return own
+		}
+		return append(append([]string{}, def...), own...)
+	}
+	out := p
+	out.Routes = cat(d.Routes, p.Routes)
+	out.Exclude = cat(d.Exclude, p.Exclude)
+	out.Socks = pick(p.Socks, d.Socks)
+	out.Agent = pick(p.Agent, d.Agent)
+	out.AgentDir = pick(p.AgentDir, d.AgentDir)
+	out.Tun.Address = pick(p.Tun.Address, d.Tun.Address)
+	if out.Tun.MTU == 0 {
+		out.Tun.MTU = d.Tun.MTU
+	}
+	out.DNS.Capture = pick(p.DNS.Capture, d.DNS.Capture)
+	out.DNS.Fallback = pick(p.DNS.Fallback, d.DNS.Fallback)
+	if len(out.DNS.Servers) == 0 {
+		out.DNS.Servers = d.DNS.Servers
+	}
+	out.DNS.Domains = cat(d.DNS.Domains, p.DNS.Domains)
+	out.DNS.Patterns = cat(d.DNS.Patterns, p.DNS.Patterns)
+	out.KillSwitch.Mode = Mode(pick(string(p.KillSwitch.Mode), string(d.KillSwitch.Mode)))
+	out.KillSwitch.DNS = pick(p.KillSwitch.DNS, d.KillSwitch.DNS)
+	out.BlockIPv6 = Toggle(pick(string(p.BlockIPv6), string(d.BlockIPv6)))
+	return out
+}
+
+// Profile returns the named profile with the defaults applied, or an error
+// listing the known ones.
 func (f *File) Profile(name string) (Profile, error) {
 	p, ok := f.Profiles[name]
 	if !ok {
 		return Profile{}, fmt.Errorf("no profile %q (have: %s)", name, strings.Join(f.Names(), ", "))
 	}
-	return p, nil
+	return merge(f.Defaults, p), nil
 }
 
 // Names lists the profiles, sorted.
@@ -175,27 +288,50 @@ func (p Profile) validate(name string) error {
 	default:
 		return fail(errors.New("target: set k8s or docker"))
 	}
-	if _, err := routes.ParseAll(p.Routes, routes.ParseRoute); err != nil {
-		return fail(fmt.Errorf("routes: %w", err))
-	}
-	if _, err := routes.ParseAll(p.Exclude, routes.ParsePrefix); err != nil {
-		return fail(fmt.Errorf("exclude: %w", err))
-	}
-	switch p.Agent {
-	case "", "auto", "binary", "python":
-	default:
-		return fail(fmt.Errorf("agent %q: use auto, binary or python", p.Agent))
+	if err := p.validateSettings(); err != nil {
+		return fail(err)
 	}
 	if len(p.Routes) == 0 && p.Socks == "" {
 		return fail(errors.New("nothing to do: set routes, socks, or both"))
 	}
+	return nil
+}
+
+// validateSettings checks everything but the target; used for defaults too.
+func (p Profile) validateSettings() error {
+	if _, err := routes.ParseAll(p.Routes, routes.ParseRoute); err != nil {
+		return fmt.Errorf("routes: %w", err)
+	}
+	if _, err := routes.ParseAll(p.Exclude, routes.ParsePrefix); err != nil {
+		return fmt.Errorf("exclude: %w", err)
+	}
+	switch p.Agent {
+	case "", "auto", "binary", "python":
+	default:
+		return fmt.Errorf("agent %q: use auto, binary or python", p.Agent)
+	}
 	switch p.DNS.Capture {
 	case "", "firewall", "off":
 	default:
-		return fail(fmt.Errorf("dns.capture %q: use firewall or off", p.DNS.Capture))
+		return fmt.Errorf("dns.capture %q: use firewall or off", p.DNS.Capture)
 	}
 	if _, err := dns.NewMatcher(p.DNS.Domains, p.DNS.Patterns); err != nil {
-		return fail(err)
+		return err
+	}
+	switch p.KillSwitch.Mode {
+	case "", "off", "on", "lockdown":
+	default:
+		return fmt.Errorf("killSwitch.mode %q: use off, on or lockdown", p.KillSwitch.Mode)
+	}
+	switch p.KillSwitch.DNS {
+	case "", "block", "allow":
+	default:
+		return fmt.Errorf("killSwitch.dns %q: use block or allow", p.KillSwitch.DNS)
+	}
+	switch p.BlockIPv6 {
+	case "", "auto", "true", "false":
+	default:
+		return fmt.Errorf("blockIPv6 %q: use auto, true or false", p.BlockIPv6)
 	}
 	return nil
 }

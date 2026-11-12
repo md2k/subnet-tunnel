@@ -56,15 +56,32 @@ type Routes interface {
 // anyone else's.
 type Firewall interface {
 	// Apply replaces subtun's rules with r in one step. The first Apply
-	// enables the firewall if it is off.
+	// enables the firewall if it is off (unless a reference was adopted).
 	Apply(r Rules) error
-	// Flush removes subtun's rules and undoes the enabling done by Apply.
+	// Flush removes subtun's rules and releases the reference that keeps
+	// the firewall enabled.
 	Flush() error
+	// Busy reports whether subtun's rules are loaded already: left behind
+	// by an earlier session, or another subtun's.
+	Busy() (bool, error)
+	// Token is the reference keeping the firewall enabled for subtun ("" if
+	// none). Adopt takes over one left behind by an earlier session, so a
+	// later Flush releases it.
+	Token() string
+	Adopt(token string)
 }
 
 // Rules is what subtun needs from the firewall, described as intent.
 type Rules struct {
-	DNS *DNSRedirect `json:"dns,omitempty"`
+	DNS        *DNSRedirect `json:"dns,omitempty"`
+	DNSBlock   []netip.Addr `json:"dns_block,omitempty"` // block DNS (UDP/TCP 53) sent to these servers
+	KillSwitch *KillSwitch  `json:"kill_switch,omitempty"`
+	BlockIPv6  bool         `json:"block_ipv6,omitempty"` // all outgoing IPv6 except link-local, multicast, loopback
+}
+
+// Empty reports whether r asks for nothing.
+func (r Rules) Empty() bool {
+	return r.DNS == nil && len(r.DNSBlock) == 0 && r.KillSwitch == nil && !r.BlockIPv6
 }
 
 // DNSRedirect captures DNS (UDP and TCP port 53) sent to Servers and
@@ -75,4 +92,12 @@ type DNSRedirect struct {
 	Servers    []netip.Addr `json:"servers"`
 	ListenPort uint16       `json:"listen_port"`
 	BypassPort uint16       `json:"bypass_port"`
+}
+
+// KillSwitch blocks traffic to Prefixes unless it leaves through TunIface.
+// With TunIface empty everything to them is blocked: what stays behind when
+// the tunnel is gone.
+type KillSwitch struct {
+	TunIface string         `json:"tun_iface,omitempty"`
+	Prefixes []netip.Prefix `json:"prefixes"`
 }

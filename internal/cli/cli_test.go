@@ -5,6 +5,8 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+
+	"github.com/md2k/subnet-tunnel/internal/privhelper"
 )
 
 // runCLI executes subtun with args and returns stdout and the error. Only
@@ -209,6 +211,161 @@ func TestDNSErrors(t *testing.T) {
 	for want, args := range cases {
 		if _, err := runCLI(t, append(args, "--dry-run")...); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%v: got %v, want %q", args, err, want)
+		}
+	}
+}
+
+func TestGuardDryRun(t *testing.T) {
+	fakeSystemDNS(t)
+	cases := []struct {
+		args    []string
+		want    []string
+		notWant []string
+	}{
+		{ // full tunnel: IPv6 blocked automatically
+			args: []string{"k8s", "debug", "0.0.0.0/1", "128.0.0.0/1"},
+			want: []string{"IPv6: outgoing IPv6 blocked (full tunnel)"}, notWant: []string{"kill switch"},
+		},
+		{ // split routes: no IPv6 block unless asked
+			args: []string{"k8s", "debug", "203.0.113.0/24"}, notWant: []string{"IPv6", "kill switch"},
+		},
+		{
+			args: []string{"k8s", "debug", "203.0.113.0/24", "--block-ipv6", "true"},
+			want: []string{"IPv6: outgoing IPv6 blocked (asked for)"},
+		},
+		{
+			args: []string{"k8s", "debug", "0.0.0.0/1", "128.0.0.0/1", "--block-ipv6", "false"}, notWant: []string{"IPv6"},
+		},
+		{
+			args: []string{"k8s", "debug", "203.0.113.0/24", "--kill-switch", "on", "--dns-domain", "cluster.local"},
+			want: []string{"kill switch: on: traffic for 1 guarded prefixes", "Ctrl-C removes them", "DNS to the captured servers is blocked too"},
+		},
+		{
+			args: []string{"k8s", "debug", "203.0.113.0/24", "--kill-switch", "lockdown", "--kill-switch-dns", "allow", "--dns-domain", "cluster.local"},
+			want: []string{"kill switch: lockdown:", "after subtun stops for any reason", "DNS stays allowed"},
+		},
+	}
+	for _, c := range cases {
+		out, err := runCLI(t, append(c.args, "--dry-run")...)
+		if err != nil {
+			t.Errorf("%v: %v", c.args, err)
+			continue
+		}
+		for _, w := range c.want {
+			if !strings.Contains(out, w) {
+				t.Errorf("%v: missing %q in\n%s", c.args, w, out)
+			}
+		}
+		for _, w := range c.notWant {
+			if strings.Contains(out, w) {
+				t.Errorf("%v: unexpected %q in\n%s", c.args, w, out)
+			}
+		}
+	}
+}
+
+func TestGuardProfileAndErrors(t *testing.T) {
+	out, err := runCLI(t, "--config", "testdata/config.yaml", "up", "dns", "--dry-run")
+	if err != nil || !strings.Contains(out, "kill switch: lockdown") {
+		t.Errorf("profile kill switch: %v\n%s", err, out)
+	}
+	out, err = runCLI(t, "--config", "testdata/config.yaml", "up", "dns", "--kill-switch", "off", "--dry-run")
+	if err != nil || strings.Contains(out, "kill switch") {
+		t.Errorf("--kill-switch off overrides the profile: %v\n%s", err, out)
+	}
+	cases := map[string][]string{
+		"give routes as well":        {"k8s", "debug", "--socks", "127.0.0.1:1080", "--kill-switch", "on"},
+		"use off, on or lockdown":    {"k8s", "debug", "203.0.113.0/24", "--kill-switch", "always"},
+		"use block or allow":         {"k8s", "debug", "203.0.113.0/24", "--kill-switch-dns", "maybe"},
+		"use auto, true or false":    {"k8s", "debug", "203.0.113.0/24", "--block-ipv6", "sometimes"},
+		"together with utun capture": {"k8s", "debug", "--socks", "127.0.0.1:1080", "--block-ipv6", "true"},
+	}
+	for want, args := range cases {
+		if _, err := runCLI(t, append(args, "--dry-run")...); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%v: got %v, want %q", args, err, want)
+		}
+	}
+}
+
+// The kill switch guards the routes minus local networks more specific
+// than them; routes more specific than a local network stay guarded.
+func TestGuardPrefixes(t *testing.T) {
+	pp := func(ss ...string) []netip.Prefix {
+		var out []netip.Prefix
+		for _, s := range ss {
+			out = append(out, netip.MustParsePrefix(s))
+		}
+		return out
+	}
+	full, err := guardPrefixes(pp("0.0.0.0/1", "128.0.0.0/1"), pp("192.168.1.0/24", "100.64.0.0/16"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	covered := func(set []netip.Prefix, a string) bool {
+		for _, p := range set {
+			if p.Contains(netip.MustParseAddr(a)) {
+				return true
+			}
+		}
+		return false
+	}
+	if !covered(full, "8.8.8.8") || covered(full, "192.168.1.20") || covered(full, "100.64.3.4") {
+		t.Errorf("full tunnel guard: %v", full)
+	}
+	cgnat, err := guardPrefixes(pp("100.64.5.0/24"), pp("100.64.0.0/16"))
+	if err != nil || len(cgnat) != 1 || cgnat[0].String() != "100.64.5.0/24" {
+		t.Errorf("route inside a VPN's network: %v, %v", cgnat, err)
+	}
+}
+
+func TestIPv6Endpoint(t *testing.T) {
+	v4 := []netip.Addr{netip.MustParseAddr("203.0.113.10"), netip.MustParseAddr("::1"), netip.MustParseAddr("fe80::1")}
+	if _, ok := ipv6Endpoint(v4); ok {
+		t.Error("IPv4, loopback and link-local endpoints don't need IPv6")
+	}
+	if a, ok := ipv6Endpoint(append(v4, netip.MustParseAddr("2001:db8::10"))); !ok || a.String() != "2001:db8::10" {
+		t.Error("global IPv6 endpoint not found")
+	}
+}
+
+// The leftovers marker is shared between runs: only a run that loaded
+// firewall rules, or took over the ones it was set for, removes it.
+func TestLeftoversMarker(t *testing.T) {
+	type tc struct {
+		name       string
+		adopt      *privhelper.AdoptResult // nil: no marker at start
+		firewall   bool
+		startFails bool
+		leftBehind bool
+		want       bool // marker present at the end
+	}
+	cases := []tc{
+		{name: "routes only, no marker", want: false},
+		{name: "routes only beside a running firewall session", adopt: &privhelper.AdoptResult{Running: true}, want: true},
+		{name: "firewall session ends cleanly", firewall: true, want: false},
+		{name: "kill switch leaves blocks", firewall: true, leftBehind: true, want: true},
+		{name: "firewall start fails", firewall: true, startFails: true, want: false},
+		{name: "took over, start fails: blocks put back", adopt: &privhelper.AdoptResult{Kept: true}, firewall: true, startFails: true, want: true},
+		{name: "took over, session without firewall removes them", adopt: &privhelper.AdoptResult{Kept: true}, want: false},
+		{name: "nothing was left", adopt: &privhelper.AdoptResult{}, want: false},
+		{name: "refused beside a running session", adopt: &privhelper.AdoptResult{Running: true}, firewall: true, startFails: true, want: true},
+	}
+	for _, c := range cases {
+		present := c.adopt != nil
+		l := &leftovers{mark: func() error { present = true; return nil }, clear: func() { present = false }}
+		if c.adopt != nil {
+			l.adopted(*c.adopt)
+		}
+		if c.firewall {
+			l.firewall()
+		}
+		if c.startFails {
+			l.startFailed()
+		} else {
+			l.stopped(c.leftBehind)
+		}
+		if present != c.want {
+			t.Errorf("%s: marker present = %v, want %v", c.name, present, c.want)
 		}
 	}
 }

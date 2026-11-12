@@ -11,7 +11,6 @@ import (
 
 	"github.com/md2k/subnet-tunnel/internal/dns"
 	"github.com/md2k/subnet-tunnel/internal/platform"
-	"github.com/md2k/subnet-tunnel/internal/privhelper"
 )
 
 // DNSOptions configures DNS capture.
@@ -87,12 +86,12 @@ func (r *dnsRuntime) fallback() []netip.AddrPort {
 	return out
 }
 
-func (r *dnsRuntime) rules() platform.Rules {
-	return platform.Rules{DNS: &platform.DNSRedirect{
+func (r *dnsRuntime) redirect() *platform.DNSRedirect {
+	return &platform.DNSRedirect{
 		Servers:    *r.servers.Load(),
 		ListenPort: r.listenPort,
 		BypassPort: r.bypassPort,
-	}}
+	}
 }
 
 func (r *dnsRuntime) logReady(log *slog.Logger) {
@@ -100,15 +99,15 @@ func (r *dnsRuntime) logReady(log *slog.Logger) {
 }
 
 // follow re-points the capture when the system's DNS servers change
-// (network switch, VPN up or down).
-func (r *dnsRuntime) follow(ctx context.Context, interval time.Duration, h *privhelper.Client, log *slog.Logger) {
+// (network switch, VPN up or down): apply re-sends the firewall rules.
+func (r *dnsRuntime) follow(ctx context.Context, interval time.Duration, log *slog.Logger, apply func() error) {
 	read := func() ([]netip.Addr, []string, error) { return dns.SystemServers(dns.ResolvConf) }
 	dns.WatchServers(ctx, interval, *r.servers.Load(), read, func(servers []netip.Addr, notes []string) {
 		r.servers.Store(&servers)
 		for _, n := range notes {
 			log.Warn(n)
 		}
-		if err := h.ApplyFirewall(r.rules()); err != nil {
+		if err := apply(); err != nil {
 			if ctx.Err() == nil {
 				log.Warn("DNS servers changed, but updating the capture failed", "servers", servers, "err", err)
 			}

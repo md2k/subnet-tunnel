@@ -28,7 +28,22 @@ func (*Client) CreateTun(int, netip.Addr) (string, *os.File, error) { return "",
 func (*Client) AddRoute(netip.Prefix) error { return errUnsupported }
 
 // ApplyFirewall is not implemented on this platform yet.
-func (*Client) ApplyFirewall(platform.Rules) error { return errUnsupported }
+func (*Client) ApplyFirewall(platform.Rules, *platform.Rules) error { return errUnsupported }
+
+// End is not implemented on this platform yet.
+func (*Client) End(bool) error { return errUnsupported }
+
+// Adopt is not implemented on this platform yet.
+func (*Client) Adopt() (AdoptResult, error) { return AdoptResult{}, errUnsupported }
+
+// AdoptResult says what Adopt found.
+type AdoptResult struct {
+	Kept, Running bool
+	Message       string
+}
+
+// Cleanup is not implemented on this platform yet.
+func (*Client) Cleanup() (string, error) { return "", errUnsupported }
 
 // DoneSession is not implemented on this platform yet.
 func (*Client) DoneSession() error { return errUnsupported }
@@ -41,6 +56,15 @@ func (*Client) Done() error { return errUnsupported }
 
 // Close is not implemented on this platform yet.
 func (*Client) Close() error { return nil }
+
+// MarkLeftovers is not implemented on this platform yet.
+func MarkLeftovers() error { return nil }
+
+// ClearLeftovers is not implemented on this platform yet.
+func ClearLeftovers() {}
+
+// LeftoversMarked is not implemented on this platform yet.
+func LeftoversMarked() bool { return false }
 
 // Serve is not implemented on this platform yet.
 func Serve(context.Context, string, io.Reader, *slog.Logger) error { return errUnsupported }

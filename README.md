@@ -9,7 +9,7 @@ pf-based capture caps upload at a few MB/s, while a utun interface with a usersp
 reached ~170 MB/s end to end in the same test (see [docs/design.md](docs/design.md)).
 
 > **Status:** early development. Kubernetes and Docker targets, transparent capture of CIDRs on
-> macOS (utun + gVisor), split DNS and a SOCKS5 proxy.
+> macOS (utun + gVisor), split DNS, a kill switch and a SOCKS5 proxy.
 
 ## Build
 
@@ -81,6 +81,11 @@ answers the queries your Mac sends to its DNS servers: matching names are resolv
 own resolver through the tunnel, the rest by your normal resolver. Like sshuttle's `--dns` with
 domain patterns, for any number of domains. See [DNS](docs/config.md#dns).
 
+**Kill switch.** `--kill-switch on` keeps traffic for your routes from leaving any other way when
+the tunnel is gone (crash, lost pod): the blocks stay until the next run or `subtun cleanup`;
+`lockdown` keeps them even after Ctrl-C. In a full tunnel (`0.0.0.0/1 128.0.0.0/1`) subtun also
+blocks IPv6, which it doesn't carry yet. See [Kill switch](docs/config.md#kill-switch).
+
 **Excludes and profiles.** `-x/--exclude` keeps addresses out of the tunnel; the most specific rule
 wins, like sshuttle. `--dry-run` prints the routes subtun would install. Settings can live in named
 profiles in `~/.config/subtun/config.yaml`:
@@ -93,6 +98,7 @@ profiles:
     exclude: [10.1.0.0/16]
     socks: 127.0.0.1:1080
     dns: {domains: [cluster.local, company.com]}
+    killSwitch: {mode: on}
 ```
 
 ```sh
@@ -103,7 +109,6 @@ See [Configuration](docs/config.md).
 
 ## Planned
 
-- Kill switch (fail-closed) and IPv6 blocking for full tunnels.
 - `subtun import sshuttle` for existing sshuttle option files.
 - SSH transport to any host.
 - Capture on Linux (TUN) and Windows (wintun); IPv6 and UDP.
@@ -111,7 +116,8 @@ See [Configuration](docs/config.md).
 
 ## Documentation
 
-- [Configuration](docs/config.md): profiles, routes and excludes, split DNS, safety checks.
+- [Configuration](docs/config.md): profiles and defaults, routes and excludes, split DNS, kill
+  switch, IPv6, safety checks.
 - [Design](docs/design.md): measurements, architecture and open questions.
 - [Development](docs/development.md): tests, code layout and the local test setup.
 
