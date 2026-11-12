@@ -187,7 +187,7 @@ the time is up. The clock starts with subtun, so the sudo prompt and connecting 
 any run that may cut your own network, like a full tunnel or the kill switch:
 
 ```sh
-build/subtun -v k8s -n subtun-dev target 0.0.0.0/0 --max-duration 2m
+build/subtun -v k8s -n subtun-dev target 0.0.0.0/1 128.0.0.0/1 --max-duration 2m
 ```
 
 If stopping hangs, subtun exits 20 seconds later anyway (exit code 3). macOS then removes the utun

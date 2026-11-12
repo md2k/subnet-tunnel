@@ -29,7 +29,7 @@ func ParseRoute(s string) (netip.Prefix, error) {
 		return netip.Prefix{}, err
 	}
 	if p.Bits() == 0 {
-		return netip.Prefix{}, errors.New("capturing the default route (0.0.0.0/0) is not supported")
+		return netip.Prefix{}, errors.New("capturing the default route (0.0.0.0/0) is not supported; for a full tunnel give 0.0.0.0/1 128.0.0.0/1")
 	}
 	if p.Addr().IsLoopback() || p.Addr().IsMulticast() {
 		return netip.Prefix{}, fmt.Errorf("%s: loopback and multicast ranges can't be routed through the tunnel", p)
