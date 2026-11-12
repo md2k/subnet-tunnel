@@ -120,6 +120,17 @@ app ──► SOCKS5 proxy  ───┘   smux streams    exec stdio   in the t
   or the default gateway are refused and overlaps with local interface networks are reported. At
   connect time the API server or Docker daemon address is excluded automatically. Details:
   [Configuration](config.md).
+- **Routing loops.** A target on this machine (Docker Desktop, kind, minikube) reaches the internet
+  through this machine. Route internet addresses through it, and its connections come back into the
+  tunnel, to the target again, without end.
+  - The stack caps the connections open or opening to one destination (address and port) at 256.
+    The next one is refused, and the chain unwinds within seconds, with one warning per destination
+    a minute.
+  - Normal clients stay far below the cap. Clients that open and close many connections in a row
+    don't add up, since only open connections count.
+  - subtun also warns at start when its own connection goes to this machine (a unix socket or
+    loopback) and the routes include internet addresses.
+  - So a full tunnel needs a target outside this machine.
 
 - **Agents.** Two implementations of the same protocol; `--agent auto` uses the first that can run.
   - *Binary:* a static Linux Go binary (`cmd/subtun-agent`, ~3.5 MB) embedded in subtun for amd64
@@ -337,7 +348,9 @@ Configuration: [Kill switch](config.md#kill-switch), [IPv6](config.md#ipv6).
 
 - **Full tunnel** works through route planning: route `0.0.0.0/1` and `128.0.0.0/1`. The real
   default route stays untouched, the LAN stays local and subtun's own connection is excluded. DNS
-  follows with `dns.domains: ["."]`.
+  follows with `dns.domains: ["."]`. The target must be outside this machine (see
+  [Routing loops](#architecture)), and UDP and ICMP to the internet don't pass, since the utun
+  carries TCP only so far.
 - **Kill switch** (`killSwitch.mode: on | lockdown`): if subtun dies, its routes vanish with the
   utun, and that traffic would fall back to the normal default route: a leak. pf rules allow traffic
   to the guarded prefixes only through subtun's utun, and when the tunnel goes away, block rules
@@ -413,6 +426,10 @@ captured. What stays behind has no `pass` rule and blocks DNS with
 - **A helper killed with SIGKILL** leaves its running rules, including the DNS redirect to subtun's
   listener port. Until the next session takes them over or `subtun cleanup` runs, a local process
   could bind that port and answer the Mac's DNS queries.
+- **Loop guard limits:** the cap (256 per destination) isn't configurable. A client holding more
+  connections to one address and port at once would be refused. Targets in a VM on a bridge
+  network (an address on a local network rather than loopback) don't trigger the start warning;
+  only the cap catches their loops.
 - **IPv6 DNS servers** are not captured yet (IPv4 only, like sshuttle with `--disable-ipv6`).
 - **UDP through the tunnel:** a fallback resolver inside a routed CIDR fails, because the utun
   carries TCP only so far.

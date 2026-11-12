@@ -554,6 +554,9 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		if err != nil {
 			return err
 		}
+		if carrier.Local && routesInternet(final) {
+			log.Warn(localLoopWarning)
+		}
 		opts := rp.opts
 		if dnsOpts != nil {
 			dnsOpts.Tunnel = dns.UpstreamFunc(client.ExchangeDNS)

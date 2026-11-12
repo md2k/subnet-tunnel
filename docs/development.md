@@ -180,6 +180,21 @@ decides whether DNS stays blocked meanwhile. `cat /var/run/subtun/state.json` (a
 helper holds the rules.
 
 
+### Loop guard (needs sudo, run by hand)
+
+Docker Desktop's pods reach the internet through the Mac, so routing an internet address through one
+makes a loop, which subtun must cut:
+
+```sh
+build/subtun -v k8s -n subtun-dev target 1.1.1.1 --max-duration 2m
+curl -m 20 -s -o /dev/null -w '%{http_code} %{time_total}\n' https://1.1.1.1/   # fails within seconds
+```
+
+The log shows the start warning (`the target seems to run on this machine ...`) and
+`refusing connections: too many open to one destination, likely a routing loop`, repeated at most
+once a minute per destination. Everything not routed works throughout. A full tunnel through Docker Desktop does the same
+for every internet address, this Claude session's included: only ever with `--max-duration`.
+
 ### A way back: `--max-duration`
 
 The hidden `--max-duration DURATION` flag makes subtun stop by itself, the same way as on Ctrl-C, once

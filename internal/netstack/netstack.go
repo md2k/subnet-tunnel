@@ -59,6 +59,10 @@ type Dialer interface {
 type Options struct {
 	Logger      *slog.Logger  // nil: discard
 	DialTimeout time.Duration // 0: 15s
+	// MaxPerDestination caps the connections open or opening to one
+	// destination (address and port) at once; more are refused. It cuts
+	// routing loops. 0: DefaultMaxPerDestination.
+	MaxPerDestination int
 }
 
 const (
@@ -77,6 +81,7 @@ type Stack struct {
 	dev    Device
 	dialer Dialer
 	opts   Options
+	guard  *loopGuard
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	once   sync.Once
@@ -90,6 +95,9 @@ func New(dev Device, dialer Dialer, opts Options) (*Stack, error) {
 	}
 	if opts.DialTimeout == 0 {
 		opts.DialTimeout = 15 * time.Second
+	}
+	if opts.MaxPerDestination == 0 {
+		opts.MaxPerDestination = DefaultMaxPerDestination
 	}
 	mtu := dev.MTU()
 	if mtu <= 0 {
@@ -125,7 +133,7 @@ func New(dev Device, dialer Dialer, opts Options) (*Stack, error) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	st := &Stack{s: s, ep: ep, dev: dev, dialer: dialer, opts: opts, cancel: cancel}
+	st := &Stack{s: s, ep: ep, dev: dev, dialer: dialer, opts: opts, guard: newLoopGuard(opts.MaxPerDestination), cancel: cancel}
 	fwd := tcp.NewForwarder(s, 0, maxInFlight, st.forward)
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, fwd.HandlePacket)
 
@@ -166,11 +174,26 @@ func (st *Stack) forward(r *tcp.ForwarderRequest) {
 	dst := net.JoinHostPort(id.LocalAddress.String(), strconv.Itoa(int(id.LocalPort)))
 	log := st.opts.Logger.With("dst", dst)
 
+	ok, warn, refused := st.guard.acquire(dst)
+	if !ok {
+		if warn {
+			log.Warn("refusing connections: too many open to one destination, likely a routing loop (the target reaches it through this machine, and the routes send that back into the tunnel)",
+				"open", st.opts.MaxPerDestination, "refused", refused)
+		}
+		r.Complete(true)
+		return
+	}
+	defer st.guard.release(dst)
+
 	ctx, cancel := context.WithTimeout(context.Background(), st.opts.DialTimeout)
 	up, err := st.dialer.DialContext(ctx, "tcp", dst)
 	cancel()
 	if err != nil {
-		log.Info("connect failed", "err", err)
+		if st.guard.looping(dst) { // a loop unwinding: one warning was enough
+			log.Debug("connect failed", "err", err)
+		} else {
+			log.Info("connect failed", "err", err)
+		}
 		r.Complete(true) // reset: the app sees "connection refused"
 		return
 	}
