@@ -165,6 +165,9 @@ func (l *ServerList) UnmarshalJSON(b []byte) error {
 
 var profileName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 
+// ValidProfileName reports whether name can name a profile.
+func ValidProfileName(name string) bool { return profileName.MatchString(name) }
+
 // DefaultPath is $SUBTUN_CONFIG, else $XDG_CONFIG_HOME/subtun/config.yaml,
 // else ~/.config/subtun/config.yaml.
 func DefaultPath() string {
