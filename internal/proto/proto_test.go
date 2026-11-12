@@ -78,3 +78,27 @@ func TestHello(t *testing.T) {
 		t.Fatal("unbounded hello accepted")
 	}
 }
+
+func TestDNSFraming(t *testing.T) {
+	msg := append([]byte{0xab, 0xcd, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0}, "\x03web\x00\x00\x01\x00\x01"...)
+	var buf bytes.Buffer
+	if err := WriteDNS(&buf, msg); err != nil {
+		t.Fatal(err)
+	}
+	if got := buf.Bytes()[:2]; got[0] != 0 || int(got[1]) != len(msg) {
+		t.Fatalf("length prefix %x", got)
+	}
+	out, err := ReadDNS(&buf)
+	if err != nil || !bytes.Equal(out, msg) {
+		t.Fatalf("got %x, %v", out, err)
+	}
+	if err := WriteDNS(&buf, msg[:5]); err == nil {
+		t.Error("short message written")
+	}
+	if _, err := ReadDNS(bytes.NewReader([]byte{0, 3, 1, 2, 3})); err == nil {
+		t.Error("short message read")
+	}
+	if _, err := ReadDNS(bytes.NewReader([]byte{0, 20, 1, 2})); err == nil {
+		t.Error("truncated message read")
+	}
+}

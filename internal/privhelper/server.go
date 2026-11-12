@@ -61,6 +61,10 @@ func Serve(ctx context.Context, socketPath string, stdin io.Reader, log *slog.Lo
 		return err
 	}
 
-	h := &helper{conn: conn, log: log, drivers: platform.Drivers{Tun: darwin.Utun{}, Routes: darwin.Route{}}}
+	h := &helper{conn: conn, log: log, drivers: platform.Drivers{
+		Tun:      darwin.Utun{},
+		Routes:   darwin.Route{},
+		Firewall: &darwin.PF{Log: log},
+	}}
 	return h.loop(ctx)
 }

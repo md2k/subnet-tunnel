@@ -43,9 +43,9 @@ type pipeCarrier struct {
 	io.WriteCloser
 }
 
-// startAgent runs the Python agent locally over pipes, with dial() replaced
-// by in-process socket pairs (testdata/fakenet.py), and connects a tunnel
-// client to it. Skips if there is no suitable python3.
+// startAgent runs the Python agent locally over pipes, with dial() and
+// dns_connect() replaced by in-process socket pairs (testdata/fakenet.py),
+// and connects a tunnel client to it. Skips if there is no suitable python3.
 func startAgent(t *testing.T) *tunnel.Client {
 	t.Helper()
 	python, err := exec.LookPath("python3")
@@ -60,13 +60,19 @@ func startAgent(t *testing.T) *tunnel.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
+	resolvConf, err := filepath.Abs("testdata/resolv.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	src := agentpy.Source("test")
 	// Like agentpy.Command, but run as a module first so the shim can swap
-	// dial() before starting main().
+	// dial() and dns_connect() and point RESOLV_CONF at testdata before
+	// starting main().
 	loader := fmt.Sprintf("import sys;_src=sys.stdin.buffer.read(%d);g={'__name__':'subtun_agent','_src':_src};"+
-		"exec(compile(_src,'subtun-agent.py','exec'),g);exec(compile(open(%q).read(),'fakenet.py','exec'),g)",
-		len(src), shim)
+		"exec(compile(_src,'subtun-agent.py','exec'),g);g['RESOLV_CONF']=%q;"+
+		"exec(compile(open(%q).read(),'fakenet.py','exec'),g)",
+		len(src), resolvConf, shim)
 	cmd := exec.Command(python, "-c", loader, "-v")
 	stdin, _ := cmd.StdinPipe()
 	stdout, _ := cmd.StdoutPipe()
@@ -172,4 +178,32 @@ func TestPythonAgentRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = conn.Close()
+}
+
+func dnsQuery(id byte, name string) []byte {
+	q := []byte{0, id, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0}
+	for _, label := range strings.Split(name, ".") {
+		q = append(q, byte(len(label)))
+		q = append(q, label...)
+	}
+	return append(q, 0, 0, 1, 0, 1)
+}
+
+// The Python agent reads resolv.conf, skips the server that refuses, ignores
+// a stray datagram and returns the answer unchanged; a truncated answer is
+// fetched again over TCP.
+func TestPythonAgentDNS(t *testing.T) {
+	c := startAgent(t)
+	for name, marker := range map[string]string{"web.example": "udp", "big.example": "tcp"} {
+		q := dnsQuery(9, name)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		got, err := c.ExchangeDNS(ctx, q)
+		cancel()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(got) != len(q)+len(marker) || got[1] != 9 || got[2]&0x80 == 0 || got[2]&0x02 != 0 || !strings.HasSuffix(string(got), marker) {
+			t.Errorf("%s: got %q, want the %s answer", name, got, marker)
+		}
+	}
 }

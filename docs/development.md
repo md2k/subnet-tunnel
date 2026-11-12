@@ -43,6 +43,7 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/transport/k8s`, `.../docker` | exec into a pod / container |
 | `internal/socks` | SOCKS5 frontend |
 | `internal/capture` | utun capture setup: helper → utun + routes → netstack |
+| `internal/dns` | DNS engine: match names, tunnel or fallback, UDP/TCP listener, loop-free forwarder |
 | `internal/routes` | route planning: excludes by subtraction, cleanup, safety checks |
 | `internal/config` | YAML config profiles |
 | `internal/netinfo` | local interface networks and default gateway (read-only) |
@@ -56,8 +57,11 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 
 The netstack tests drive the capture stack from a second gVisor stack over an in-memory wire. The
 helper tests cover validation, descriptor passing and the helper's command loop (with recording fake
-drivers) over an in-process socket pair. The macOS drivers themselves need root (creating the utun,
-routes) and are tested by hand, below.
+drivers) over an in-process socket pair. The pf driver is tested against a fake `pfctl` that answers
+like a stock macOS. The DNS engine is tested with in-memory packet connections and upstreams; DNS
+through both agents runs over in-memory pipes, with the Python agent's sockets swapped for socket
+pairs. The macOS drivers themselves need root (creating the utun, routes, pf rules) and are tested by
+hand, below.
 
 ## Local test setup
 
@@ -127,3 +131,35 @@ Tips:
   the prompt, wrong password), start with `sudo -k && build/subtun …`.
 - To keep a log, use `build/subtun … 2>&1 | tee -i build/run.log`: without `-i`, Ctrl-C also kills
   `tee` and subtun's last lines (shutdown) are lost.
+
+### DNS without root
+
+The hidden `--dns-listen ADDR` flag answers DNS on a local address instead of capturing it, so the
+DNS path through the agent can be tested with `dig` and no sudo. Pick a free port; 5353 belongs to
+macOS's mDNS responder.
+
+```sh
+build/subtun -v k8s -n subtun-dev target --dns-listen 127.0.0.1:15353 --dns-domain cluster.local
+dig @127.0.0.1 -p 15353 +short web.subtun-dev.svc.cluster.local      # the service's ClusterIP
+dig @127.0.0.1 -p 15353 +tcp web.subtun-dev.svc.cluster.local SRV
+build/subtun -v docker subtun-dev-py36-1 --agent python --dns-listen 127.0.0.1:15353 --dns-domain .
+dig @127.0.0.1 -p 15353 +short web                                   # Docker's embedded DNS
+```
+
+### DNS capture (needs sudo, run by hand)
+
+```sh
+build/subtun -v k8s -n subtun-dev target $WEB_SVC --dns-domain cluster.local
+dscacheutil -q host -a name web.subtun-dev.svc.cluster.local   # through the system resolver
+curl http://web.subtun-dev.svc.cluster.local:8080/
+sudo pfctl -a com.apple/subtun -s nat; sudo pfctl -a com.apple/subtun -s rules   # subtun's rules
+sudo pfctl -a com.apple/subtun -t subtun_dns -T show                              # captured servers
+```
+
+`-s nat` and `-s rules` print the rules in pf's expanded form (one line per protocol, `port = 53`) and
+don't show the table; before the first run the anchor doesn't exist yet and pfctl says
+`DIOCGETRULES: Invalid argument`.
+
+After Ctrl-C, `kill -9` of subtun, or closing the terminal, both `pfctl` commands must print
+nothing, and names outside your domains must resolve as before throughout.
+

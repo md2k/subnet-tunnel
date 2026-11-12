@@ -4,7 +4,8 @@
 # `python3 -c <loader>`, the way sshuttle starts its server: nothing is
 # written to the target. It speaks the same protocol as cmd/subtun-agent
 # (internal/proto): a hello line on stdout, then smux v2 on stdin/stdout with
-# one stream per connection carrying a request, a status reply and raw bytes.
+# one stream per connection carrying a request, a status reply and raw bytes,
+# or one DNS query and its answer.
 #
 # Python 3.6+, standard library only.
 
@@ -33,12 +34,21 @@ MAX_FRAME = 65535
 KEEPALIVE = 10  # seconds; the client drops the session after 30 s of silence
 
 # Stream request/response (big-endian, see internal/proto).
-CMD_CONNECT = 1
+CMD_CONNECT, CMD_DNS = 1, 2
 ST_OK, ST_FAILURE, ST_REFUSED, ST_UNREACHABLE, ST_TIMEOUT, ST_DNS, ST_BAD_REQUEST = range(7)
 MAX_ADDR = 512
 MAX_MSG = 512
 REQUEST_TIMEOUT = 30
 DIAL_TIMEOUT = 10
+
+# DNS queries (CMD_DNS) go unchanged to the target's own resolver.
+RESOLVER_SYSTEM = "-"
+RESOLV_CONF = "/etc/resolv.conf"
+MIN_DNS = 12  # header
+DNS_UDP_TIMEOUT = 2
+DNS_TCP_TIMEOUT = 5
+DNS_TOTAL_TIMEOUT = 10
+MAX_NAMESERVERS = 3
 
 VERBOSE = "-v" in sys.argv[1:]
 _log_lock = threading.Lock()
@@ -306,6 +316,9 @@ def handle(st):
         except (EOFError, socket.timeout, IOError) as e:
             log("WARN", "bad request", stream=st.sid, err=e)
             return
+        if cmd == CMD_DNS:
+            handle_dns(st, addr)
+            return
         if cmd != CMD_CONNECT:
             reply(st, ST_BAD_REQUEST, "unsupported command")
             return
@@ -327,6 +340,122 @@ def handle(st):
     finally:
         st.close_write()
         st.sess.forget(st.sid)
+
+
+def handle_dns(st, addr):
+    if addr != RESOLVER_SYSTEM:
+        reply(st, ST_BAD_REQUEST, "unsupported resolver " + addr)
+        return
+    n, = struct.unpack(">H", st.read_exact(2, REQUEST_TIMEOUT))
+    if n < MIN_DNS:
+        log("WARN", "bad DNS query", stream=st.sid, length=n)
+        return
+    query = st.read_exact(n, REQUEST_TIMEOUT)
+    try:
+        answer = exchange_any(query)
+    except Exception as e:
+        log("DEBUG", "DNS query failed", stream=st.sid, err=e)
+        reply(st, status_for(e), "DNS: %s" % e)
+        return
+    reply(st, ST_OK)
+    st.write(struct.pack(">H", len(answer)) + answer)
+
+
+def is_ip(s):
+    for family, text in ((socket.AF_INET, s), (socket.AF_INET6, s.split("%")[0])):
+        try:
+            socket.inet_pton(family, text)
+            return True
+        except (OSError, ValueError):
+            pass
+    return False
+
+
+def nameservers():
+    out = []
+    with open(RESOLV_CONF) as f:
+        for line in f:
+            fields = line.split()
+            if len(fields) >= 2 and fields[0] == "nameserver" and is_ip(fields[1]):
+                out.append(fields[1])
+                if len(out) == MAX_NAMESERVERS:
+                    break
+    if not out:
+        raise IOError("no nameserver in %s" % RESOLV_CONF)
+    return out
+
+
+def exchange_any(query):
+    # Each server in turn: UDP first, TCP if the answer was truncated.
+    deadline = time.time() + DNS_TOTAL_TIMEOUT
+    last = None
+    for server in nameservers():
+        if time.time() >= deadline:
+            break
+        try:
+            answer = dns_exchange(server, socket.SOCK_DGRAM, query, DNS_UDP_TIMEOUT)
+            if truncated(answer):
+                answer = dns_exchange(server, socket.SOCK_STREAM, query, DNS_TCP_TIMEOUT)
+            return answer
+        except Exception as e:
+            last = e
+            log("DEBUG", "DNS server failed", server=server, err=e)
+    raise last or IOError("no nameserver answered")
+
+
+def dns_connect(server, kind, timeout):
+    # A connected socket to server port 53; kind is SOCK_DGRAM or SOCK_STREAM.
+    family, kind, proto, _, addr = socket.getaddrinfo(server, 53, 0, kind)[0]
+    sock = socket.socket(family, kind, proto)
+    sock.settimeout(timeout)
+    try:
+        sock.connect(addr)
+    except Exception:
+        sock.close()
+        raise
+    return sock
+
+
+def dns_exchange(server, kind, query, timeout):
+    sock = dns_connect(server, kind, timeout)
+    try:
+        if kind == socket.SOCK_STREAM:
+            sock.sendall(struct.pack(">H", len(query)) + query)
+            n, = struct.unpack(">H", recv_exact(sock, 2))
+            answer = recv_exact(sock, n)
+            if not answers(answer, query):
+                raise IOError("answer does not match the query")
+            return answer
+        sock.send(query)
+        deadline = time.time() + timeout
+        while True:
+            left = deadline - time.time()
+            if left <= 0:
+                raise socket.timeout("timed out")
+            sock.settimeout(left)
+            answer = sock.recv(65535)
+            if answers(answer, query):  # skip stray datagrams
+                return answer
+    finally:
+        sock.close()
+
+
+def recv_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        data = sock.recv(n - len(buf))
+        if not data:
+            raise EOFError("connection closed")
+        buf += data
+    return buf
+
+
+def answers(msg, query):
+    return len(msg) >= MIN_DNS and msg[:2] == query[:2] and msg[2] & 0x80 != 0
+
+
+def truncated(msg):
+    return len(msg) >= MIN_DNS and msg[2] & 0x02 != 0
 
 
 def relay(st, sock):

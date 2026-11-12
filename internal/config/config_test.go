@@ -25,6 +25,11 @@ profiles:
     tun:
       address: 198.18.250.1
       mtu: 4000
+    dns:
+      domains: [svc.cluster.local, .*.privatelink.blob.core.windows.net]
+      patterns: ['^db-[0-9]+\.']
+      servers: [192.168.1.1, 192.168.1.2]
+      fallback: 1.1.1.1:53
   local-docker:
     target:
       docker:
@@ -48,6 +53,16 @@ func TestParse(t *testing.T) {
 		p.Agent != "python" || p.Tun.Address != "198.18.250.1" || p.Tun.MTU != 4000 {
 		t.Fatalf("profile %+v", p)
 	}
+	if d := p.DNS; len(d.Domains) != 2 || len(d.Patterns) != 1 || len(d.Servers) != 2 || d.Fallback != "1.1.1.1:53" || d.Capture != "" {
+		t.Fatalf("dns %+v", d)
+	}
+	auto, err := Parse([]byte(`profiles: {a: {target: {k8s: {pod: p}}, routes: [10.0.0.0/8], dns: {servers: auto, domains: [.]}}}`), "auto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := auto.Profiles["a"].DNS.Servers; len(s) != 1 || s[0] != "auto" {
+		t.Fatalf("servers: auto parsed as %q", s)
+	}
 	if _, err := f.Profile("nope"); err == nil || !strings.Contains(err.Error(), "dev-cluster, local-docker") {
 		t.Fatalf("unknown profile error: %v", err)
 	}
@@ -65,6 +80,10 @@ func TestParseRejects(t *testing.T) {
 		"bad name":    `profiles: {"Dev Cluster": {target: {k8s: {pod: p}}, socks: x}}`,
 		"nothing":     `profiles: {a: {target: {k8s: {pod: p}}}}`,
 		"empty":       `profiles: {}`,
+		"dns capture": `profiles: {a: {target: {k8s: {pod: p}}, socks: x, dns: {capture: magic}}}`,
+		"dns regex":   `profiles: {a: {target: {k8s: {pod: p}}, socks: x, dns: {domains: ['.*\.x\.com']}}}`,
+		"dns pattern": `profiles: {a: {target: {k8s: {pod: p}}, socks: x, dns: {patterns: ['(']}}}`,
+		"dns servers": `profiles: {a: {target: {k8s: {pod: p}}, socks: x, dns: {servers: {a: b}}}}`,
 	}
 	for name, doc := range cases {
 		if _, err := Parse([]byte(doc), name); err == nil {

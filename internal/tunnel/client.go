@@ -128,6 +128,48 @@ func (c *Client) DialContext(ctx context.Context, network, addr string) (net.Con
 	return st, nil
 }
 
+// ExchangeDNS sends one DNS query through the agent to the target's own
+// resolver and returns the answer. A failure reported by the agent is a
+// *proto.DialError.
+func (c *Client) ExchangeDNS(ctx context.Context, query []byte) ([]byte, error) {
+	st, err := c.sess.OpenStream()
+	if err != nil {
+		return nil, fmt.Errorf("tunnel: open stream: %w", err)
+	}
+	defer st.Close()
+	if dl, ok := ctx.Deadline(); ok {
+		_ = st.SetDeadline(dl)
+	}
+	stop := context.AfterFunc(ctx, func() { _ = st.SetDeadline(time.Now()) })
+	defer stop()
+
+	answer, err := exchangeDNS(st, query)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("tunnel: DNS: %w", err)
+	}
+	return answer, nil
+}
+
+func exchangeDNS(st *smux.Stream, query []byte) ([]byte, error) {
+	if err := proto.WriteRequest(st, proto.Request{Cmd: proto.CmdDNS, Addr: proto.ResolverSystem}); err != nil {
+		return nil, err
+	}
+	if err := proto.WriteDNS(st, query); err != nil {
+		return nil, err
+	}
+	resp, err := proto.ReadResponse(st)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Status != proto.StatusOK {
+		return nil, &proto.DialError{Addr: "target resolver", Status: resp.Status, Msg: resp.Msg}
+	}
+	return proto.ReadDNS(st)
+}
+
 func handshake(st *smux.Stream, addr string) (proto.Response, error) {
 	if err := proto.WriteRequest(st, proto.Request{Cmd: proto.CmdConnectTCP, Addr: addr}); err != nil {
 		return proto.Response{}, err

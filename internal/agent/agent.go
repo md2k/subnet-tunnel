@@ -19,7 +19,8 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/relay"
 )
 
-// Dialer opens outbound connections. *net.Dialer satisfies it.
+// Dialer opens outbound connections ("tcp", and "udp" for DNS). *net.Dialer
+// satisfies it.
 type Dialer interface {
 	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
 }
@@ -30,6 +31,7 @@ type Config struct {
 	SHA256      string        // hex sha256 of the agent binary, sent in the hello
 	Dialer      Dialer        // nil: net.Dialer
 	DialTimeout time.Duration // 0: 10s
+	ResolvConf  string        // resolver config for DNS queries; "": /etc/resolv.conf
 	Logger      *slog.Logger  // nil: discard
 }
 
@@ -88,7 +90,12 @@ func handle(ctx context.Context, st *smux.Stream, cfg Config) {
 	}
 	_ = st.SetReadDeadline(time.Time{})
 
-	if req.Cmd != proto.CmdConnectTCP {
+	switch req.Cmd {
+	case proto.CmdConnectTCP:
+	case proto.CmdDNS:
+		handleDNS(ctx, st, req, cfg)
+		return
+	default:
 		_ = proto.WriteResponse(st, proto.Response{Status: proto.StatusBadRequest, Msg: "unsupported command"})
 		return
 	}

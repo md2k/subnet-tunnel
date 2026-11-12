@@ -9,7 +9,7 @@ pf-based capture caps upload at a few MB/s, while a utun interface with a usersp
 reached ~170 MB/s end to end in the same test (see [docs/design.md](docs/design.md)).
 
 > **Status:** early development. Kubernetes and Docker targets, transparent capture of CIDRs on
-> macOS (utun + gVisor) and a SOCKS5 proxy. Split DNS is next.
+> macOS (utun + gVisor), split DNS and a SOCKS5 proxy.
 
 ## Build
 
@@ -48,6 +48,10 @@ curl --socks5-hostname 127.0.0.1:1080 http://my-svc.team-a.svc.cluster.local
 
 # Both at once, and the same for a Docker container
 build/subtun docker my-app 172.20.0.0/16 --socks 127.0.0.1:1080
+
+# Split DNS: names under cluster.local resolve inside the pod, everything else as before
+build/subtun k8s -n team-a debug-pod 10.96.0.0/12 10.244.0.0/16 --dns-domain cluster.local
+curl http://my-svc.team-a.svc.cluster.local:8080/
 ```
 
 subtun connects with your kubeconfig or Docker context, starts a small agent in the target over exec
@@ -58,9 +62,9 @@ terminal.
 short-lived helper creates a utun interface (MTU 9000), adds routes for your CIDRs, hands the
 interface to subtun and exits. Traffic is only ever handled by the subtun process running as you.
 The routes live and die with the interface: when subtun exits, crashes or is killed, macOS removes
-both, so nothing is left behind. To change CIDRs, restart subtun. See
-[Privileges](docs/design.md#privileges) for how this works and the planned session mode for
-changes without a restart.
+both, so nothing is left behind. To change CIDRs, restart subtun. With split DNS the helper stays up
+instead, to remove its pf rules again when subtun stops. See
+[Privileges](docs/design.md#privileges) for how this works.
 
 Two agents speak the same protocol; `--agent auto` (the default) picks the first that can run:
 
@@ -71,6 +75,11 @@ Two agents speak the same protocol; `--agent auto` (the default) picks the first
 
 Both reach about the same speed in our tests. Images with neither a shell nor Python (distroless
 static, scratch) are not supported yet.
+
+**Split DNS.** With `--dns-domain` (suffixes) or `--dns-pattern` (regular expressions), subtun
+answers the queries your Mac sends to its DNS servers: matching names are resolved by the target's
+own resolver through the tunnel, the rest by your normal resolver. Like sshuttle's `--dns` with
+domain patterns, for any number of domains. See [DNS](docs/config.md#dns).
 
 **Excludes and profiles.** `-x/--exclude` keeps addresses out of the tunnel; the most specific rule
 wins, like sshuttle. `--dry-run` prints the routes subtun would install. Settings can live in named
@@ -83,6 +92,7 @@ profiles:
     routes: [10.0.0.0/8, 172.16.0.0/12]
     exclude: [10.1.0.0/16]
     socks: 127.0.0.1:1080
+    dns: {domains: [cluster.local, company.com]}
 ```
 
 ```sh
@@ -93,14 +103,15 @@ See [Configuration](docs/config.md).
 
 ## Planned
 
-- Split DNS: only the domains you list resolve through the tunnel.
+- Kill switch (fail-closed) and IPv6 blocking for full tunnels.
+- `subtun import sshuttle` for existing sshuttle option files.
 - SSH transport to any host.
 - Capture on Linux (TUN) and Windows (wintun); IPv6 and UDP.
-- Session mode for the root helper: change CIDRs and DNS at runtime without a restart (opt-in).
+- Change CIDRs and DNS at runtime without a restart (opt-in).
 
 ## Documentation
 
-- [Configuration](docs/config.md): profiles, routes and excludes, safety checks.
+- [Configuration](docs/config.md): profiles, routes and excludes, split DNS, safety checks.
 - [Design](docs/design.md): measurements, architecture and open questions.
 - [Development](docs/development.md): tests, code layout and the local test setup.
 

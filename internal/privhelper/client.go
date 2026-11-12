@@ -18,17 +18,20 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/md2k/subnet-tunnel/internal/platform"
 )
 
-const sudoPrompt = "[subtun] root is needed to create the utun interface and routes. Password for %u: "
+const sudoPrompt = "[subtun] root is needed to create the utun interface and routes (and firewall rules for DNS capture). Password for %u: "
 
 // Client is subtun's side of a running helper.
 type Client struct {
-	conn  *net.UnixConn
-	cmd   *exec.Cmd
-	stdin io.WriteCloser
-	done  chan error // helper process exit
-	log   *slog.Logger
+	conn    *net.UnixConn
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	exited  chan struct{} // closed when the helper process exits
+	exitErr error         // valid after exited is closed
+	log     *slog.Logger
 }
 
 // Start runs the helper through sudo (sudo asks for the password on the
@@ -75,8 +78,11 @@ func Start(ctx context.Context, helperLog io.Writer, log *slog.Logger) (*Client,
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting sudo: %w", err)
 	}
-	c := &Client{cmd: cmd, stdin: stdin, done: make(chan error, 1), log: log}
-	go func() { c.done <- cmd.Wait() }()
+	c := &Client{cmd: cmd, stdin: stdin, exited: make(chan struct{}), log: log}
+	go func() {
+		c.exitErr = cmd.Wait()
+		close(c.exited)
+	}()
 	if _, err := io.WriteString(stdin, token+"\n"); err != nil {
 		c.kill()
 		return nil, fmt.Errorf("sending token to helper: %w", err)
@@ -99,9 +105,8 @@ func Start(ctx context.Context, helperLog io.Writer, log *slog.Logger) (*Client,
 			return nil, fmt.Errorf("waiting for the helper: %w", a.err)
 		}
 		c.conn = a.conn
-	case err := <-c.done:
-		c.done <- err
-		return nil, fmt.Errorf("sudo helper exited before connecting (wrong password, or not allowed to sudo?): %v", err)
+	case <-c.exited:
+		return nil, fmt.Errorf("sudo helper exited before connecting (wrong password, or not allowed to sudo?): %v", c.exitErr)
 	case <-ctx.Done():
 		c.kill()
 		return nil, ctx.Err()
@@ -157,6 +162,13 @@ func (c *Client) AddRoute(p netip.Prefix) error {
 	return err
 }
 
+// ApplyFirewall replaces subtun's firewall rules. Rules applied during setup
+// need DoneSession.
+func (c *Client) ApplyFirewall(r platform.Rules) error {
+	_, _, err := c.call(Request{Op: OpApplyFirewall, Rules: &r})
+	return err
+}
+
 // Done ends setup; the helper exits and leaves the interface and routes to
 // this process.
 func (c *Client) Done() error {
@@ -166,18 +178,29 @@ func (c *Client) Done() error {
 	return c.Close()
 }
 
-// Close disconnects. Before Done, that makes the helper undo its changes.
+// DoneSession ends setup but keeps the helper running: it accepts firewall
+// updates and removes the firewall rules when this process closes the
+// connection, exits or dies. Exited reports if the helper goes away first.
+func (c *Client) DoneSession() error {
+	_, _, err := c.call(Request{Op: OpDone, Session: true})
+	return err
+}
+
+// Exited is closed when the helper process has exited.
+func (c *Client) Exited() <-chan struct{} { return c.exited }
+
+// Close disconnects. Before Done, that makes the helper undo its changes; in
+// a session, it removes the firewall rules.
 func (c *Client) Close() error {
 	if c.conn != nil {
 		_ = c.conn.Close()
 	}
 	_ = c.stdin.Close()
 	select {
-	case err := <-c.done:
-		c.done <- err
+	case <-c.exited:
 		var ee *exec.ExitError
-		if err != nil && !errors.As(err, &ee) {
-			return err
+		if c.exitErr != nil && !errors.As(c.exitErr, &ee) {
+			return c.exitErr
 		}
 	case <-time.After(10 * time.Second):
 		c.log.Warn("helper did not exit in time")
@@ -189,8 +212,7 @@ func (c *Client) Close() error {
 func (c *Client) kill() {
 	_ = c.cmd.Process.Signal(syscall.SIGINT)
 	select {
-	case err := <-c.done:
-		c.done <- err
+	case <-c.exited:
 	case <-time.After(5 * time.Second):
 	}
 }

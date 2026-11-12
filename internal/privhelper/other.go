@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+
+	"github.com/md2k/subnet-tunnel/internal/platform"
 )
 
 var errUnsupported = errors.New("utun capture is only implemented on macOS so far; use --socks")
@@ -24,6 +26,15 @@ func (*Client) CreateTun(int, netip.Addr) (string, *os.File, error) { return "",
 
 // AddRoute is not implemented on this platform yet.
 func (*Client) AddRoute(netip.Prefix) error { return errUnsupported }
+
+// ApplyFirewall is not implemented on this platform yet.
+func (*Client) ApplyFirewall(platform.Rules) error { return errUnsupported }
+
+// DoneSession is not implemented on this platform yet.
+func (*Client) DoneSession() error { return errUnsupported }
+
+// Exited is not implemented on this platform yet.
+func (*Client) Exited() <-chan struct{} { return nil }
 
 // Done is not implemented on this platform yet.
 func (*Client) Done() error { return errUnsupported }

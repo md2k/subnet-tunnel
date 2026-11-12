@@ -5,6 +5,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"sigs.k8s.io/yaml"
 
+	"github.com/md2k/subnet-tunnel/internal/dns"
 	"github.com/md2k/subnet-tunnel/internal/routes"
 )
 
@@ -32,6 +34,7 @@ type Profile struct {
 	Agent    string   `json:"agent,omitempty"`
 	AgentDir string   `json:"agentDir,omitempty"`
 	Tun      Tun      `json:"tun,omitempty"`
+	DNS      DNS      `json:"dns,omitempty"`
 }
 
 // Target is where the agent runs: exactly one of K8s or Docker.
@@ -60,6 +63,35 @@ type DockerTarget struct {
 type Tun struct {
 	Address string `json:"address,omitempty"` // default 198.18.249.1
 	MTU     int    `json:"mtu,omitempty"`     // default 9000
+}
+
+// DNS configures DNS capture: queries the system sends to its DNS servers
+// are answered by subtun, through the tunnel for matching names.
+type DNS struct {
+	Capture  string     `json:"capture,omitempty"`  // firewall (default) or off
+	Servers  ServerList `json:"servers,omitempty"`  // auto (default) or IPv4 addresses
+	Domains  []string   `json:"domains,omitempty"`  // suffixes resolved through the tunnel; "." = all
+	Patterns []string   `json:"patterns,omitempty"` // regular expressions, also through the tunnel
+	Fallback string     `json:"fallback,omitempty"` // system (default) or ip[:port] for everything else
+}
+
+// ServerList is "auto" or a list of addresses; in YAML either
+// `servers: auto` or `servers: [192.168.1.1]`.
+type ServerList []string
+
+// UnmarshalJSON accepts a string or a list of strings.
+func (l *ServerList) UnmarshalJSON(b []byte) error {
+	var one string
+	if err := json.Unmarshal(b, &one); err == nil {
+		*l = ServerList{one}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(b, &many); err != nil {
+		return errors.New("dns.servers: use auto or a list of addresses")
+	}
+	*l = many
+	return nil
 }
 
 var profileName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
@@ -156,6 +188,14 @@ func (p Profile) validate(name string) error {
 	}
 	if len(p.Routes) == 0 && p.Socks == "" {
 		return fail(errors.New("nothing to do: set routes, socks, or both"))
+	}
+	switch p.DNS.Capture {
+	case "", "firewall", "off":
+	default:
+		return fail(fmt.Errorf("dns.capture %q: use firewall or off", p.DNS.Capture))
+	}
+	if _, err := dns.NewMatcher(p.DNS.Domains, p.DNS.Patterns); err != nil {
+		return fail(err)
 	}
 	return nil
 }
