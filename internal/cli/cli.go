@@ -551,6 +551,12 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 			opts.DNS = dnsOpts
 		}
 		opts.KillSwitch, opts.AllowDNS, opts.BlockIPv6 = gp.killSwitch, gp.allowDNS, gp.blockIPv6
+		if opts.BlockIPv6 {
+			if a, ok := ipv6Endpoint(carrier.Endpoints); ok {
+				log.Warn("not blocking IPv6: subtun's own connection may use it", "endpoint", a)
+				opts.BlockIPv6, gp.blockIPv6 = false, false
+			}
+		}
 		if gp.on() {
 			if opts.Guarded, err = guardPrefixes(final, localPrefixes()); err != nil {
 				return err
@@ -630,6 +636,17 @@ func excludeEndpoints(rp *routePlan, endpoints []netip.Addr, log *slog.Logger) (
 		return nil, errors.New(strings.Join(errs, "; "))
 	}
 	return final.Routes, nil
+}
+
+// ipv6Endpoint finds an IPv6 address subtun itself connects to (API
+// server, Docker daemon); blocking IPv6 would cut the tunnel.
+func ipv6Endpoint(endpoints []netip.Addr) (netip.Addr, bool) {
+	for _, a := range endpoints {
+		if a.Unmap().Is6() && !a.IsLoopback() && !a.IsLinkLocalUnicast() {
+			return a, true
+		}
+	}
+	return netip.Addr{}, false
 }
 
 func loadAgents(file string) ([]agentbin.Binary, error) {

@@ -315,3 +315,13 @@ func TestGuardPrefixes(t *testing.T) {
 		t.Errorf("route inside a VPN's network: %v, %v", cgnat, err)
 	}
 }
+
+func TestIPv6Endpoint(t *testing.T) {
+	v4 := []netip.Addr{netip.MustParseAddr("203.0.113.10"), netip.MustParseAddr("::1"), netip.MustParseAddr("fe80::1")}
+	if _, ok := ipv6Endpoint(v4); ok {
+		t.Error("IPv4, loopback and link-local endpoints don't need IPv6")
+	}
+	if a, ok := ipv6Endpoint(append(v4, netip.MustParseAddr("2001:db8::10"))); !ok || a.String() != "2001:db8::10" {
+		t.Error("global IPv6 endpoint not found")
+	}
+}
