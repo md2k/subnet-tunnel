@@ -15,5 +15,6 @@ func TestMain(m *testing.M) {
 		return []routes.Local{{Iface: "en0", Network: netip.MustParsePrefix("192.168.77.0/24")}}
 	}
 	defaultGateway = func() (netip.Addr, bool) { return netip.MustParseAddr("192.168.77.1"), true }
+	systemSearch = func() ([]string, error) { return []string{"lan"}, nil }
 	os.Exit(m.Run())
 }

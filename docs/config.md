@@ -151,7 +151,7 @@ curl http://web.team-a.svc.cluster.local:8080/      # any program, no proxy sett
 
 | YAML (`dns:`) | Flag | Default | Meaning |
 |---|---|---|---|
-| `domains` | `--dns-domain` (repeatable, comma-separated) | none | suffixes resolved through the tunnel; `.` = every name |
+| `domains` | `--dns-domain` (repeatable, comma-separated) | none | suffixes resolved through the tunnel; `.` = every name except local ones |
 | `patterns` | `--dns-pattern` (repeatable) | none | regular expressions resolved through the tunnel |
 | `servers` | `--dns-servers` | `auto` | DNS servers whose queries are captured: `auto` (the system's) or IPv4 addresses |
 | `fallback` | `--dns-fallback` | `system` | resolver for everything else: `system` (the servers the query was meant for) or `IP[:port]` |
@@ -166,6 +166,13 @@ pattern form) is ignored, so `.*.company.com` from an sshuttle file works as is.
 regular expressions, matched against the lowercase name without the trailing dot. They aren't
 anchored, so write `^` and `$` where you need them (sshuttle used Python's `re.match`, which anchors
 at the start only).
+
+**`.` leaves local names alone:** names under `local` (multicast DNS) and under the system's search
+domains (from `/etc/resolv.conf`, such as a router's `lan` or `home.arpa`, which also complete short
+names) go to the fallback resolver: they belong to your network, and the target's resolver can't
+answer them. List one to send it through the tunnel anyway: `--dns-domain . --dns-domain
+cluster.local`. Patterns win the same way. The search domains follow the system when the network
+changes (with `servers: auto`); `--dry-run` and the log list them.
 
 **Servers.** With `auto`, subtun reads the system's IPv4 DNS servers from `/etc/resolv.conf` and
 follows them when the network changes (Wi-Fi switch, VPN up or down). IPv6 DNS servers and local

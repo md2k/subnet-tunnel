@@ -14,8 +14,11 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/dns"
 )
 
-// systemDNS reads the system's DNS servers; replaced in tests.
-var systemDNS = func() ([]netip.Addr, []string, error) { return dns.SystemServers(dns.ResolvConf) }
+// The system's DNS servers and search domains; replaced in tests.
+var (
+	systemDNS    = func() ([]netip.Addr, []string, error) { return dns.SystemServers(dns.ResolvConf) }
+	systemSearch = func() ([]string, error) { return dns.SearchDomains(dns.ResolvConf) }
+)
 
 // planDNS validates the DNS settings before anything connects or asks for
 // sudo. It returns nil options when DNS capture is off (no domains or
@@ -37,6 +40,11 @@ func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
 	m, err := dns.NewMatcher(s.dnsDomains, s.dnsPatterns)
 	if err != nil {
 		return nil, nil, err
+	}
+	if m.CatchAll() {
+		if search, err := systemSearch(); err == nil {
+			m.SetLocal(search)
+		}
 	}
 	opts := &capture.DNSOptions{Match: m}
 	var notes []string
@@ -120,6 +128,9 @@ func printDNSPlan(w io.Writer, d *capture.DNSOptions, domains, patterns []string
 		what += fmt.Sprintf("%d pattern(s)", len(patterns))
 	}
 	fmt.Fprintf(w, "  through the tunnel: %s\n", what)
+	if d.Match.CatchAll() {
+		fmt.Fprintf(w, "  except names under %s (local network; list one to send it through the tunnel)\n", strings.Join(d.Match.Local(), ", "))
+	}
 	if d.Fallback != nil {
 		fmt.Fprintf(w, "  other names: %s\n", d.Fallback[0])
 	} else {

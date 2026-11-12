@@ -313,7 +313,9 @@ dns:
   the first question's name. Matches go through the tunnel as a new request type (`CmdDNS`): the
   agent passes the raw message to the resolver in the target's `/etc/resolv.conf`, UDP first and
   TCP if the answer is truncated, and returns the answer unchanged, so every record type works.
-  Both agents implement it. The rest goes to the fallback. Errors become SERVFAIL; an answer larger
+  Both agents implement it. The rest goes to the fallback. With `.` (every name), names under
+  `local` and the system's search domains still go to the fallback unless listed: the target's
+  resolver can't answer them, and in request 004 each `.local` query cost a 10 s timeout there. Errors become SERVFAIL; an answer larger
   than a UDP client accepts (512 bytes, or its EDNS0 size) is replaced by an empty truncated one, so
   the client retries over TCP, which is captured too.
 - **Fallback without loops.** The fallback is usually one of the captured servers, so its queries

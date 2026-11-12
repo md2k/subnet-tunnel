@@ -269,25 +269,30 @@ func TestPacketsForTunAddrGoBack(t *testing.T) {
 	self := udpPacket([4]byte{203, 0, 113, 53}, [4]byte{198, 18, 249, 1})
 	dev.in <- other
 	dev.in <- self
-	select {
-	case got := <-dev.out:
-		if !bytes.Equal(got, self) {
-			t.Fatalf("wrote back %x, want the packet for the device's address", got)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("packet for the device's own address not handed back")
-	}
 	// The other packet goes to the stack, which may answer it (ICMP
-	// protocol unreachable: the stack carries TCP only), but never hands it
-	// back as it is.
-	deadline := time.After(200 * time.Millisecond)
+	// protocol unreachable: the stack carries TCP only), in any order with
+	// the hand-back; it must never come back as it is.
+	deadline := time.After(3 * time.Second)
+	gotSelf := false
+	for !gotSelf {
+		select {
+		case got := <-dev.out:
+			if bytes.Equal(got, other) {
+				t.Fatal("packet for another address handed back")
+			}
+			gotSelf = bytes.Equal(got, self)
+		case <-deadline:
+			t.Fatal("packet for the device's own address not handed back")
+		}
+	}
+	quiet := time.After(200 * time.Millisecond)
 	for {
 		select {
 		case got := <-dev.out:
 			if bytes.Equal(got, other) {
 				t.Fatal("packet for another address handed back")
 			}
-		case <-deadline:
+		case <-quiet:
 			return
 		}
 	}
