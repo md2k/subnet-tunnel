@@ -191,8 +191,9 @@ curl -m 20 -s -o /dev/null -w '%{http_code} %{time_total}\n' https://1.1.1.1/   
 ```
 
 The log shows the start warning (`the target seems to run on this machine ...`) and
-`refusing connections: too many open to one destination, likely a routing loop`, repeated at most
-once a minute per destination. Everything not routed works throughout. A full tunnel through Docker Desktop does the same
+`refusing connections to this destination for a while: too many at once, likely a routing loop`,
+at most once a minute per destination; for 10 s, retries are refused at once. Everything not
+routed works throughout. A full tunnel through Docker Desktop does the same
 for every internet address, this Claude session's included: only ever with `--max-duration`.
 
 ### A way back: `--max-duration`

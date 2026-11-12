@@ -129,11 +129,16 @@ app ──► SOCKS5 proxy  ───┘   smux streams    exec stdio   in the t
 - **Routing loops.** A target on this machine (Docker Desktop, kind, minikube) reaches the internet
   through this machine. Route internet addresses through it, and its connections come back into the
   tunnel, to the target again, without end.
-  - The stack caps the connections open or opening to one destination (address and port) at 256.
-    The next one is refused, and the chain unwinds within seconds, with one warning per destination
-    a minute.
-  - Normal clients stay far below the cap. Clients that open and close many connections in a row
-    don't add up, since only open connections count.
+  - The stack caps the connections to one destination (address and port): 64 still opening at
+    once, which catches a proxy that connects onward before accepting (Docker Desktop's: measured
+    on the test Mac, cut in 0.4 s), and 256 open at once, for one that accepts first.
+  - A destination that hits a cap is refused for 10 s, so the chain unwinds and retries don't build
+    a new one. One warning per destination a minute; the failures of an unwinding loop, and repeats
+    of any failed connect, are logged at debug level.
+  - Normal clients stay far below both caps. Clients that open and close many connections in a row
+    don't add up, since only concurrent connections count.
+  - The global limit on connections opening at once is 4096, so a full tunnel looping through a
+    local target (dozens of destinations at once) doesn't starve the destinations that work.
   - subtun also warns at start when its own connection goes to this machine (a unix socket or
     loopback) and the routes include internet addresses.
   - So a full tunnel needs a target outside this machine.
@@ -436,8 +441,8 @@ captured. What stays behind has no `pass` rule and blocks DNS with
 - **A helper killed with SIGKILL** leaves its running rules, including the DNS redirect to subtun's
   listener port. Until the next session takes them over or `subtun cleanup` runs, a local process
   could bind that port and answer the Mac's DNS queries.
-- **Loop guard limits:** the cap (256 per destination) isn't configurable. A client holding more
-  connections to one address and port at once would be refused. Targets in a VM on a bridge
+- **Loop guard limits:** the caps (64 opening, 256 open per destination) aren't configurable. A
+  client opening more connections to one address and port at once would be refused for 10 s. Targets in a VM on a bridge
   network (an address on a local network rather than loopback) don't trigger the start warning;
   only the cap catches their loops.
 - **IPv6 DNS servers** are not captured yet (IPv4 only, like sshuttle with `--disable-ipv6`).

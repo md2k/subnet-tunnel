@@ -65,16 +65,17 @@ type Options struct {
 	// device, like a DNS server redirected by the firewall) are handed
 	// back to the system instead of the stack. Unset: no hand-back.
 	TunAddr netip.Addr
-	// MaxPerDestination caps the connections open or opening to one
-	// destination (address and port) at once; more are refused. It cuts
-	// routing loops. 0: DefaultMaxPerDestination.
-	MaxPerDestination int
+	// Loop guard (see loopGuard): caps per destination (address and port)
+	// on connections opening and open at once, and how long a destination
+	// that hit one is refused. 0: the defaults.
+	MaxOpening, MaxOpen int
+	LoopHold            time.Duration
 }
 
 const (
 	nicID          = 1
 	outQueueLen    = 1024
-	maxInFlight    = 1024 // connections being dialed at once
+	maxInFlight    = 4096 // connections being dialed at once (all destinations)
 	keepaliveIdle  = 60 * time.Second
 	keepaliveIntvl = 30 * time.Second
 	keepaliveCount = 9
@@ -104,8 +105,14 @@ func New(dev Device, dialer Dialer, opts Options) (*Stack, error) {
 	if opts.DialTimeout == 0 {
 		opts.DialTimeout = 15 * time.Second
 	}
-	if opts.MaxPerDestination == 0 {
-		opts.MaxPerDestination = DefaultMaxPerDestination
+	if opts.MaxOpening == 0 {
+		opts.MaxOpening = DefaultMaxOpening
+	}
+	if opts.MaxOpen == 0 {
+		opts.MaxOpen = DefaultMaxOpen
+	}
+	if opts.LoopHold == 0 {
+		opts.LoopHold = DefaultLoopHold
 	}
 	mtu := dev.MTU()
 	if mtu <= 0 {
@@ -141,7 +148,7 @@ func New(dev Device, dialer Dialer, opts Options) (*Stack, error) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	st := &Stack{s: s, ep: ep, dev: dev, dialer: dialer, opts: opts, guard: newLoopGuard(opts.MaxPerDestination), cancel: cancel}
+	st := &Stack{s: s, ep: ep, dev: dev, dialer: dialer, opts: opts, guard: newLoopGuard(opts.MaxOpening, opts.MaxOpen, opts.LoopHold), cancel: cancel}
 	if opts.TunAddr.Is4() {
 		st.self = tcpip.AddrFrom4(opts.TunAddr.As4())
 	}
@@ -188,8 +195,8 @@ func (st *Stack) forward(r *tcp.ForwarderRequest) {
 	ok, warn, refused := st.guard.acquire(dst)
 	if !ok {
 		if warn {
-			log.Warn("refusing connections: too many open to one destination, likely a routing loop (the target reaches it through this machine, and the routes send that back into the tunnel)",
-				"open", st.opts.MaxPerDestination, "refused", refused)
+			log.Warn("refusing connections to this destination for a while: too many at once, likely a routing loop (the target reaches it through this machine, and the routes send that back into the tunnel)",
+				"for", st.opts.LoopHold, "refused", refused)
 		}
 		r.Complete(true)
 		return
@@ -199,11 +206,13 @@ func (st *Stack) forward(r *tcp.ForwarderRequest) {
 	ctx, cancel := context.WithTimeout(context.Background(), st.opts.DialTimeout)
 	up, err := st.dialer.DialContext(ctx, "tcp", dst)
 	cancel()
+	st.guard.dialed(dst)
 	if err != nil {
-		if st.guard.looping(dst) { // a loop unwinding: one warning was enough
-			log.Debug("connect failed", "err", err)
-		} else {
+		// A loop unwinding, or the same destination failing again: debug.
+		if !st.guard.looping(dst) && st.guard.reportFailure(dst) {
 			log.Info("connect failed", "err", err)
+		} else {
+			log.Debug("connect failed", "err", err)
 		}
 		r.Complete(true) // reset: the app sees "connection refused"
 		return

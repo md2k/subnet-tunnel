@@ -82,6 +82,11 @@ func setup(t *testing.T, handlers map[string]func(net.Conn)) *stack.Stack {
 
 func setupWith(t *testing.T, handlers map[string]func(net.Conn), opts Options) *stack.Stack {
 	t.Helper()
+	return setupDialer(t, fakeTunnel{handlers}, opts)
+}
+
+func setupDialer(t *testing.T, dialer Dialer, opts Options) *stack.Stack {
+	t.Helper()
 	client := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol},
@@ -116,7 +121,7 @@ func setupWith(t *testing.T, handlers map[string]func(net.Conn), opts Options) *
 		}
 	}()
 
-	st, err := New(dev, fakeTunnel{handlers}, opts)
+	st, err := New(dev, dialer, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
