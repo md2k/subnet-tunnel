@@ -179,3 +179,18 @@ subtun cleanup                                       # or remove them without a 
 decides whether DNS stays blocked meanwhile. `cat /var/run/subtun/state.json` (as root) shows which
 helper holds the rules.
 
+
+### A way back: `--max-duration`
+
+The hidden `--max-duration DURATION` flag makes subtun stop by itself, the same way as on Ctrl-C, once
+the time is up. The clock starts with subtun, so the sudo prompt and connecting count too. Use it for
+any run that may cut your own network, like a full tunnel or the kill switch:
+
+```sh
+build/subtun -v k8s -n subtun-dev target 0.0.0.0/0 --max-duration 2m
+```
+
+If stopping hangs, subtun exits 20 seconds later anyway (exit code 3). macOS then removes the utun
+and its routes, and the root helper removes its firewall rules, except a kill switch's blocks, which
+stay as they would after a crash (`subtun cleanup` removes them). With `--kill-switch lockdown` the
+blocks stay after `--max-duration` too, as after Ctrl-C.

@@ -125,6 +125,8 @@ type settings struct {
 	killSwitch    string
 	killSwitchDNS string
 	blockIPv6     string
+
+	maxDuration time.Duration // testing: stop by itself after this long
 }
 
 func (s *settings) register(cmd *cobra.Command) {
@@ -150,6 +152,8 @@ func (s *settings) register(cmd *cobra.Command) {
 	f.StringVar(&s.killSwitch, "kill-switch", "", "keep routed traffic from leaving outside the tunnel: off (default), on (blocks stay after a crash or a lost tunnel), lockdown (also after Ctrl-C)")
 	f.StringVar(&s.killSwitchDNS, "kill-switch-dns", "", "while the kill switch holds, DNS to the captured servers is: block (default) or allow")
 	f.StringVar(&s.blockIPv6, "block-ipv6", "", "block outgoing IPv6: auto (default: in a full tunnel), true or false")
+	f.DurationVar(&s.maxDuration, "max-duration", 0, "stop by itself after this long, as on Ctrl-C (testing: a way back if the network is cut)")
+	_ = f.MarkHidden("max-duration")
 }
 
 // applyProfile fills settings from a profile; flags given on the command
@@ -409,6 +413,9 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 	if s.socks == "" && len(s.routes) == 0 && s.dnsListen == "" {
 		return errors.New("nothing to do: give CIDRs to capture, --socks ADDR, or both")
 	}
+	if s.maxDuration < 0 {
+		return errors.New("--max-duration must be positive")
+	}
 	rp, warns, err := planRoutes(s)
 	var dnsOpts *capture.DNSOptions
 	var gp *guardPlan
@@ -447,6 +454,9 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 	if err != nil {
 		return err
 	}
+	// From here on, including the sudo prompt and connecting.
+	ctx, done := withMaxDuration(ctx, s.maxDuration, log)
+	defer done() // last: the watchdog covers stopping
 	if rp != nil {
 		for _, n := range rp.plan.Redundant {
 			log.Info("route rule dropped", "rule", n.String())
@@ -484,7 +494,7 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		} else {
 			log.Info("firewall rules from another subtun session may be in place; checking with the root helper before connecting")
 			if early, err = privhelper.Start(ctx, &transport.LineLog{Log: log, Prefix: "helper: "}, log); err != nil {
-				return err
+				return startErr(ctx, err)
 			}
 			res, err := early.Adopt()
 			if err != nil {
@@ -505,13 +515,13 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 	start := time.Now()
 	carrier, err := connect(ctx, agents, log)
 	if err != nil {
-		return err
+		return startErr(ctx, err)
 	}
 	hctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	client, err := tunnel.NewClient(hctx, carrier, tunnel.Options{ExpectSHA256: carrier.SHA256, Logger: log})
 	cancel()
 	if err != nil {
-		return fmt.Errorf("starting agent in %s: %w", carrier.Desc, err)
+		return startErr(ctx, fmt.Errorf("starting agent in %s: %w", carrier.Desc, err))
 	}
 	defer func() {
 		_ = client.Close()
@@ -572,7 +582,7 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		c, err := capture.Start(ctx, final, opts, client, log)
 		if err != nil {
 			marker.startFailed()
-			return fmt.Errorf("utun capture: %w", err)
+			return startErr(ctx, fmt.Errorf("utun capture: %w", err))
 		}
 		// Stopped before the tunnel (deferred above): firewall rules and
 		// routes go first.
@@ -589,7 +599,7 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 	select {
 	case <-ctx.Done():
 		deliberate = true
-		log.Info("shutting down")
+		logShutdown(ctx, log)
 		return nil
 	case <-client.Done():
 		return errors.New("connection to the agent was lost")
@@ -600,7 +610,7 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		select {
 		case <-ctx.Done():
 			deliberate = true
-			log.Info("shutting down")
+			logShutdown(ctx, log)
 			return nil
 		case <-time.After(300 * time.Millisecond):
 		}
