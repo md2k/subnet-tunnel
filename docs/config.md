@@ -162,6 +162,8 @@ when the fallback is one of the captured servers.
   match every name with `.`.
 - If the helper itself is killed (`kill -9`), the rules stay and DNS for the captured servers stops
   working once subtun exits; subtun says so. Remove them with
-  `sudo pfctl -a com.apple/subtun -F nat && sudo pfctl -a com.apple/subtun -F rules`.
+  `sudo pfctl -a com.apple/subtun -F nat && sudo pfctl -a com.apple/subtun -F rules`. pf itself
+  then stays enabled (with only macOS's own rules) until the next reboot, since the helper's
+  reference to it was never released.
 - macOS only for now; `override` and `supplemental` capture modes (via the system resolver
   configuration instead of the firewall) are planned.

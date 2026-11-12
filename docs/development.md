@@ -153,7 +153,12 @@ build/subtun -v k8s -n subtun-dev target $WEB_SVC --dns-domain cluster.local
 dscacheutil -q host -a name web.subtun-dev.svc.cluster.local   # through the system resolver
 curl http://web.subtun-dev.svc.cluster.local:8080/
 sudo pfctl -a com.apple/subtun -s nat; sudo pfctl -a com.apple/subtun -s rules   # subtun's rules
+sudo pfctl -a com.apple/subtun -t subtun_dns -T show                              # captured servers
 ```
+
+`-s nat` and `-s rules` print the rules in pf's expanded form (one line per protocol, `port = 53`) and
+don't show the table; before the first run the anchor doesn't exist yet and pfctl says
+`DIOCGETRULES: Invalid argument`.
 
 After Ctrl-C, `kill -9` of subtun, or closing the terminal, both `pfctl` commands must print
 nothing, and names outside your domains must resolve as before throughout.
