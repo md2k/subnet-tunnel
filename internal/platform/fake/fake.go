@@ -16,6 +16,7 @@ type Drivers struct {
 	// Failures to inject, set before use.
 	CreateErr error
 	AddErr    map[netip.Prefix]error
+	ApplyErr  error
 
 	mu    sync.Mutex
 	calls []string
@@ -24,12 +25,12 @@ type Drivers struct {
 
 // Platform returns d as a platform.Drivers.
 func (d *Drivers) Platform() platform.Drivers {
-	return platform.Drivers{Tun: d, Routes: d}
+	return platform.Drivers{Tun: d, Routes: d, Firewall: firewall{d}}
 }
 
 // Calls returns the calls so far, e.g. "create utun0 9000 198.18.249.1",
 // "add 10.0.0.0/8 utun0", "release utun0", "delete 10.0.0.0/8 utun0",
-// "close utun0".
+// "close utun0", "firewall dns [192.168.1.1] 53530 53531", "flush".
 func (d *Drivers) Calls() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -92,4 +93,25 @@ func (v *device) Close() error {
 	v.d.record("close %s", v.name)
 	_ = v.r.Close()
 	return v.w.Close()
+}
+
+// firewall implements platform.Firewall (a separate type: Drivers already
+// has the Routes methods).
+type firewall struct{ d *Drivers }
+
+func (f firewall) Apply(r platform.Rules) error {
+	if f.d.ApplyErr != nil {
+		return f.d.ApplyErr
+	}
+	if r.DNS == nil {
+		f.d.record("firewall none")
+		return nil
+	}
+	f.d.record("firewall dns %v %d %d", r.DNS.Servers, r.DNS.ListenPort, r.DNS.BypassPort)
+	return nil
+}
+
+func (f firewall) Flush() error {
+	f.d.record("flush")
+	return nil
 }

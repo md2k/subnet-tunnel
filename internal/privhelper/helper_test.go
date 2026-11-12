@@ -5,6 +5,7 @@ package privhelper
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/md2k/subnet-tunnel/internal/platform"
 	"github.com/md2k/subnet-tunnel/internal/platform/fake"
 )
 
@@ -172,6 +174,106 @@ func TestHelperDriverFailures(t *testing.T) {
 	c, done = startHelper(t, context.Background(), d)
 	if r := call(t, c, createReq); r.OK || !strings.Contains(r.Error, "not permitted") {
 		t.Fatalf("got %+v", r)
+	}
+	_ = c.Close()
+	wait(t, done)
+	checkCalls(t, d)
+}
+
+func firewallReq(servers ...string) Request {
+	d := &platform.DNSRedirect{ListenPort: 53530, BypassPort: 53531}
+	for _, s := range servers {
+		d.Servers = append(d.Servers, netip.MustParseAddr(s))
+	}
+	return Request{Op: OpApplyFirewall, Rules: &platform.Rules{DNS: d}}
+}
+
+// Session mode: after done the helper stays up, accepts firewall updates
+// (network changed) and nothing else, and removes its rules when subtun
+// goes away. Routes and the utun are subtun's by then.
+func TestHelperSession(t *testing.T) {
+	d := &fake.Drivers{}
+	c, done := startHelper(t, context.Background(), d)
+	call(t, c, createReq)
+	call(t, c, Request{Op: OpAddRoute, CIDR: "10.244.0.0/16"})
+	if r := call(t, c, firewallReq("192.168.1.1")); !r.OK {
+		t.Fatalf("apply_firewall: %+v", r)
+	}
+	if r := call(t, c, Request{Op: OpDone, Session: true}); !r.OK {
+		t.Fatalf("done: %+v", r)
+	}
+	if r := call(t, c, firewallReq("10.0.0.1")); !r.OK {
+		t.Fatalf("update: %+v", r)
+	}
+	for _, req := range []Request{{Op: OpAddRoute, CIDR: "10.96.0.0/12"}, createReq, {Op: OpDone, Session: true}} {
+		if r := call(t, c, req); r.OK || !strings.Contains(r.Error, "setup is finished") {
+			t.Errorf("%s after done: %+v", req.Op, r)
+		}
+	}
+	_ = c.Close()
+	if err := wait(t, done); err != nil {
+		t.Fatalf("session end: %v", err)
+	}
+	checkCalls(t, d, created, "add 10.244.0.0/16 utun0",
+		"firewall dns [192.168.1.1] 53530 53531", "release utun0",
+		"firewall dns [10.0.0.1] 53530 53531", "flush")
+}
+
+func TestHelperSessionEndsOnInterrupt(t *testing.T) {
+	d := &fake.Drivers{}
+	ctx, cancel := context.WithCancel(context.Background())
+	c, done := startHelper(t, ctx, d)
+	call(t, c, firewallReq("192.168.1.1"))
+	call(t, c, Request{Op: OpDone, Session: true})
+	cancel()
+	if err := wait(t, done); err != nil {
+		t.Fatal(err)
+	}
+	checkCalls(t, d, "firewall dns [192.168.1.1] 53530 53531", "flush")
+}
+
+// Firewall rules outlive a one-shot helper, so done without a session is
+// refused once rules are applied; disconnecting then undoes everything,
+// firewall first.
+func TestHelperFirewallNeedsSession(t *testing.T) {
+	d := &fake.Drivers{}
+	c, done := startHelper(t, context.Background(), d)
+	call(t, c, createReq)
+	call(t, c, Request{Op: OpAddRoute, CIDR: "10.244.0.0/16"})
+	call(t, c, firewallReq("192.168.1.1"))
+	if r := call(t, c, Request{Op: OpDone}); r.OK || !strings.Contains(r.Error, "session") {
+		t.Fatalf("done without session: %+v", r)
+	}
+	_ = c.Close()
+	wait(t, done)
+	checkCalls(t, d, created, "add 10.244.0.0/16 utun0", "firewall dns [192.168.1.1] 53530 53531",
+		"flush", "delete 10.244.0.0/16 utun0", "close utun0")
+}
+
+func TestHelperRefusesBadFirewallRules(t *testing.T) {
+	d := &fake.Drivers{}
+	c, done := startHelper(t, context.Background(), d)
+	many := make([]string, 17)
+	for i := range many {
+		many[i] = fmt.Sprintf("192.168.1.%d", i+1)
+	}
+	bad := map[string]Request{
+		"no rules":   {Op: OpApplyFirewall},
+		"no servers": firewallReq(),
+		"loopback":   firewallReq("127.0.0.1"),
+		"IPv6":       firewallReq("fd00::53"),
+		"17 servers": firewallReq(many...),
+	}
+	samePorts := firewallReq("192.168.1.1")
+	samePorts.Rules.DNS.BypassPort = samePorts.Rules.DNS.ListenPort
+	bad["same ports"] = samePorts
+	lowPort := firewallReq("192.168.1.1")
+	lowPort.Rules.DNS.ListenPort = 53
+	bad["port 53"] = lowPort
+	for name, req := range bad {
+		if r := call(t, c, req); r.OK {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 	_ = c.Close()
 	wait(t, done)

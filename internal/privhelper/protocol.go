@@ -5,12 +5,15 @@
 // address, adds routes and hands the interface's file descriptor back over a
 // private unix socket. Packets are only ever handled by the user process.
 //
-// One-shot mode (the default and the only mode so far): after setup the
-// helper exits. Routes on the utun disappear with the interface when subtun
-// exits, crashes or is killed, so nothing is left behind. If the user
-// process goes away before setup is complete, the helper removes what it
-// added. A session mode that stays up for runtime changes would reuse the
-// same command loop.
+// One-shot mode (the default): after setup the helper exits. Routes on the
+// utun disappear with the interface when subtun exits, crashes or is killed,
+// so nothing is left behind. If the user process goes away before setup is
+// complete, the helper removes what it added.
+//
+// Session mode (done with Session set; needed once firewall rules are
+// applied, e.g. for DNS capture): the helper stays connected, accepts
+// firewall updates, and removes its firewall rules when subtun disconnects,
+// crashes or is killed, or when the helper itself is interrupted.
 //
 // The helper only accepts a fixed set of validated commands and carries
 // them out through the platform drivers (internal/platform), which use fixed
@@ -22,21 +25,26 @@ import (
 	"fmt"
 	"net/netip"
 	"time"
+
+	"github.com/md2k/subnet-tunnel/internal/platform"
 )
 
 // Ops.
 const (
-	OpCreateTun = "create_tun"
-	OpAddRoute  = "add_route"
-	OpDone      = "done"
+	OpCreateTun     = "create_tun"
+	OpAddRoute      = "add_route"
+	OpApplyFirewall = "apply_firewall"
+	OpDone          = "done"
 )
 
 // Request is one command from subtun to the helper.
 type Request struct {
-	Op   string `json:"op"`
-	MTU  int    `json:"mtu,omitempty"`
-	Addr string `json:"addr,omitempty"` // utun address (IPv4, point-to-point to itself)
-	CIDR string `json:"cidr,omitempty"`
+	Op      string          `json:"op"`
+	MTU     int             `json:"mtu,omitempty"`
+	Addr    string          `json:"addr,omitempty"` // utun address (IPv4, point-to-point to itself)
+	CIDR    string          `json:"cidr,omitempty"`
+	Rules   *platform.Rules `json:"rules,omitempty"`   // apply_firewall
+	Session bool            `json:"session,omitempty"` // done: stay up for the session
 }
 
 // Response answers one Request. create_tun also carries the utun file
@@ -55,6 +63,7 @@ const (
 	tokenLen    = 64 // hex characters
 	ioTimeout   = 30 * time.Second
 	connTimeout = 3 * time.Minute // includes typing the sudo password
+	maxServers  = 16
 )
 
 // ValidateMTU checks an MTU for the utun.
@@ -99,4 +108,25 @@ func ParseCIDR(s string) (netip.Prefix, error) {
 		return netip.Prefix{}, fmt.Errorf("%s: loopback and multicast ranges can't be routed through the tunnel", p)
 	}
 	return p, nil
+}
+
+// ValidateRules checks firewall rules sent by subtun.
+func ValidateRules(r *platform.Rules) error {
+	if r == nil {
+		return errors.New("no rules")
+	}
+	if d := r.DNS; d != nil {
+		if len(d.Servers) == 0 || len(d.Servers) > maxServers {
+			return fmt.Errorf("DNS redirect: %d servers, want 1-%d", len(d.Servers), maxServers)
+		}
+		for _, a := range d.Servers {
+			if !a.Is4() || a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() {
+				return fmt.Errorf("DNS redirect: server %s is not a unicast IPv4 address", a)
+			}
+		}
+		if d.ListenPort < 1024 || d.BypassPort < 1024 || d.ListenPort == d.BypassPort {
+			return fmt.Errorf("DNS redirect: ports %d and %d must be different and at least 1024", d.ListenPort, d.BypassPort)
+		}
+	}
+	return nil
 }

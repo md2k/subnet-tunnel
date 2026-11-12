@@ -20,11 +20,13 @@ import (
 // The OS-specific work lives in the drivers; this loop is the same on every
 // OS and is tested with fake drivers.
 type helper struct {
-	conn    *net.UnixConn
-	log     *slog.Logger
-	drivers platform.Drivers
-	dev     platform.TunDevice
-	routes  []netip.Prefix
+	conn     *net.UnixConn
+	log      *slog.Logger
+	drivers  platform.Drivers
+	dev      platform.TunDevice
+	routes   []netip.Prefix
+	firewall bool // rules applied
+	session  bool // setup done, staying up for the session
 }
 
 func (h *helper) loop(ctx context.Context) error {
@@ -33,36 +35,78 @@ func (h *helper) loop(ctx context.Context) error {
 	for {
 		var req Request
 		if _, err := readMsg(h.conn, &req, time.Time{}); err != nil {
+			gone := errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed)
+			if h.session {
+				// The normal end of a session: subtun exited, crashed or was
+				// killed, or we were interrupted.
+				h.flushFirewall()
+				h.log.Info("session ended")
+				if gone {
+					return nil
+				}
+				return err
+			}
 			// subtun went away (or was interrupted) before finishing setup.
 			h.undo()
-			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+			if gone {
 				return errors.New("subtun disconnected before setup finished; changes undone")
 			}
 			return err
 		}
-		if req.Op == OpDone {
-			name := ""
-			if h.dev != nil {
-				name = h.dev.Name()
-				// Our copy only. The interface lives as long as subtun keeps its
-				// descriptor, and its routes go away with it.
-				_ = h.dev.Release()
+		if req.Op == OpDone && !h.session {
+			end, err := h.finishSetup(req.Session)
+			if end || err != nil {
+				return err
 			}
-			h.log.Info("setup complete", "utun", name, "routes", len(h.routes))
-			return writeMsg(h.conn, Response{OK: true})
+			continue
 		}
 		resp, fds := h.handle(req)
 		if err := writeMsg(h.conn, resp, fds...); err != nil {
-			h.undo()
+			if h.session {
+				h.flushFirewall()
+			} else {
+				h.undo()
+			}
 			return err
 		}
 	}
+}
+
+// finishSetup answers done: the interface is subtun's from now on. In
+// session mode the helper stays up (end is false) to look after the
+// firewall rules.
+func (h *helper) finishSetup(session bool) (end bool, err error) {
+	if h.firewall && !session {
+		if err := writeMsg(h.conn, Response{Error: "firewall rules need session mode"}); err != nil {
+			h.undo()
+			return true, err
+		}
+		return false, nil
+	}
+	name := ""
+	if h.dev != nil {
+		name = h.dev.Name()
+		// Our copy only. The interface lives as long as subtun keeps its
+		// descriptor, and its routes go away with it.
+		_ = h.dev.Release()
+		h.dev = nil
+	}
+	h.log.Info("setup complete", "utun", name, "routes", len(h.routes), "session", session)
+	if err := writeMsg(h.conn, Response{OK: true}); err != nil {
+		h.flushFirewall()
+		return true, err
+	}
+	h.session = session
+	return !session, nil
 }
 
 func (h *helper) handle(req Request) (Response, []int) {
 	fail := func(err error) (Response, []int) {
 		h.log.Warn("refused", "op", req.Op, "err", err)
 		return Response{Error: err.Error()}, nil
+	}
+	if h.session && req.Op != OpApplyFirewall {
+		return fail(fmt.Errorf("%s: setup is finished; only firewall updates are accepted", req.Op))
 	}
 	switch req.Op {
 	case OpCreateTun:
@@ -104,13 +148,47 @@ func (h *helper) handle(req Request) (Response, []int) {
 		h.log.Info("route added", "cidr", p, "utun", h.dev.Name())
 		return Response{OK: true}, nil
 
+	case OpApplyFirewall:
+		if h.drivers.Firewall == nil {
+			return fail(errors.New("no firewall driver on this system"))
+		}
+		if err := ValidateRules(req.Rules); err != nil {
+			return fail(err)
+		}
+		if err := h.drivers.Firewall.Apply(*req.Rules); err != nil {
+			// Apply replaces the anchor in one step: on failure the previous
+			// rules (if any) are still in place and still ours to remove.
+			return fail(err)
+		}
+		h.firewall = true
+		if d := req.Rules.DNS; d != nil {
+			h.log.Info("firewall rules applied", "dns_servers", len(d.Servers))
+		}
+		return Response{OK: true}, nil
+
 	default:
 		return fail(fmt.Errorf("unknown op %q", req.Op))
 	}
 }
 
+// flushFirewall removes subtun's firewall rules, if any were applied.
+func (h *helper) flushFirewall() {
+	if !h.firewall {
+		return
+	}
+	if err := h.drivers.Firewall.Flush(); err != nil {
+		h.log.Warn("removing firewall rules", "err", err)
+		return
+	}
+	h.firewall = false
+	h.log.Info("firewall rules removed")
+}
+
 // undo removes what this helper added. Used only when setup didn't finish.
+// Firewall rules go first, so DNS isn't redirected to a listener that is
+// about to disappear.
 func (h *helper) undo() {
+	h.flushFirewall()
 	if h.dev == nil {
 		return
 	}

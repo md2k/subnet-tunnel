@@ -18,8 +18,9 @@ import (
 
 // Drivers is the set of drivers the helper works with.
 type Drivers struct {
-	Tun    Tun
-	Routes Routes
+	Tun      Tun
+	Routes   Routes
+	Firewall Firewall
 }
 
 // Tun creates the capture interface (macOS utun; later Linux TUN, Windows
@@ -49,4 +50,29 @@ type TunDevice interface {
 type Routes interface {
 	Add(p netip.Prefix, iface string) error
 	Delete(p netip.Prefix, iface string) error
+}
+
+// Firewall manages subtun's own firewall rules (macOS: a pf anchor), never
+// anyone else's.
+type Firewall interface {
+	// Apply replaces subtun's rules with r in one step. The first Apply
+	// enables the firewall if it is off.
+	Apply(r Rules) error
+	// Flush removes subtun's rules and undoes the enabling done by Apply.
+	Flush() error
+}
+
+// Rules is what subtun needs from the firewall, described as intent.
+type Rules struct {
+	DNS *DNSRedirect `json:"dns,omitempty"`
+}
+
+// DNSRedirect captures DNS (UDP and TCP port 53) sent to Servers and
+// delivers it to subtun's DNS listener on 127.0.0.1:ListenPort. Packets
+// sent from BypassPort (subtun's own fallback queries) pass untouched, so
+// they can't loop back.
+type DNSRedirect struct {
+	Servers    []netip.Addr `json:"servers"`
+	ListenPort uint16       `json:"listen_port"`
+	BypassPort uint16       `json:"bypass_port"`
 }
