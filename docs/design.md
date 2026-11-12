@@ -391,13 +391,23 @@ captured. What stays behind has no `pass` rule and blocks DNS with
 
 ## Open questions
 
+- **Kill switch in a full tunnel guards broadcast, multicast and link-local** (255.255.255.255,
+  224.0.0.0/4, 169.254.0.0/16), so DHCP and Bonjour would be blocked; they should always be left out
+  of the guarded prefixes.
+- **Guarded prefixes don't follow network changes:** they are computed at start, minus the local
+  networks of that moment. After switching to a network with another subnet, a full-tunnel kill
+  switch would block the new LAN (router, DHCP) and with it the tunnel's own path. They need
+  recomputing on network changes, like the DNS servers.
+- **Reconnecting:** when the carrier drops (pod restarted, laptop asleep, network change), subtun
+  exits. It should reconnect, with the kill switch holding the blocks meanwhile.
 - **Targets with neither a shell nor Python** (distroless static, scratch): an ephemeral debug
   container (Kubernetes) or a helper container in the target's network namespace (Docker).
 - **Aborted streams:** smux has no reset. When the laptop side closes a stream abruptly, an agent
   still sending to it waits for window updates that never come, until the destination closes.
   Both agents behave the same; needs a reset signal in the protocol.
-- **Transport flow control on remote clusters:** several carriers in parallel to avoid head-of-line
-  blocking, once measured against a real remote cluster.
+- **Remote clusters:** everything was measured against local clusters so far. Transport flow
+  control there (several carriers in parallel against head-of-line blocking) waits for a real
+  remote cluster's numbers.
 - **Coexistence** with other VPN or security software that owns its own utun interface or pf anchor
   (pf driver: own anchor, `quick` rules, warn on other anchors; to be tested next to Zscaler).
 - **A helper killed with SIGKILL** leaves its running rules, including the DNS redirect to subtun's

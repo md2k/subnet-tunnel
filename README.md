@@ -110,9 +110,11 @@ turns an sshuttle options file into a profile ([details](docs/config.md#importin
 
 ## Planned
 
+- Reconnect when the connection to the target drops (the kill switch holds meanwhile).
+- `subtun status` and a local control API; change CIDRs and DNS at runtime without a restart (opt-in).
 - SSH transport to any host.
-- Capture on Linux (TUN) and Windows (wintun); IPv6 and UDP.
-- Change CIDRs and DNS at runtime without a restart (opt-in).
+- DNS without firewall rules: subtun as the system resolver, or only for the listed domains.
+- UDP and IPv6 through the tunnel; capture on Linux (TUN) and Windows (wintun).
 
 ## Documentation
 
