@@ -12,8 +12,9 @@
 // added. A session mode that stays up for runtime changes would reuse the
 // same command loop.
 //
-// The helper only accepts a fixed set of validated commands and runs
-// /sbin/ifconfig and /sbin/route with fixed argument lists, never a shell.
+// The helper only accepts a fixed set of validated commands and carries
+// them out through the platform drivers (internal/platform), which use fixed
+// argument lists and never a shell.
 package privhelper
 
 import (
@@ -98,17 +99,4 @@ func ParseCIDR(s string) (netip.Prefix, error) {
 		return netip.Prefix{}, fmt.Errorf("%s: loopback and multicast ranges can't be routed through the tunnel", p)
 	}
 	return p, nil
-}
-
-// routeArgs builds the /sbin/route arguments for adding or deleting p on iface.
-func routeArgs(verb string, p netip.Prefix, iface string) []string {
-	kind := "-net"
-	if p.IsSingleIP() {
-		kind = "-host"
-	}
-	dst := p.String()
-	if p.IsSingleIP() {
-		dst = p.Addr().String()
-	}
-	return []string{"-n", verb, kind, dst, "-interface", iface}
 }
