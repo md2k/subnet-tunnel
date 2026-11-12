@@ -105,11 +105,11 @@ profiles:
 build/subtun up dev-cluster            # flags still override, extra CIDRs and -x are added
 ```
 
-See [Configuration](docs/config.md).
+See [Configuration](docs/config.md). Coming from sshuttle? `subtun import sshuttle FILE --name NAME`
+turns an sshuttle options file into a profile ([details](docs/config.md#importing-from-sshuttle)).
 
 ## Planned
 
-- `subtun import sshuttle` for existing sshuttle option files.
 - SSH transport to any host.
 - Capture on Linux (TUN) and Windows (wintun); IPv6 and UDP.
 - Change CIDRs and DNS at runtime without a restart (opt-in).

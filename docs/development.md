@@ -46,6 +46,7 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/dns` | DNS engine: match names, tunnel or fallback, UDP/TCP listener, loop-free forwarder |
 | `internal/routes` | route planning: excludes by subtraction, cleanup, safety checks |
 | `internal/config` | YAML config profiles |
+| `internal/importer` | `subtun import sshuttle`: sshuttle options file → profile, insertion into a config file |
 | `internal/netinfo` | local interface networks and default gateway (read-only) |
 | `internal/netstack` | gVisor stack on a packet device; dials each captured connection through the tunnel |
 | `internal/tundev` | utun as a netstack device (macOS) |

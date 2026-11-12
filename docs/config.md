@@ -235,3 +235,33 @@ keeps working; blocked connections are refused at once, so apps fall back to IPv
 subtun's own connection to the API server uses IPv6, IPv6 is left alone, with a warning. The block
 is removed when subtun stops, unless a kill switch keeps its blocks in place (then IPv6 stays blocked
 with them).
+
+## Importing from sshuttle
+
+`subtun import sshuttle FILE` reads an sshuttle options file (the `@FILE` format: one argument per
+line, `#` comments) and makes a named profile from it:
+
+```sh
+subtun import sshuttle work.conf --name work > work.yaml                    # review it first
+subtun import sshuttle work.conf --name work --k8s debug -n tools --write   # add it to your config
+```
+
+| sshuttle | subtun profile |
+|---|---|
+| subnets, `-s FILE` | `routes`; duplicates and routes covered by a broader one are dropped; host bits are cleared; `0/0` becomes `0.0.0.0/1` + `128.0.0.0/1` |
+| `-x`, `-X FILE` | `exclude`; excludes that match no route are dropped |
+| `--dns` alone | `dns.domains: ["."]` (every name through the tunnel) |
+| `--dns-domains` `.*.company.com` | `dns.domains: [company.com]` (now also matches `company.com` itself, and only on label boundaries) |
+| other `--dns-domains` patterns | `dns.patterns`, anchored with `^` as sshuttle's `re.match` was; check them, Python and Go regexps differ in details |
+| `--dns-to IP:PORT` | `dns.fallback` |
+| `--ns-hosts` | `dns.servers` |
+
+Options subtun doesn't need or have (`--method`, `--no-latency-control`, `--remote`, `-N`, ...),
+names and IPv6 subnets, and port ranges are listed in comments above the profile, together with what
+was dropped as redundant. The target can't come from sshuttle's SSH remote: give `--k8s POD`
+(`-n`, `--context`) or `--docker CONTAINER`; without one the printed profile has a placeholder.
+
+`--write` adds the profile to your config file (`--config`, `$SUBTUN_CONFIG` or the default) right
+below `profiles:`, with the indentation of your other profiles, keeping comments and everything else.
+It refuses if the name is taken or the result wouldn't load, and keeps the old file as `.bak`.
+

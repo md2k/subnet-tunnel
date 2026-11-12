@@ -369,3 +369,26 @@ func TestLeftoversMarker(t *testing.T) {
 		}
 	}
 }
+
+func TestImportSSHuttle(t *testing.T) {
+	out, err := runCLI(t, "import", "sshuttle", "../importer/testdata/sshuttle.conf", "--name", "work", "--k8s", "debug", "-n", "tools", "--context", "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"  work:\n    target: {k8s: {context: 'dev', namespace: 'tools', pod: 'debug'}}",
+		"    routes:\n      - 203.0.113.0/24",
+		"      domains:\n        - 'example.com'",
+		"imported 4 routes, 1 excludes, 2 DNS domains, 1 patterns",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in\n%s", want, out)
+		}
+	}
+	if _, err := runCLI(t, "import", "sshuttle", "../importer/testdata/sshuttle.conf", "--name", "Work Profile"); err == nil {
+		t.Error("bad profile name accepted")
+	}
+	if _, err := runCLI(t, "import", "sshuttle", "../importer/testdata/sshuttle.conf", "--k8s", "p", "--docker", "c"); err == nil {
+		t.Error("two targets accepted")
+	}
+}
