@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/md2k/subnet-tunnel/internal/platform"
 	"github.com/md2k/subnet-tunnel/internal/platform/darwin"
@@ -61,10 +62,18 @@ func Serve(ctx context.Context, socketPath string, stdin io.Reader, log *slog.Lo
 		return err
 	}
 
-	h := &helper{conn: conn, log: log, drivers: platform.Drivers{
-		Tun:      darwin.Utun{},
-		Routes:   darwin.Route{},
-		Firewall: &darwin.PF{Log: log},
-	}}
+	h := &helper{
+		conn: conn,
+		log:  log,
+		drivers: platform.Drivers{
+			Tun:      darwin.Utun{},
+			Routes:   darwin.Route{},
+			Firewall: &darwin.PF{Log: log},
+		},
+		state: fileState{dir: "/var/run/subtun"},
+		alive: processAlive,
+		pid:   os.Getpid(),
+		grace: 5 * time.Second,
+	}
 	return h.loop(ctx)
 }

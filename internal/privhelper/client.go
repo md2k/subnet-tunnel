@@ -162,11 +162,39 @@ func (c *Client) AddRoute(p netip.Prefix) error {
 	return err
 }
 
-// ApplyFirewall replaces subtun's firewall rules. Rules applied during setup
-// need DoneSession.
-func (c *Client) ApplyFirewall(r platform.Rules) error {
-	_, _, err := c.call(Request{Op: OpApplyFirewall, Rules: &r})
+// ApplyFirewall replaces subtun's firewall rules. persist, if not nil, is
+// what stays in place when the tunnel goes away (kill switch): after a
+// crash, a lost tunnel, or End(true). Rules applied during setup need
+// DoneSession.
+func (c *Client) ApplyFirewall(r platform.Rules, persist *platform.Rules) error {
+	_, _, err := c.call(Request{Op: OpApplyFirewall, Rules: &r, Persist: persist})
 	return err
+}
+
+// End ends a session deliberately: keep leaves the persist rules in place
+// (lockdown), otherwise all firewall rules are removed. Close follows.
+func (c *Client) End(keep bool) error {
+	_, _, err := c.call(Request{Op: OpEnd, Keep: keep})
+	return err
+}
+
+// Adopt takes over firewall rules an earlier session left behind, keeping
+// its blocking rules but allowing DNS, so subtun can connect. It must be
+// the first command.
+func (c *Client) Adopt() (string, error) {
+	resp, _, err := c.call(Request{Op: OpAdopt})
+	return resp.Message, err
+}
+
+// Cleanup removes firewall rules an earlier session left behind and ends
+// the helper.
+func (c *Client) Cleanup() (string, error) {
+	resp, _, err := c.call(Request{Op: OpCleanup})
+	if err != nil {
+		_ = c.Close()
+		return "", err
+	}
+	return resp.Message, c.Done()
 }
 
 // Done ends setup; the helper exits and leaves the interface and routes to
@@ -234,24 +262,4 @@ func runtimeDir() (string, error) {
 		return "", err
 	}
 	return dir, nil
-}
-
-// checkPrivate verifies that path is owned by uid and not accessible to
-// group or others.
-func checkPrivate(path string, uid int) error {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("%s: can't read owner", path)
-	}
-	if int(st.Uid) != uid {
-		return fmt.Errorf("%s is owned by uid %d, not %d", path, st.Uid, uid)
-	}
-	if fi.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("%s is accessible to other users (%v)", path, fi.Mode().Perm())
-	}
-	return nil
 }

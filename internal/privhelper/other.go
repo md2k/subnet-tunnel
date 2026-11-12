@@ -28,7 +28,16 @@ func (*Client) CreateTun(int, netip.Addr) (string, *os.File, error) { return "",
 func (*Client) AddRoute(netip.Prefix) error { return errUnsupported }
 
 // ApplyFirewall is not implemented on this platform yet.
-func (*Client) ApplyFirewall(platform.Rules) error { return errUnsupported }
+func (*Client) ApplyFirewall(platform.Rules, *platform.Rules) error { return errUnsupported }
+
+// End is not implemented on this platform yet.
+func (*Client) End(bool) error { return errUnsupported }
+
+// Adopt is not implemented on this platform yet.
+func (*Client) Adopt() (string, error) { return "", errUnsupported }
+
+// Cleanup is not implemented on this platform yet.
+func (*Client) Cleanup() (string, error) { return "", errUnsupported }
 
 // DoneSession is not implemented on this platform yet.
 func (*Client) DoneSession() error { return errUnsupported }

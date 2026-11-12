@@ -113,7 +113,7 @@ func Start(ctx context.Context, prefixes []netip.Prefix, opts Options, dialer ne
 	}
 	session := false
 	if dr != nil {
-		if err := h.ApplyFirewall(dr.rules()); err != nil {
+		if err := h.ApplyFirewall(dr.rules(), nil); err != nil {
 			return fail(err)
 		}
 		if err := h.DoneSession(); err != nil {

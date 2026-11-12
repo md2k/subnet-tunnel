@@ -108,7 +108,7 @@ func (r *dnsRuntime) follow(ctx context.Context, interval time.Duration, h *priv
 		for _, n := range notes {
 			log.Warn(n)
 		}
-		if err := h.ApplyFirewall(r.rules()); err != nil {
+		if err := h.ApplyFirewall(r.rules(), nil); err != nil {
 			if ctx.Err() == nil {
 				log.Warn("DNS servers changed, but updating the capture failed", "servers", servers, "err", err)
 			}

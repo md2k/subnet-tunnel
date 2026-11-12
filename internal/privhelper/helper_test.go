@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,12 +19,64 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/platform/fake"
 )
 
+// memState is an in-memory stateStore.
+type memState struct {
+	mu sync.Mutex
+	st *state
+}
+
+func (m *memState) load() (*state, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.st == nil {
+		return nil, nil
+	}
+	c := *m.st
+	return &c, nil
+}
+
+func (m *memState) save(st *state) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := *st
+	m.st = &c
+	return nil
+}
+
+func (m *memState) remove() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.st = nil
+	return nil
+}
+
+func (m *memState) get() *state { st, _ := m.load(); return st }
+
+const testPID = 4242
+
+type helperOpts struct {
+	state *memState
+	alive func(int) bool
+}
+
 // startHelper runs the helper's command loop with fake drivers and returns
 // subtun's end of the connection.
 func startHelper(t *testing.T, ctx context.Context, d *fake.Drivers) (*net.UnixConn, <-chan error) {
 	t.Helper()
+	return startHelperOpts(t, ctx, d, helperOpts{})
+}
+
+func startHelperOpts(t *testing.T, ctx context.Context, d *fake.Drivers, o helperOpts) (*net.UnixConn, <-chan error) {
+	t.Helper()
+	if o.state == nil {
+		o.state = &memState{}
+	}
+	if o.alive == nil {
+		o.alive = func(int) bool { return false }
+	}
 	a, b := socketPair(t)
-	h := &helper{conn: a, log: slog.New(slog.DiscardHandler), drivers: d.Platform()}
+	h := &helper{conn: a, log: slog.New(slog.DiscardHandler), drivers: d.Platform(),
+		state: o.state, alive: o.alive, pid: testPID, grace: 100 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() { done <- h.loop(ctx) }()
 	return b, done
@@ -278,4 +331,228 @@ func TestHelperRefusesBadFirewallRules(t *testing.T) {
 	_ = c.Close()
 	wait(t, done)
 	checkCalls(t, d)
+}
+
+var guarded = []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+
+// killSwitchReq is a running session's rules plus what stays behind.
+func killSwitchReq(iface string) Request {
+	r := firewallReq("192.168.1.1")
+	r.Rules.KillSwitch = &platform.KillSwitch{TunIface: iface, Prefixes: guarded}
+	r.Rules.BlockIPv6 = true
+	r.Persist = &platform.Rules{
+		DNSBlock:   []netip.Addr{netip.MustParseAddr("192.168.1.1")},
+		KillSwitch: &platform.KillSwitch{Prefixes: guarded},
+		BlockIPv6:  true,
+	}
+	return r
+}
+
+const (
+	runningRules = "firewall dns [192.168.1.1] 53530 53531 guard utun0 [10.0.0.0/8] ipv6"
+	keptRules    = "firewall dnsblock [192.168.1.1] guard - [10.0.0.0/8] ipv6"
+)
+
+func startKillSwitchSession(t *testing.T, ctx context.Context, d *fake.Drivers, st *memState) (*net.UnixConn, <-chan error) {
+	t.Helper()
+	c, done := startHelperOpts(t, ctx, d, helperOpts{state: st})
+	call(t, c, createReq)
+	call(t, c, Request{Op: OpAddRoute, CIDR: "10.0.0.0/8"})
+	if r := call(t, c, killSwitchReq("utun0")); !r.OK {
+		t.Fatalf("apply_firewall: %+v", r)
+	}
+	call(t, c, Request{Op: OpDone, Session: true})
+	return c, done
+}
+
+// Kill switch: when subtun disappears (crash, kill -9, lost tunnel exits
+// without ending), the blocking rules replace the session's and stay, with
+// pf's reference recorded for whoever comes next.
+func TestHelperKillSwitchKeepsRulesWhenSubtunDisappears(t *testing.T) {
+	d, st := &fake.Drivers{}, &memState{}
+	c, done := startKillSwitchSession(t, context.Background(), d, st)
+	_ = c.Close()
+	if err := wait(t, done); err != nil {
+		t.Fatal(err)
+	}
+	checkCalls(t, d, created, "add 10.0.0.0/8 utun0", runningRules, "release utun0", keptRules)
+	got := st.get()
+	if got == nil || got.Owner != testPID || got.Token != "fake-token" || got.Persist == nil {
+		t.Fatalf("state %+v", got)
+	}
+}
+
+func TestHelperEnd(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		d, st := &fake.Drivers{}, &memState{}
+		c, done := startKillSwitchSession(t, context.Background(), d, st)
+		if r := call(t, c, Request{Op: OpEnd, Keep: keep}); !r.OK {
+			t.Fatalf("end keep=%v: %+v", keep, r)
+		}
+		if err := wait(t, done); err != nil {
+			t.Fatal(err)
+		}
+		last := d.Calls()[len(d.Calls())-1]
+		if keep && (last != keptRules || st.get() == nil) {
+			t.Errorf("lockdown stop: last call %q, state %+v", last, st.get())
+		}
+		if !keep && (last != "flush" || st.get() != nil) {
+			t.Errorf("release stop: last call %q, state %+v", last, st.get())
+		}
+	}
+}
+
+// Ctrl-C reaches the helper too: it waits for subtun's word instead of
+// deciding itself.
+func TestHelperSignalWaitsForSubtun(t *testing.T) {
+	d := &fake.Drivers{}
+	ctx, cancel := context.WithCancel(context.Background())
+	c, done := startKillSwitchSession(t, ctx, d, &memState{})
+	cancel()
+	if r := call(t, c, Request{Op: OpEnd}); !r.OK {
+		t.Fatalf("end after signal: %+v", r)
+	}
+	if err := wait(t, done); err != nil {
+		t.Fatal(err)
+	}
+	if last := d.Calls()[len(d.Calls())-1]; last != "flush" {
+		t.Fatalf("last call %q, want flush", last)
+	}
+
+	// No word from subtun within the grace period: the crash policy.
+	d = &fake.Drivers{}
+	ctx, cancel = context.WithCancel(context.Background())
+	_, done = startKillSwitchSession(t, ctx, d, &memState{})
+	cancel()
+	if err := wait(t, done); err != nil {
+		t.Fatal(err)
+	}
+	if last := d.Calls()[len(d.Calls())-1]; last != keptRules {
+		t.Fatalf("last call %q, want the kept rules", last)
+	}
+}
+
+// Rules an earlier session left are taken over when its helper is gone:
+// its pf reference is adopted, the new rules replace them.
+func TestHelperTakesOverLeftovers(t *testing.T) {
+	d := &fake.Drivers{Busy: true}
+	st := &memState{st: &state{Owner: 99, Token: "old"}}
+	c, done := startHelperOpts(t, context.Background(), d, helperOpts{state: st})
+	call(t, c, createReq)
+	if r := call(t, c, killSwitchReq("utun0")); !r.OK {
+		t.Fatalf("apply_firewall: %+v", r)
+	}
+	if r := call(t, c, Request{Op: OpDone, Session: true}); !r.OK {
+		t.Fatal(r)
+	}
+	if got := st.get(); got.Owner != testPID || got.Token != "old" {
+		t.Fatalf("state %+v", got)
+	}
+	call(t, c, Request{Op: OpEnd})
+	wait(t, done)
+	checkCalls(t, d, created, "adopt old", runningRules, "release utun0", "flush")
+}
+
+func TestHelperRefusesRulesItCannotTakeOver(t *testing.T) {
+	cases := map[string]helperOpts{
+		"another subtun session": {state: &memState{st: &state{Owner: 99, Token: "t"}}, alive: func(pid int) bool { return pid == 99 }},
+		"no session recorded":    {},
+	}
+	for want, o := range cases {
+		d := &fake.Drivers{Busy: true}
+		c, done := startHelperOpts(t, context.Background(), d, o)
+		call(t, c, createReq)
+		if r := call(t, c, firewallReq("192.168.1.1")); r.OK || !strings.Contains(r.Error, want) {
+			t.Errorf("got %+v, want error about %q", r, want)
+		}
+		_ = c.Close()
+		wait(t, done)
+		checkCalls(t, d, created, "close utun0")
+	}
+}
+
+// adopt (before connecting): an earlier kill switch keeps blocking, but DNS
+// is allowed so subtun can reach its API server. If setup then fails, the
+// left-behind rules are put back.
+func TestHelperAdopt(t *testing.T) {
+	d := &fake.Drivers{Busy: true}
+	persist := killSwitchReq("").Persist
+	st := &memState{st: &state{Owner: 99, Token: "old", Persist: persist}}
+	c, done := startHelperOpts(t, context.Background(), d, helperOpts{state: st})
+	if r := call(t, c, Request{Op: OpAdopt}); !r.OK || !strings.Contains(r.Message, "taken over") {
+		t.Fatalf("adopt: %+v", r)
+	}
+	if r := call(t, c, Request{Op: OpAdopt}); r.OK {
+		t.Error("second adopt accepted")
+	}
+	call(t, c, createReq)
+	_ = c.Close() // e.g. connecting to the cluster failed
+	wait(t, done)
+	checkCalls(t, d, "adopt old", "firewall guard - [10.0.0.0/8] ipv6", created, keptRules, "close utun0")
+	if got := st.get(); got == nil || got.Owner != testPID {
+		t.Fatalf("state %+v", got)
+	}
+}
+
+func TestHelperAdoptRemovesLeftoversThatDontBlock(t *testing.T) {
+	d := &fake.Drivers{Busy: true}
+	st := &memState{st: &state{Owner: 99, Token: "old"}} // e.g. a killed helper's DNS redirect
+	c, done := startHelperOpts(t, context.Background(), d, helperOpts{state: st})
+	if r := call(t, c, Request{Op: OpAdopt}); !r.OK || !strings.Contains(r.Message, "removed") {
+		t.Fatalf("adopt: %+v", r)
+	}
+	call(t, c, Request{Op: OpDone})
+	wait(t, done)
+	checkCalls(t, d, "adopt old", "flush")
+	if st.get() != nil {
+		t.Fatal("state not removed")
+	}
+}
+
+func TestHelperCleanup(t *testing.T) {
+	d := &fake.Drivers{Busy: true}
+	st := &memState{st: &state{Owner: 99, Token: "old"}}
+	c, done := startHelperOpts(t, context.Background(), d, helperOpts{state: st})
+	if r := call(t, c, Request{Op: OpCleanup}); !r.OK || !strings.Contains(r.Message, "released pf") {
+		t.Fatalf("cleanup: %+v", r)
+	}
+	call(t, c, Request{Op: OpDone})
+	wait(t, done)
+	checkCalls(t, d, "adopt old", "flush")
+
+	// A running session's rules are not touched.
+	d = &fake.Drivers{Busy: true}
+	c, done = startHelperOpts(t, context.Background(), d, helperOpts{state: &memState{st: &state{Owner: 99}}, alive: func(int) bool { return true }})
+	if r := call(t, c, Request{Op: OpCleanup}); r.OK || !strings.Contains(r.Error, "running") {
+		t.Fatalf("cleanup of a running session: %+v", r)
+	}
+	_ = c.Close()
+	wait(t, done)
+	checkCalls(t, d)
+
+	// Nothing there.
+	d = &fake.Drivers{}
+	c, done = startHelperOpts(t, context.Background(), d, helperOpts{})
+	if r := call(t, c, Request{Op: OpCleanup}); !r.OK || r.Message != "nothing to clean up" {
+		t.Fatalf("empty cleanup: %+v", r)
+	}
+	_ = c.Close()
+	wait(t, done)
+}
+
+func TestValidatePersist(t *testing.T) {
+	ok := killSwitchReq("").Persist
+	if err := ValidatePersist(ok); err != nil {
+		t.Fatal(err)
+	}
+	for name, r := range map[string]*platform.Rules{
+		"redirect": firewallReq("192.168.1.1").Rules,
+		"pass":     {KillSwitch: &platform.KillSwitch{TunIface: "utun3", Prefixes: guarded}},
+		"loopback": {KillSwitch: &platform.KillSwitch{Prefixes: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}}},
+		"empty":    {},
+	} {
+		if err := ValidatePersist(r); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
 }
