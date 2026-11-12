@@ -25,7 +25,7 @@ func TestUpListsProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "dev\n  socks-only") {
+	if !strings.Contains(out, "dev\n  dns\n  socks-only") {
 		t.Fatalf("got %q", out)
 	}
 }
@@ -65,7 +65,7 @@ func TestUpFlagsOverrideAndAdd(t *testing.T) {
 }
 
 func TestUpErrors(t *testing.T) {
-	if _, err := runCLI(t, "--config", "testdata/config.yaml", "up", "nope"); err == nil || !strings.Contains(err.Error(), "dev, socks-only") {
+	if _, err := runCLI(t, "--config", "testdata/config.yaml", "up", "nope"); err == nil || !strings.Contains(err.Error(), "dev, dns, socks-only") {
 		t.Errorf("unknown profile: %v", err)
 	}
 	if _, err := runCLI(t, "--config", "testdata/missing.yaml", "up"); err == nil {
@@ -141,5 +141,74 @@ func TestFullTunnelDryRun(t *testing.T) {
 	}
 	if !strings.Contains(out, "  0.0.0.0/1\n") {
 		t.Fatalf("lower half missing:\n%s", out)
+	}
+}
+
+// fakeSystemDNS stands in for /etc/resolv.conf.
+func fakeSystemDNS(t *testing.T) {
+	t.Helper()
+	old := systemDNS
+	systemDNS = func() ([]netip.Addr, []string, error) {
+		return []netip.Addr{netip.MustParseAddr("192.0.2.53")}, []string{"IPv6 DNS server 2001:db8::53 is not captured (IPv4 only so far)"}, nil
+	}
+	t.Cleanup(func() { systemDNS = old })
+}
+
+func TestDNSDryRunFollowsSystem(t *testing.T) {
+	fakeSystemDNS(t)
+	out, err := runCLI(t, "k8s", "debug", "203.0.113.0/24", "--dns-domain", "svc.cluster.local,company.com", "--dns-pattern", `^db-[0-9]+\.`, "--dry-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"DNS capture (firewall): queries to 192.0.2.53 are answered by subtun",
+		"through the tunnel: svc.cluster.local, company.com, 1 pattern(s)",
+		"other names: the captured servers",
+		"servers follow the system's",
+		"warning: IPv6 DNS server 2001:db8::53 is not captured",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in\n%s", want, out)
+		}
+	}
+}
+
+func TestDNSProfileAndFlags(t *testing.T) {
+	out, err := runCLI(t, "--config", "testdata/config.yaml", "up", "dns", "--dns-domain", "company.com", "--dns-fallback", "198.51.100.53:5353", "--dry-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"queries to 203.0.113.53 are answered", // pinned in the profile
+		"through the tunnel: svc.cluster.local, company.com\n",
+		"other names: 198.51.100.53:5353", // flag overrides the profile's fallback
+		"warning: fallback DNS server 198.51.100.53 is inside the routed 198.51.100.0/24",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "follow the system") {
+		t.Error("pinned servers must not follow the system's")
+	}
+	off, err := runCLI(t, "--config", "testdata/config.yaml", "up", "dns", "--dns-capture", "off", "--dry-run")
+	if err != nil || strings.Contains(off, "DNS capture") {
+		t.Errorf("--dns-capture off: %v\n%s", err, off)
+	}
+}
+
+func TestDNSErrors(t *testing.T) {
+	fakeSystemDNS(t)
+	cases := map[string][]string{
+		"together with utun capture": {"k8s", "debug", "--socks", "127.0.0.1:1080", "--dns-domain", "company.com"},
+		"use firewall or off":        {"k8s", "debug", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-capture", "magic"},
+		"unicast IPv4":               {"k8s", "debug", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-servers", "127.0.0.1"},
+		"want system, IP or IP:port": {"k8s", "debug", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-fallback", "dns.google"},
+		"regular expression":         {"k8s", "debug", "203.0.113.0/24", "--dns-domain", `.*\.company\.com`},
+	}
+	for want, args := range cases {
+		if _, err := runCLI(t, append(args, "--dry-run")...); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%v: got %v, want %q", args, err, want)
+		}
 	}
 }

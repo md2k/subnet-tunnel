@@ -21,6 +21,7 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/agentbin"
 	"github.com/md2k/subnet-tunnel/internal/capture"
 	"github.com/md2k/subnet-tunnel/internal/config"
+	"github.com/md2k/subnet-tunnel/internal/dns"
 	"github.com/md2k/subnet-tunnel/internal/netinfo"
 	"github.com/md2k/subnet-tunnel/internal/privhelper"
 	"github.com/md2k/subnet-tunnel/internal/routes"
@@ -34,7 +35,9 @@ import (
 
 // Execute runs the CLI and returns the process exit code.
 func Execute() int {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// SIGHUP too (terminal closed): the helper must get to remove its
+	// firewall rules, and subtun to stop its agent.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 	if err := newRoot().ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "subtun:", err)
@@ -111,6 +114,13 @@ type settings struct {
 	tunAddr   string
 	mtu       int
 	dryRun    bool
+
+	dnsCapture  string
+	dnsListen   string // development: answer DNS here, no capture
+	dnsServers  []string
+	dnsDomains  []string
+	dnsPatterns []string
+	dnsFallback string
 }
 
 func (s *settings) register(cmd *cobra.Command) {
@@ -126,6 +136,13 @@ func (s *settings) register(cmd *cobra.Command) {
 		"directory for the binary agent in the target (default: first usable of ~/.cache/subtun, /tmp/subtun-<uid>, /var/tmp/subtun-<uid>, /dev/shm/subtun-<uid>)")
 	f.StringVar(&s.agentFile, "agent-file", "", "upload this agent binary instead of the embedded one (development)")
 	_ = f.MarkHidden("agent-file")
+	f.StringSliceVar(&s.dnsDomains, "dns-domain", nil, "resolve names under this domain through the tunnel (repeatable or comma-separated; \".\" = all names)")
+	f.StringArrayVar(&s.dnsPatterns, "dns-pattern", nil, "resolve names matching this regular expression through the tunnel (repeatable)")
+	f.StringSliceVar(&s.dnsServers, "dns-servers", nil, "DNS servers whose queries are captured (default auto: the system's, followed when the network changes)")
+	f.StringVar(&s.dnsFallback, "dns-fallback", "", "resolver for all other names: system (default) or IP[:port]")
+	f.StringVar(&s.dnsCapture, "dns-capture", "", "how DNS is captured: firewall (default, pf on macOS) or off")
+	f.StringVar(&s.dnsListen, "dns-listen", "", "answer DNS on this address instead of capturing it, no root needed (development)")
+	_ = f.MarkHidden("dns-listen")
 }
 
 // applyProfile fills settings from a profile; flags given on the command
@@ -149,6 +166,17 @@ func (s *settings) applyProfile(p config.Profile, flags *pflag.FlagSet) {
 	}
 	s.routes = append(append([]string{}, p.Routes...), s.routes...)
 	s.excludes = append(append([]string{}, p.Exclude...), s.excludes...)
+	if !set("dns-capture") {
+		s.dnsCapture = p.DNS.Capture
+	}
+	if !set("dns-servers") {
+		s.dnsServers = p.DNS.Servers
+	}
+	if !set("dns-fallback") {
+		s.dnsFallback = p.DNS.Fallback
+	}
+	s.dnsDomains = append(append([]string{}, p.DNS.Domains...), s.dnsDomains...)
+	s.dnsPatterns = append(append([]string{}, p.DNS.Patterns...), s.dnsPatterns...)
 }
 
 func (s *settings) transport(g *globalOpts) transport.Options {
@@ -362,10 +390,16 @@ func printPlan(w io.Writer, rp *routePlan, warns []string) {
 
 func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect connectFunc) error {
 	log := newLogger(g.verbose)
-	if s.socks == "" && len(s.routes) == 0 {
+	if s.socks == "" && len(s.routes) == 0 && s.dnsListen == "" {
 		return errors.New("nothing to do: give CIDRs to capture, --socks ADDR, or both")
 	}
 	rp, warns, err := planRoutes(s)
+	var dnsOpts *capture.DNSOptions
+	if err == nil {
+		var notes []string
+		dnsOpts, notes, err = planDNS(s, rp)
+		warns = append(warns, notes...)
+	}
 	if s.dryRun {
 		if err != nil {
 			for _, wn := range warns {
@@ -378,6 +412,9 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 			return nil
 		}
 		printPlan(out, rp, warns)
+		if dnsOpts != nil {
+			printDNSPlan(out, dnsOpts, s.dnsDomains, s.dnsPatterns)
+		}
 		return nil
 	}
 	if err != nil {
@@ -430,23 +467,40 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		"took", time.Since(start).Round(time.Millisecond))
 
 	errc := make(chan error, 1)
+	if s.dnsListen != "" && dnsOpts != nil {
+		dnsOpts.Tunnel = dns.UpstreamFunc(client.ExchangeDNS)
+		stopDNS, err := serveDNSDev(ctx, s.dnsListen, dnsOpts, log)
+		if err != nil {
+			return err
+		}
+		defer stopDNS()
+		dnsOpts = nil // not captured
+	}
 	if ln != nil {
 		srv := &socks.Server{Dialer: client, Logger: log}
 		go func() { errc <- srv.Serve(ctx, ln) }()
 		log.Info("SOCKS5 proxy ready", "addr", ln.Addr().String())
 	}
 
+	var helperExited <-chan struct{}
 	if rp != nil {
 		final, err := excludeEndpoints(rp, carrier.Endpoints, log)
 		if err != nil {
 			return err
 		}
-		c, err := capture.Start(ctx, final, rp.opts, client, log)
+		opts := rp.opts
+		if dnsOpts != nil {
+			dnsOpts.Tunnel = dns.UpstreamFunc(client.ExchangeDNS)
+			opts.DNS = dnsOpts
+		}
+		c, err := capture.Start(ctx, final, opts, client, log)
 		if err != nil {
 			return fmt.Errorf("utun capture: %w", err)
 		}
-		// Closed before the tunnel (deferred above), so routes go first.
+		// Closed before the tunnel (deferred above): firewall rules and
+		// routes go first.
 		defer c.Close()
+		helperExited = c.HelperExited()
 	}
 
 	select {
@@ -457,8 +511,21 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		return errors.New("connection to the agent was lost")
 	case err := <-errc:
 		return fmt.Errorf("SOCKS listener: %w", err)
+	case <-helperExited:
+		// Ctrl-C reaches the helper too; that's a normal shutdown.
+		select {
+		case <-ctx.Done():
+			log.Info("shutting down")
+			return nil
+		case <-time.After(300 * time.Millisecond):
+		}
+		return fmt.Errorf("the root helper exited unexpectedly, so DNS capture stopped. If DNS fails afterwards, remove the redirect with: sudo pfctl -a %s -F nat && sudo pfctl -a %s -F rules", pfAnchor, pfAnchor)
 	}
 }
+
+// pfAnchor is where the macOS firewall driver keeps subtun's rules (see
+// internal/platform/darwin).
+const pfAnchor = "com.apple/subtun"
 
 // excludeEndpoints carves the carrier's own addresses (API server, Docker
 // daemon) out of the routes, so capture can't cut the tunnel.

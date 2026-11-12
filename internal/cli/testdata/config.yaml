@@ -19,3 +19,13 @@ profiles:
       docker:
         container: app
     socks: 127.0.0.1:1081
+  dns:
+    target:
+      docker:
+        container: app
+    routes:
+      - 198.51.100.0/24
+    dns:
+      domains: [svc.cluster.local]
+      servers: [203.0.113.53]
+      fallback: 203.0.113.54
