@@ -54,7 +54,9 @@ func readMsg(c *net.UnixConn, v any, deadline time.Time) ([]*os.File, error) {
 				return nil, perr
 			}
 		}
-		line = append(line, buf[:n]...)
+		if n > 0 { // on error the OS reports n = -1
+			line = append(line, buf[:n]...)
+		}
 		if i := bytes.IndexByte(line, '\n'); i >= 0 {
 			if i != len(line)-1 {
 				closeAll(files)
