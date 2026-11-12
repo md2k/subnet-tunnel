@@ -38,6 +38,7 @@ type PF struct {
 
 	checked bool
 	token   string
+	adopted bool // token taken over: verify pf is still enabled
 }
 
 var pfToken = regexp.MustCompile(`Token : ([0-9]+)`)
@@ -56,6 +57,14 @@ func (p *PF) Apply(r platform.Rules) error {
 	}
 	if _, err := p.run(text, "-a", Anchor, "-f", "/dev/stdin"); err != nil {
 		return err
+	}
+	if p.adopted {
+		// The reference came from an earlier session; if pf was disabled
+		// since (pfctl -d), it no longer holds pf enabled.
+		p.adopted = false
+		if info, err := p.run("", "-s", "info"); err == nil && !strings.Contains(info, "Status: Enabled") {
+			p.token = ""
+		}
 	}
 	if p.token == "" {
 		out, err := p.run("", "-E")
@@ -92,7 +101,7 @@ func (p *PF) Busy() (bool, error) {
 func (p *PF) Token() string { return p.token }
 
 // Adopt takes over an enable reference left by an earlier session.
-func (p *PF) Adopt(token string) { p.token = token }
+func (p *PF) Adopt(token string) { p.token, p.adopted = token, token != "" }
 
 // Flush empties subtun's anchor and releases the enable token.
 func (p *PF) Flush() error {

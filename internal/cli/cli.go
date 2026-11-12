@@ -572,6 +572,9 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		}
 		c, err := capture.Start(ctx, final, opts, client, log)
 		if err != nil {
+			if opts.Helper == nil {
+				privhelper.ClearLeftovers() // nothing taken over, nothing left
+			}
 			return fmt.Errorf("utun capture: %w", err)
 		}
 		// Stopped before the tunnel (deferred above): firewall rules and

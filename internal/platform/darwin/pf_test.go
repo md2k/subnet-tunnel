@@ -21,6 +21,7 @@ type fakePfctl struct {
 	lo0        string
 	rules      string
 	ours       string // our anchor's current NAT rules ("" = anchor never loaded)
+	disabled   bool   // pf status
 	oursFilter string // and filter rules
 	fail       string // fail calls starting with this
 }
@@ -58,6 +59,11 @@ func (f *fakePfctl) run(stdin string, args ...string) (string, error) {
 		return altq + "  com.apple\n  com.example.vpn\n", nil
 	case "-E":
 		return altq + "pf enabled\nToken : 10168373383532413219\n", nil
+	case "-s info":
+		if f.disabled {
+			return altq + "Status: Disabled for 0 days 00:00:05           Debug: Urgent\n", nil
+		}
+		return altq + "Status: Enabled for 0 days 00:10:00            Debug: Urgent\n", nil
 	}
 	return altq, nil
 }
@@ -175,6 +181,17 @@ func TestPFBusyAndAdopt(t *testing.T) {
 	_ = p.Flush()
 	if f.calls[len(f.calls)-1] != "-X 42" || p.Token() != "" {
 		t.Fatalf("last call %q", f.calls[len(f.calls)-1])
+	}
+
+	// pf was disabled since: the adopted reference is stale, enable again.
+	f = &fakePfctl{disabled: true}
+	p = &PF{Run: f.run}
+	p.Adopt("42")
+	if err := p.Apply(dnsRules()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(f.calls, "-E") || p.Token() != "10168373383532413219" {
+		t.Fatalf("stale reference: calls %q, token %q", f.calls, p.Token())
 	}
 }
 
