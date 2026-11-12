@@ -317,6 +317,13 @@ dns:
   reset to avoid TIME_WAIT). Each forwarded query gets a fresh ID, and answers from other
   addresses are ignored. (The sshuttle pattern patch set `IP_TTL 42` on its forwarder, but its pf
   rules never check the TTL, so on macOS a `--dns-to` that was also a system server looped.)
+- **Answers to queries that went into the utun.** When the DNS server lies inside the routes (a full
+  tunnel with a server beyond the LAN, or a corporate DNS server inside a routed range), the app's
+  query leaves from the utun's address. pf still redirects it to subtun, but macOS sends subtun's
+  answer to that address out of the utun, since the address is also the point-to-point peer. The
+  stack hands packets for the utun's own address straight back to the system, so the answer
+  reaches the app. Fallback queries to such a server still fail: they are UDP into the utun, which
+  carries TCP only so far.
 - **How queries reach it** is a driver choice:
 
 | `capture` | Mechanism | Notes |

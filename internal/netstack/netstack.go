@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
 	"sync"
 	"time"
@@ -59,6 +60,11 @@ type Dialer interface {
 type Options struct {
 	Logger      *slog.Logger  // nil: discard
 	DialTimeout time.Duration // 0: 15s
+	// TunAddr is the device's own address. Packets the system sends to it
+	// (answers from a local listener to an app whose query went into the
+	// device, like a DNS server redirected by the firewall) are handed
+	// back to the system instead of the stack. Unset: no hand-back.
+	TunAddr netip.Addr
 	// MaxPerDestination caps the connections open or opening to one
 	// destination (address and port) at once; more are refused. It cuts
 	// routing loops. 0: DefaultMaxPerDestination.
@@ -82,6 +88,8 @@ type Stack struct {
 	dialer Dialer
 	opts   Options
 	guard  *loopGuard
+	self   tcpip.Address // TunAddr, for the hand-back
+	wmu    sync.Mutex    // Device.Write isn't safe for concurrent use
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	once   sync.Once
@@ -134,6 +142,9 @@ func New(dev Device, dialer Dialer, opts Options) (*Stack, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	st := &Stack{s: s, ep: ep, dev: dev, dialer: dialer, opts: opts, guard: newLoopGuard(opts.MaxPerDestination), cancel: cancel}
+	if opts.TunAddr.Is4() {
+		st.self = tcpip.AddrFrom4(opts.TunAddr.As4())
+	}
 	fwd := tcp.NewForwarder(s, 0, maxInFlight, st.forward)
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, fwd.HandlePacket)
 
@@ -245,6 +256,10 @@ func (st *Stack) inbound(stop context.CancelFunc) {
 		var proto tcpip.NetworkProtocolNumber
 		switch header.IPVersion(pkt) {
 		case header.IPv4Version:
+			if st.forSelf(pkt) {
+				st.write(buf[:head+n])
+				continue
+			}
 			proto = header.IPv4ProtocolNumber
 		case header.IPv6Version:
 			proto = header.IPv6ProtocolNumber
@@ -270,9 +285,24 @@ func (st *Stack) outbound(ctx context.Context) {
 		buf := make([]byte, head+view.Size())
 		copy(buf[head:], view.AsSlice())
 		view.Release()
-		if err := st.dev.Write(buf); err != nil {
-			st.opts.Logger.Debug("device write failed", "err", err)
-		}
+		st.write(buf)
+	}
+}
+
+// forSelf reports whether an IPv4 packet from the system is addressed to
+// the device's own address. The system sends those out of the device
+// because its address is also the point-to-point peer.
+func (st *Stack) forSelf(pkt []byte) bool {
+	return st.self.Len() > 0 && len(pkt) >= header.IPv4MinimumSize && header.IPv4(pkt).DestinationAddress() == st.self
+}
+
+// write sends one packet (after the device's headroom) to the system.
+func (st *Stack) write(buf []byte) {
+	st.wmu.Lock()
+	err := st.dev.Write(buf)
+	st.wmu.Unlock()
+	if err != nil {
+		st.opts.Logger.Debug("device write failed", "err", err)
 	}
 }
 

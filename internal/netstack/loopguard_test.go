@@ -1,17 +1,21 @@
 package netstack
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 
@@ -149,5 +153,82 @@ func TestLoopGuardCutsALoop(t *testing.T) {
 	}
 	if n := levels.Load(); n != 8 {
 		t.Fatalf("loop went %d levels deep, want the cap (8)", n)
+	}
+}
+
+// recDevice hands the stack packets from in and records what it writes.
+type recDevice struct {
+	in     chan []byte
+	out    chan []byte
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (d *recDevice) Headroom() int { return 0 }
+func (d *recDevice) MTU() int      { return testMTU }
+func (d *recDevice) Read(buf []byte) (int, error) {
+	select {
+	case p := <-d.in:
+		return copy(buf, p), nil
+	case <-d.closed:
+		return 0, net.ErrClosed
+	}
+}
+func (d *recDevice) Write(buf []byte) error {
+	d.out <- append([]byte(nil), buf...)
+	return nil
+}
+func (d *recDevice) Close() error {
+	d.once.Do(func() { close(d.closed) })
+	return nil
+}
+
+func udpPacket(src, dst [4]byte) []byte {
+	pkt := make([]byte, header.IPv4MinimumSize+header.UDPMinimumSize)
+	ip := header.IPv4(pkt)
+	ip.Encode(&header.IPv4Fields{TotalLength: uint16(len(pkt)), TTL: 64, Protocol: uint8(header.UDPProtocolNumber),
+		SrcAddr: tcpip.AddrFrom4(src), DstAddr: tcpip.AddrFrom4(dst)})
+	ip.SetChecksum(^ip.CalculateChecksum())
+	u := header.UDP(pkt[header.IPv4MinimumSize:])
+	u.Encode(&header.UDPFields{SrcPort: 53, DstPort: 50000, Length: header.UDPMinimumSize})
+	return pkt
+}
+
+// An answer the system sends to the device's own address (a DNS server
+// redirected to a local listener, answering an app whose query went into
+// the device) goes back to the system unchanged; anything else doesn't.
+func TestPacketsForTunAddrGoBack(t *testing.T) {
+	dev := &recDevice{in: make(chan []byte, 4), out: make(chan []byte, 4), closed: make(chan struct{})}
+	st, err := New(dev, fakeTunnel{}, Options{TunAddr: netip.MustParseAddr("198.18.249.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	other := udpPacket([4]byte{203, 0, 113, 53}, [4]byte{10, 1, 2, 3})
+	self := udpPacket([4]byte{203, 0, 113, 53}, [4]byte{198, 18, 249, 1})
+	dev.in <- other
+	dev.in <- self
+	select {
+	case got := <-dev.out:
+		if !bytes.Equal(got, self) {
+			t.Fatalf("wrote back %x, want the packet for the device's address", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("packet for the device's own address not handed back")
+	}
+	// The other packet goes to the stack, which may answer it (ICMP
+	// protocol unreachable: the stack carries TCP only), but never hands it
+	// back as it is.
+	deadline := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case got := <-dev.out:
+			if bytes.Equal(got, other) {
+				t.Fatal("packet for another address handed back")
+			}
+		case <-deadline:
+			return
+		}
 	}
 }
