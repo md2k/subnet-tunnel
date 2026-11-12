@@ -220,7 +220,7 @@ func (h *helper) handle(req Request) (Response, []int) {
 		if err != nil {
 			return fail(err)
 		}
-		return Response{OK: true, Message: msg}, nil
+		return Response{OK: true, Message: msg, Kept: h.adopted}, nil
 
 	case OpCleanup:
 		if h.owned || h.dev != nil {

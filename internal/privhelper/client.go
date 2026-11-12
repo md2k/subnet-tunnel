@@ -179,11 +179,11 @@ func (c *Client) End(keep bool) error {
 }
 
 // Adopt takes over firewall rules an earlier session left behind, keeping
-// its blocking rules but allowing DNS, so subtun can connect. It must be
-// the first command.
-func (c *Client) Adopt() (string, error) {
+// its blocking rules but allowing DNS, so subtun can connect. kept reports
+// whether such rules are in place. It must be the first command.
+func (c *Client) Adopt() (kept bool, msg string, err error) {
 	resp, _, err := c.call(Request{Op: OpAdopt})
-	return resp.Message, err
+	return resp.Kept, resp.Message, err
 }
 
 // Cleanup removes firewall rules an earlier session left behind and ends
@@ -262,4 +262,42 @@ func runtimeDir() (string, error) {
 		return "", err
 	}
 	return dir, nil
+}
+
+// The leftovers marker tells the next subtun that an earlier session may
+// have left firewall rules behind (kill switch, or a helper that was
+// killed), so it starts the helper before connecting to take them over:
+// they may block DNS, which connecting needs.
+func leftoversMarker() (string, error) {
+	dir, err := runtimeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "firewall-rules-may-be-left"), nil
+}
+
+// MarkLeftovers notes that firewall rules may outlive this process.
+func MarkLeftovers() error {
+	p, err := leftoversMarker()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(p, nil, 0o600)
+}
+
+// ClearLeftovers removes the note.
+func ClearLeftovers() {
+	if p, err := leftoversMarker(); err == nil {
+		_ = os.Remove(p)
+	}
+}
+
+// LeftoversMarked reports whether an earlier session may have left rules.
+func LeftoversMarked() bool {
+	p, err := leftoversMarker()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(p)
+	return err == nil
 }

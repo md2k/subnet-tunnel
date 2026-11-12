@@ -29,3 +29,4 @@ profiles:
       domains: [svc.cluster.local]
       servers: [203.0.113.53]
       fallback: 203.0.113.54
+    killSwitch: {mode: lockdown}

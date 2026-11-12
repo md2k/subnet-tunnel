@@ -34,7 +34,7 @@ func (*Client) ApplyFirewall(platform.Rules, *platform.Rules) error { return err
 func (*Client) End(bool) error { return errUnsupported }
 
 // Adopt is not implemented on this platform yet.
-func (*Client) Adopt() (string, error) { return "", errUnsupported }
+func (*Client) Adopt() (bool, string, error) { return false, "", errUnsupported }
 
 // Cleanup is not implemented on this platform yet.
 func (*Client) Cleanup() (string, error) { return "", errUnsupported }
@@ -50,6 +50,15 @@ func (*Client) Done() error { return errUnsupported }
 
 // Close is not implemented on this platform yet.
 func (*Client) Close() error { return nil }
+
+// MarkLeftovers is not implemented on this platform yet.
+func MarkLeftovers() error { return nil }
+
+// ClearLeftovers is not implemented on this platform yet.
+func ClearLeftovers() {}
+
+// LeftoversMarked is not implemented on this platform yet.
+func LeftoversMarked() bool { return false }
 
 // Serve is not implemented on this platform yet.
 func Serve(context.Context, string, io.Reader, *slog.Logger) error { return errUnsupported }

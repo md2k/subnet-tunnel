@@ -479,7 +479,7 @@ func TestHelperAdopt(t *testing.T) {
 	persist := killSwitchReq("").Persist
 	st := &memState{st: &state{Owner: 99, Token: "old", Persist: persist}}
 	c, done := startHelperOpts(t, context.Background(), d, helperOpts{state: st})
-	if r := call(t, c, Request{Op: OpAdopt}); !r.OK || !strings.Contains(r.Message, "taken over") {
+	if r := call(t, c, Request{Op: OpAdopt}); !r.OK || !r.Kept || !strings.Contains(r.Message, "taken over") {
 		t.Fatalf("adopt: %+v", r)
 	}
 	if r := call(t, c, Request{Op: OpAdopt}); r.OK {
@@ -498,7 +498,7 @@ func TestHelperAdoptRemovesLeftoversThatDontBlock(t *testing.T) {
 	d := &fake.Drivers{Busy: true}
 	st := &memState{st: &state{Owner: 99, Token: "old"}} // e.g. a killed helper's DNS redirect
 	c, done := startHelperOpts(t, context.Background(), d, helperOpts{state: st})
-	if r := call(t, c, Request{Op: OpAdopt}); !r.OK || !strings.Contains(r.Message, "removed") {
+	if r := call(t, c, Request{Op: OpAdopt}); !r.OK || r.Kept || !strings.Contains(r.Message, "removed") {
 		t.Fatalf("adopt: %+v", r)
 	}
 	call(t, c, Request{Op: OpDone})
