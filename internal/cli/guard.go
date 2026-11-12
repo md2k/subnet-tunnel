@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/md2k/subnet-tunnel/internal/netinfo"
 	"github.com/md2k/subnet-tunnel/internal/privhelper"
 	"github.com/md2k/subnet-tunnel/internal/routes"
 	"github.com/md2k/subnet-tunnel/internal/transport"
@@ -88,7 +87,7 @@ func guardPrefixes(final, locals []netip.Prefix) ([]netip.Prefix, error) {
 
 func localPrefixes() []netip.Prefix {
 	var out []netip.Prefix
-	for _, l := range netinfo.LocalNetworks() {
+	for _, l := range localNetworks() {
 		out = append(out, l.Network)
 	}
 	return out

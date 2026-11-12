@@ -22,7 +22,6 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/capture"
 	"github.com/md2k/subnet-tunnel/internal/config"
 	"github.com/md2k/subnet-tunnel/internal/dns"
-	"github.com/md2k/subnet-tunnel/internal/netinfo"
 	"github.com/md2k/subnet-tunnel/internal/privhelper"
 	"github.com/md2k/subnet-tunnel/internal/routes"
 	"github.com/md2k/subnet-tunnel/internal/socks"
@@ -361,6 +360,11 @@ func planRoutes(s settings) (*routePlan, []string, error) {
 	if err := privhelper.ValidateMTU(s.mtu); err != nil {
 		return nil, nil, err
 	}
+	locals := localNetworks()
+	never, notes := autoExcludes(inc, neverRouted)
+	lan, lanNotes := autoExcludes(inc, localExcludes(locals))
+	exc = append(append(exc, never...), lan...)
+	notes = append(notes, lanNotes...)
 	plan, err := routes.Compute(inc, exc)
 	if err != nil {
 		return nil, nil, err
@@ -376,14 +380,15 @@ func planRoutes(s settings) (*routePlan, []string, error) {
 		plan.Redundant = append(plan.Redundant, routes.Note{Prefix: netip.PrefixFrom(tunAddr, 32), Exclude: true,
 			Reason: "subtun's own utun address, excluded automatically"})
 	}
+	plan.Redundant = append(plan.Redundant, notes...)
 	if len(plan.Routes) == 0 {
 		return nil, nil, errors.New("the excludes remove every route")
 	}
 	reserved := []routes.Reserved{{Addr: tunAddr, What: "subtun's utun address"}}
-	if gw, ok := netinfo.DefaultGateway(); ok {
+	if gw, ok := defaultGateway(); ok {
 		reserved = append(reserved, routes.Reserved{Addr: gw, What: "the default gateway", ViaLocal: true})
 	}
-	errs, warns := routes.Check(plan, reserved, netinfo.LocalNetworks())
+	errs, warns := routes.Check(plan, reserved, locals)
 	if len(errs) > 0 {
 		return nil, warns, errors.New(strings.Join(errs, "; "))
 	}

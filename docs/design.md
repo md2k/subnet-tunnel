@@ -116,8 +116,14 @@ app ──► SOCKS5 proxy  ───┘   smux streams    exec stdio   in the t
 - **Routes** (`internal/routes`). Routes and excludes combine like sshuttle's: for any address the
   most specific rule decides. Excludes are carved out of the routes rather than installed via the
   normal gateway, so every route stays on the utun and disappears with it. Redundant rules are
-  dropped and reported, siblings merged. Before connecting, routes covering subtun's utun address
-  or the default gateway are refused and overlaps with local interface networks are reported. At
+  dropped and reported, siblings merged. Ranges that never belong in the tunnel (0/8, loopback,
+  link-local, multicast/reserved/broadcast) and the machine's own networks are excluded
+  automatically where a broader route contains them. So the LAN stays on its interface even when
+  an exclude inside it (the API server) splits the routes into pieces more specific than the LAN's
+  route, and no piece starts at a multicast address, which the helper would refuse. The kill
+  switch guards the final routes, so it never blocks DHCP, Bonjour or link-local either. Before
+  connecting, routes covering subtun's utun address or the default gateway are refused and
+  overlaps with local interface networks are reported. At
   connect time the API server or Docker daemon address is excluded automatically. Details:
   [Configuration](config.md).
 - **Routing loops.** A target on this machine (Docker Desktop, kind, minikube) reaches the internet
@@ -404,9 +410,6 @@ captured. What stays behind has no `pass` rule and blocks DNS with
 
 ## Open questions
 
-- **Kill switch in a full tunnel guards broadcast, multicast and link-local** (255.255.255.255,
-  224.0.0.0/4, 169.254.0.0/16), so DHCP and Bonjour would be blocked; they should always be left out
-  of the guarded prefixes.
 - **Guarded prefixes don't follow network changes:** they are computed at start, minus the local
   networks of that moment. After switching to a network with another subnet, a full-tunnel kill
   switch would block the new LAN (router, DHCP) and with it the tunnel's own path. They need

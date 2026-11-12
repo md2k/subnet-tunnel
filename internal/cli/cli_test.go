@@ -135,15 +135,71 @@ func TestFullTunnelDryRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(out, "  0.0.0.0/0\n") {
-		t.Fatalf("default route in plan:\n%s", out)
+	for _, want := range []string{
+		"198.18.249.1/32: subtun's own utun address, excluded automatically",
+		"224.0.0.0/3: multicast, reserved and broadcast, stays out of the tunnel (excluded automatically)",
+		"127.0.0.0/8: loopback, stays out",
+		"192.168.77.0/24: local network on en0, stays out",
+		"  1.0.0.0/8\n", "  126.0.0.0/8\n", "  128.0.0.0/3\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in\n%s", want, out)
+		}
 	}
-	if !strings.Contains(out, "198.18.249.1/32: subtun's own utun address, excluded automatically") {
-		t.Fatalf("own address not auto-excluded:\n%s", out)
+	// Every route must be one the root helper accepts, and none may reach
+	// into the LAN.
+	lan := netip.MustParsePrefix("192.168.77.0/24")
+	for _, r := range routeLines(out) {
+		if _, err := privhelper.ParseCIDR(r.String()); err != nil {
+			t.Errorf("route the helper refuses: %v", err)
+		}
+		if r.Overlaps(lan) {
+			t.Errorf("route %s reaches into the LAN", r)
+		}
 	}
-	if !strings.Contains(out, "  0.0.0.0/1\n") {
-		t.Fatalf("lower half missing:\n%s", out)
+}
+
+// Excluding an address inside the LAN (the API server, say) used to split
+// the routes into pieces more specific than the LAN's own route.
+func TestLANStaysLocal(t *testing.T) {
+	out, err := runCLI(t, "k8s", "debug", "0.0.0.0/1", "128.0.0.0/1", "-x", "192.168.77.50", "--dry-run")
+	if err != nil {
+		t.Fatal(err)
 	}
+	lan := netip.MustParsePrefix("192.168.77.0/24")
+	for _, r := range routeLines(out) {
+		if r.Overlaps(lan) {
+			t.Errorf("route %s reaches into the LAN:\n%s", r, out)
+		}
+	}
+	// A route more specific than the LAN is an explicit choice: it stays,
+	// with the warning.
+	out, err = runCLI(t, "k8s", "debug", "192.168.77.128/25", "--dry-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "  192.168.77.128/25\n") || !strings.Contains(out, "takes over part of 192.168.77.0/24") {
+		t.Fatalf("explicit LAN route:\n%s", out)
+	}
+}
+
+// routeLines parses the routes a dry run lists.
+func routeLines(out string) []netip.Prefix {
+	var ps []netip.Prefix
+	in := false
+	for _, l := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(l, "routes on the utun"):
+			in = true
+		case in && strings.HasPrefix(l, "  "):
+			if p, err := netip.ParsePrefix(strings.TrimSpace(l)); err == nil {
+				ps = append(ps, p)
+			}
+		default:
+			in = false
+		}
+	}
+	return ps
 }
 
 // fakeSystemDNS stands in for /etc/resolv.conf.

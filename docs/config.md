@@ -98,8 +98,12 @@ the result.
 
 Route `0.0.0.0/1` and `128.0.0.0/1` to send everything through the tunnel. The two halves are more
 specific than the real default route, which stays untouched, so when subtun exits or crashes the
-machine is back to normal. Your LAN stays local (its own route is more specific), and subtun's own
-connection to the API server or Docker daemon is excluded automatically. Add `--dns-domain .` (or
+machine is back to normal. Your LAN, multicast and link-local stay local (see the automatic excludes
+under [Safety checks](#safety-checks)), and subtun's own connection to the API server or Docker
+daemon is excluded automatically. The target must run outside this machine: a pod in Docker Desktop,
+kind or minikube reaches the internet through this machine, so its traffic would loop back into the
+tunnel (subtun warns, and cuts such loops). UDP and ICMP don't go through the tunnel yet, so DNS needs
+`--dns-domain .`, unless your DNS server is on the LAN. Add `--dns-domain .` (or
 `dns.domains: ["."]`) to resolve every name through the tunnel as well. subtun doesn't carry IPv6
 yet, so in a full tunnel it blocks outgoing IPv6 (see [IPv6](#ipv6)); apps fall back to IPv4.
 
@@ -113,8 +117,17 @@ is more specific and keeps the gateway reachable.
 It warns when a route overlaps a network of one of this machine's interfaces (your LAN, a VPN
 client's interface). The more specific route wins, and the warning says which side that is.
 
-Excluded automatically, and listed by `--dry-run`: subtun's own utun address, and, when the tunnel
-is up, the address subtun itself connects to (the Kubernetes API server, a remote Docker daemon).
+Excluded automatically, and listed by `--dry-run`:
+- subtun's own utun address;
+- ranges that never belong in the tunnel, where a broader route contains them: `0.0.0.0/8`,
+  loopback `127.0.0.0/8`, link-local `169.254.0.0/16`, multicast, reserved and broadcast
+  `224.0.0.0/3`;
+- this machine's own networks (your LAN, a VPN client's network), where a broader route contains them,
+  so they stay on their interface even when other excludes split the routes around them. A route at
+  least as specific as such a network (`192.168.1.128/25` on a `192.168.1.0/24` LAN) is your explicit
+  choice: it stays, with the overlap warning;
+- when the tunnel is up, the address subtun itself connects to (the Kubernetes API server, a remote
+  Docker daemon).
 
 ## subtun's own addresses
 
