@@ -185,16 +185,18 @@ subtun goes away before `done`, the helper removes the routes it added and close
 How to use: one-shot is what happens when you pass CIDRs only. DNS capture and the kill switch will
 switch the helper to session mode, since their firewall rules live for the whole session.
 
-## Platform drivers (planned)
+## Platform drivers
 
 Everything that differs per operating system goes behind small interfaces, implemented once per OS
-and chosen by configuration (with a default per OS). The app describes **intent**; each driver
+and chosen by configuration (with a default per OS). `Tun` and `Routes` exist (`internal/platform`,
+macOS drivers in `internal/platform/darwin`); `Firewall` and `Resolver` are planned and arrive with
+DNS capture and the kill switch. The app describes **intent**; each driver
 translates it into its OS's mechanism, so app code never contains pf, nftables or route syntax.
 
 ```go
 // internal/platform: what subtun needs from the OS.
 type Tun interface {      // capture interface: macOS utun, Linux TUN, Windows wintun
-    Create(mtu int, addr netip.Addr) (Device, error)
+    Create(mtu int, addr netip.Addr) (TunDevice, error) // TunDevice: Name, File, Release, Close
 }
 type Routes interface {   // routes on the tunnel interface
     Add(p netip.Prefix, iface string) error
@@ -228,10 +230,9 @@ type Rules struct {       // intent, not syntax
 - Drivers run inside the root helper, because they all need root. The helper protocol carries the
   same intents (`apply_firewall` with `Rules`, `set_resolver`, ...) and validates them; subtun never
   sends raw firewall text, so the helper still accepts only fixed, validated commands.
-- Unsupported combinations fail with a clear message. Tests use fake drivers, so the logic is tested
-  without root on any OS.
-- First step: move the existing macOS utun and route code (today inline in the helper) behind `Tun`
-  and `Routes`, with no change in behaviour.
+- Unsupported combinations fail with a clear message. Tests use fake drivers
+  (`internal/platform/fake`), so the logic is tested without root on any OS: the helper's command
+  loop (setup, undo on disconnect or interrupt, refused commands, driver failures) runs against them.
 
 ## DNS (planned)
 
