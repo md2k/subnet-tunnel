@@ -166,30 +166,55 @@ that subtun starts through `sudo` (sudo asks for the password on the terminal).
 - The helper refuses to run unless it is root and started through sudo (`SUDO_UID`). It only
   connects to a socket whose directory and file belong to that user and aren't accessible to
   anyone else, then proves itself with the token.
-- It accepts four commands, in lock-step: `create_tun` (MTU and address validated), `add_route`
-  (IPv4, host bits zero, never the default route, loopback or multicast), `apply_firewall` (rules
-  as intent, not pf text: DNS servers must be unicast IPv4, ports at least 1024) and `done`. The
-  platform drivers run `/sbin/ifconfig`, `/sbin/route` and `/sbin/pfctl` with fixed argument
-  lists, never a shell; the pf rules are rendered by the helper from the validated intent. The
-  utun's file descriptor goes back over the socket (SCM_RIGHTS).
+- It accepts a fixed set of commands, in lock-step: `create_tun` (MTU and address validated),
+  `add_route` (IPv4, host bits zero, never the default route, loopback or multicast),
+  `apply_firewall` (rules as intent, not pf text: DNS servers unicast IPv4, ports at least 1024,
+  kill switch prefixes IPv4 and not the default route; plus the rules that stay when the tunnel
+  goes away, which may only block), `done`, `end` (session: keep the blocking rules or not), and as
+  a first command only `adopt` or `cleanup` (rules an earlier session left, below). The platform
+  drivers run `/sbin/ifconfig`, `/sbin/route` and `/sbin/pfctl` with fixed argument lists, never a
+  shell; the pf rules are rendered by the helper from the validated intent. The utun's file
+  descriptor goes back over the socket (SCM_RIGHTS).
 
 ### Modes
 
-| | One-shot (routes only) | Session (DNS capture) |
+| | One-shot (routes only) | Session (DNS capture, kill switch, IPv6 block) |
 |---|---|---|
 | sudo prompts | one, at start | one, at start |
 | Root process after setup | none: the helper exits | the helper stays up for the session |
-| Accepts after setup | nothing | firewall updates only (DNS servers changed with the network) |
+| Accepts after setup | nothing | firewall updates only (DNS servers changed with the network) and `end` |
 | Changing CIDRs | restart subtun | restart subtun (runtime changes through a local control API are planned) |
-| Cleanup | automatic: routes live on the utun, and macOS removes the utun and its routes when subtun exits, crashes or is killed | the same for routes; the helper removes the firewall rules when subtun disconnects, crashes or is killed, and when it is interrupted itself (Ctrl-C, terminal closed) |
+| Cleanup | automatic: routes live on the utun, and macOS removes the utun and its routes when subtun exits, crashes or is killed | the same for routes; firewall rules as below |
 | Risk | smallest: root exists only for the seconds of setup | a root process stays reachable (only by subtun, over the private socket) for the whole session |
 
 Both modes use the same helper and command loop; session mode just doesn't end it after setup. If
 subtun goes away before `done`, the helper removes its firewall rules, the routes it added and the
 utun. A one-shot `done` is refused once firewall rules are applied, since nobody would be left to
-remove them. If the helper itself is killed with SIGKILL, its rules stay; subtun notices, exits and
-prints the commands that remove them. The kill switch (planned) will keep its block rules after a
-crash on purpose.
+remove them.
+
+How a session ends:
+- **subtun stops deliberately** (Ctrl-C, SIGTERM, terminal closed): it sends `end`. The helper
+  removes all firewall rules, except in kill switch `lockdown`, where the blocking rules stay.
+- **subtun disappears** (crash, `kill -9`) **or gives up** (tunnel lost, errors) without `end`: the
+  helper removes everything without a kill switch; with one (`on` or `lockdown`), the blocking
+  rules replace the session's and stay, and pf stays enabled for them.
+- **The helper gets a signal itself**: Ctrl-C reaches it as well as subtun, so a signal decides
+  nothing by itself: the helper waits a few seconds for subtun's `end` or disconnect, then applies
+  the rule above.
+
+**Rules an earlier session left.** The helper records in a root-only file
+(`/var/run/subtun/state.json`) which helper holds subtun's rules, pf's enable reference and the
+blocking rules meant to stay. When a session finds subtun's anchor in use:
+- the recorded helper is still running: refused (another subtun session);
+- it is gone: the rules and pf's reference are taken over and replaced by the new session's;
+- nothing was recorded: refused, with a pointer to `subtun cleanup`.
+
+Leftovers may block DNS, which subtun needs to resolve its API server. So subtun keeps a marker in
+its private run directory while rules may outlive it; when it finds one at the next start, it starts
+the helper before connecting and sends `adopt`: blocking rules stay, a DNS block is lifted while
+connecting, leftovers that don't block anything are removed. If the start then fails, the
+blocking rules are put back. `subtun cleanup` removes leftovers and releases pf without starting a
+session, and refuses while a session is running.
 
 ## Platform drivers
 
@@ -219,9 +244,10 @@ type Resolver interface { // system DNS configuration: scutil, systemd-resolved,
 }
 
 type Rules struct {       // intent, not syntax; fields are added as features need them
-    DNS *DNSRedirect      // implemented: capture DNS sent to these servers
-    // planned: KillSwitch []netip.Prefix (allow only via the tunnel, blocked even if subtun dies),
-    //          BlockIPv6 bool (full tunnel, until IPv6 is supported)
+    DNS        *DNSRedirect // capture DNS sent to these servers
+    DNSBlock   []netip.Addr // block DNS to these servers (kill switch holding)
+    KillSwitch *KillSwitch  // block Prefixes unless they leave through TunIface ("" = block all)
+    BlockIPv6  bool         // all outgoing IPv6 except link-local, multicast, loopback
 }
 type DNSRedirect struct {
     Servers    []netip.Addr // queries to these servers (UDP and TCP 53) ...
@@ -304,17 +330,42 @@ dns:
   the rules.
 - One entry covers any number of domains; no file per domain.
 
-## Kill switch and full tunnel (planned)
+## Kill switch and full tunnel
 
-- **Full tunnel** works today through route planning: route `0.0.0.0/1` and `128.0.0.0/1`. The real
+Configuration: [Kill switch](config.md#kill-switch), [IPv6](config.md#ipv6).
+
+- **Full tunnel** works through route planning: route `0.0.0.0/1` and `128.0.0.0/1`. The real
   default route stays untouched, the LAN stays local and subtun's own connection is excluded. DNS
-  follows with `dns.domains: ["."]`; until IPv6 handling exists, IPv6 still leaves directly.
-- **Kill switch** (`killSwitch: true`): firewall rules allow the routed CIDRs (and captured DNS) only
-  through subtun's utun. If subtun dies, its routes vanish with the utun, and without these rules that
-  traffic would fall back to the normal default route, which would leak it. With the kill switch, the
-  block rules deliberately stay in place until `subtun up` replaces them or a cleanup command removes
-  them (fail-closed). Without it, the helper removes all firewall rules on exit (fail-open).
-- **IPv6** is blocked by the firewall driver in full-tunnel mode until subtun carries IPv6.
+  follows with `dns.domains: ["."]`.
+- **Kill switch** (`killSwitch.mode: on | lockdown`): if subtun dies, its routes vanish with the
+  utun, and that traffic would fall back to the normal default route: a leak. pf rules allow traffic
+  to the guarded prefixes only through subtun's utun, and when the tunnel goes away, block rules
+  stay (fail-closed) until the next session takes them over or `subtun cleanup` removes them. `on`
+  releases them when you stop subtun; `lockdown` keeps them then too. Both are configurable
+  globally (`defaults`) and per profile, since which one is right depends on the use case.
+- **Guarded prefixes** are computed with the route planner: the routes minus local interface
+  networks that are more specific (most specific wins, as in the routing table). The LAN in a full
+  tunnel stays reachable; a route more specific than a VPN client's network stays guarded.
+- **DNS while blocked** (`killSwitch.dns`): pf can't block by name, so the choice is all DNS to the
+  captured servers (`block`, default: no name leaks, and no private-link name resolving to a public
+  endpoint) or none (`allow`). The blocking rule replaces the redirect, rather than leaving a
+  redirect to a port nobody listens on, which any local process could then bind.
+- **IPv6** (`blockIPv6: auto | true | false`): all outgoing IPv6 except link-local, multicast and
+  loopback, `block return` so apps fall back to IPv4 at once. `auto` blocks it in a full tunnel only.
+  Skipped, with a warning, when subtun's own connection may use IPv6.
+
+```
+table <subtun_guard> const { 0.0.0.0/1 128.0.0.0/2 ... }
+pass out quick on utun10 inet from any to <subtun_guard>        # while running
+block return out quick inet from any to <subtun_guard>
+pass out quick on lo0 inet6 all                                  # IPv6 block
+pass out quick inet6 from any to { fe80::/10, ff00::/8 }
+block return out quick inet6 all
+```
+
+DNS rules come before the kill switch, so a captured DNS server inside the guarded prefixes is still
+captured. What stays behind has no `pass` rule and blocks DNS with
+`block return out quick inet proto { udp tcp } from any to <subtun_dns> port 53`.
 
 ## Decisions
 
@@ -331,7 +382,10 @@ dns:
   modes as resolver drivers. Not one file per domain.
 - **Every setting works from the command line** and from the YAML config.
 - **Privileges:** the tool runs as the user; root only in the helper, one-shot by default, session
-  mode opt-in (see Privileges).
+  mode when firewall rules are needed (see Privileges).
+- **Fail-open by default, fail-closed on request:** without a kill switch every firewall rule goes
+  when subtun goes; with one, blocking rules stay until taken over or cleaned up.
+- **Global defaults** in the config file for every setting; a profile's own value wins.
 - **Pure Go:** `CGO_ENABLED=0`, a single static binary per OS and architecture.
 
 ## Open questions
@@ -345,6 +399,9 @@ dns:
   blocking, once measured against a real remote cluster.
 - **Coexistence** with other VPN or security software that owns its own utun interface or pf anchor
   (pf driver: own anchor, `quick` rules, warn on other anchors; to be tested next to Zscaler).
+- **A helper killed with SIGKILL** leaves its running rules, including the DNS redirect to subtun's
+  listener port. Until the next session takes them over or `subtun cleanup` runs, a local process
+  could bind that port and answer the Mac's DNS queries.
 - **IPv6 DNS servers** are not captured yet (IPv4 only, like sshuttle with `--disable-ipv6`).
 - **UDP through the tunnel:** a fallback resolver inside a routed CIDR fails, because the utun
   carries TCP only so far.

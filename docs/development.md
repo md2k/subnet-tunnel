@@ -163,3 +163,18 @@ don't show the table; before the first run the anchor doesn't exist yet and pfct
 After Ctrl-C, `kill -9` of subtun, or closing the terminal, both `pfctl` commands must print
 nothing, and names outside your domains must resolve as before throughout.
 
+### Kill switch (needs sudo, run by hand)
+
+```sh
+build/subtun -v k8s -n subtun-dev target $WEB_SVC --kill-switch on
+sudo pfctl -a com.apple/subtun -s rules; sudo pfctl -a com.apple/subtun -t subtun_guard -T show
+pkill -9 -x subtun                                   # as the user: only subtun, not the root helper
+curl -m 5 http://$WEB_SVC:8080/                      # refused at once: the block stayed
+build/subtun -v k8s -n subtun-dev target $WEB_SVC --kill-switch on   # takes the blocks over (sudo first)
+subtun cleanup                                       # or remove them without a session
+```
+
+`--kill-switch lockdown` keeps the blocks after Ctrl-C too; with DNS capture, `--kill-switch-dns`
+decides whether DNS stays blocked meanwhile. `cat /var/run/subtun/state.json` (as root) shows which
+helper holds the rules.
+
