@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -22,8 +23,9 @@ const Anchor = "com.apple/subtun"
 
 // PF is the macOS firewall driver.
 //
-// Rules live only in subtun's anchor and are all "quick", so a VPN client's
-// anchor evaluated later can't override them (the sshuttle 2.0 lesson).
+// Rules live only in subtun's anchor and filter rules are all "quick", so a
+// VPN client's anchor evaluated later can't override them (the sshuttle 2.0
+// lesson).
 // pf is enabled with a reference token (pfctl -E) and the token released on
 // Flush, so pf ends up exactly as enabled or disabled as it was. Flushing
 // clears only the anchor's rules and tables: "pfctl -a ... -F all" would also
@@ -69,6 +71,29 @@ func (p *PF) Apply(r platform.Rules) error {
 	return nil
 }
 
+// Busy reports whether subtun's anchor holds rules. pfctl fails for an
+// anchor that was never loaded, which counts as empty.
+func (p *PF) Busy() (bool, error) {
+	for _, what := range []string{"nat", "rules"} {
+		out, err := p.run("", "-a", Anchor, "-s", what)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if f := strings.Fields(line); len(f) > 0 && (f[0] == "rdr" || f[0] == "pass" || f[0] == "block") {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// Token is the pf enable reference held for subtun.
+func (p *PF) Token() string { return p.token }
+
+// Adopt takes over an enable reference left by an earlier session.
+func (p *PF) Adopt(token string) { p.token = token }
+
 // Flush empties subtun's anchor and releases the enable token.
 func (p *PF) Flush() error {
 	var errs []error
@@ -86,9 +111,9 @@ func (p *PF) Flush() error {
 	return errors.Join(errs...)
 }
 
-// check makes sure the main ruleset evaluates com.apple/* anchors, that our
-// anchor is free and that pf doesn't skip lo0, where the redirect happens.
-// It reports other software's anchors, whose rules could interfere.
+// check makes sure the main ruleset evaluates com.apple/* anchors and that
+// pf doesn't skip lo0, where the DNS redirect happens. It reports other
+// software's anchors, whose rules could interfere.
 func (p *PF) check() error {
 	rules, err := p.run("", "-s", "rules")
 	if err != nil {
@@ -99,13 +124,7 @@ func (p *PF) check() error {
 		return err
 	}
 	if !strings.Contains(rules, `anchor "com.apple/*"`) || !strings.Contains(nat, `rdr-anchor "com.apple/*"`) {
-		return errors.New(`pf's main ruleset doesn't evaluate the com.apple/* anchors (see /etc/pf.conf); DNS capture can't add its rules`)
-	}
-	// Someone else's rules in our anchor: another subtun with DNS capture,
-	// or leftovers from a helper that was killed. Replacing them would
-	// silently break the other one.
-	if mine, err := p.run("", "-a", Anchor, "-s", "nat"); err == nil && strings.Contains(mine, "rdr ") {
-		return fmt.Errorf("pf anchor %s already has rules: another subtun with DNS capture is running, or one was killed without cleaning up; if none is running, remove them with: sudo pfctl -a %s -F nat && sudo pfctl -a %s -F rules", Anchor, Anchor, Anchor)
+		return errors.New(`pf's main ruleset doesn't evaluate the com.apple/* anchors (see /etc/pf.conf); subtun can't add its rules`)
 	}
 	lo, err := p.run("", "-s", "Interfaces", "-i", "lo0", "-v")
 	if err != nil {
@@ -130,29 +149,79 @@ func (p *PF) check() error {
 	return nil
 }
 
-// pfRules renders the intent as pf rules for subtun's anchor.
+// pfRules renders the intent as pf rules for subtun's anchor: tables
+// first, then the redirect, then filter rules (pf requires that order).
+// DNS rules come before the kill switch, so a captured DNS server inside
+// the routed CIDRs is still captured.
 func pfRules(r platform.Rules) (string, error) {
-	var b strings.Builder
+	var tables, rdr, filter strings.Builder
+	if r.DNS != nil && len(r.DNSBlock) > 0 {
+		return "", errors.New("DNS redirect and DNS block are exclusive")
+	}
 	if d := r.DNS; d != nil {
-		if len(d.Servers) == 0 || d.ListenPort == 0 || d.BypassPort == 0 || d.ListenPort == d.BypassPort {
-			return "", errors.New("DNS redirect needs servers and two different ports")
+		if d.ListenPort == 0 || d.BypassPort == 0 || d.ListenPort == d.BypassPort {
+			return "", errors.New("DNS redirect needs two different ports")
 		}
-		servers := make([]string, len(d.Servers))
-		for i, a := range d.Servers {
-			if !a.Is4() || a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() {
-				return "", fmt.Errorf("DNS server %s: need a unicast IPv4 address", a)
-			}
-			servers[i] = a.String()
+		list, err := dnsServers(d.Servers)
+		if err != nil {
+			return "", err
 		}
 		// A query to a DNS server leaves via lo0 (route-to), where rdr hands
 		// it to subtun's listener. subtun's own fallback queries come from
 		// the bypass port and pass first.
-		fmt.Fprintf(&b, "table <subtun_dns> const { %s }\n", strings.Join(servers, " "))
-		fmt.Fprintf(&b, "rdr pass on lo0 inet proto { udp tcp } from any to <subtun_dns> port 53 -> 127.0.0.1 port %d\n", d.ListenPort)
-		fmt.Fprintf(&b, "pass out quick inet proto { udp tcp } from any port %d to <subtun_dns> port 53 keep state\n", d.BypassPort)
-		b.WriteString("pass out quick route-to lo0 inet proto { udp tcp } from any to <subtun_dns> port 53 keep state\n")
+		fmt.Fprintf(&tables, "table <subtun_dns> const { %s }\n", list)
+		fmt.Fprintf(&rdr, "rdr pass on lo0 inet proto { udp tcp } from any to <subtun_dns> port 53 -> 127.0.0.1 port %d\n", d.ListenPort)
+		fmt.Fprintf(&filter, "pass out quick inet proto { udp tcp } from any port %d to <subtun_dns> port 53 keep state\n", d.BypassPort)
+		filter.WriteString("pass out quick route-to lo0 inet proto { udp tcp } from any to <subtun_dns> port 53 keep state\n")
 	}
-	return b.String(), nil
+	if len(r.DNSBlock) > 0 {
+		list, err := dnsServers(r.DNSBlock)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&tables, "table <subtun_dns> const { %s }\n", list)
+		filter.WriteString("block return out quick inet proto { udp tcp } from any to <subtun_dns> port 53\n")
+	}
+	if k := r.KillSwitch; k != nil {
+		if len(k.Prefixes) == 0 {
+			return "", errors.New("kill switch without prefixes")
+		}
+		list := make([]string, len(k.Prefixes))
+		for i, p := range k.Prefixes {
+			if !p.IsValid() || !p.Addr().Is4() || p.Masked() != p || p.Bits() == 0 {
+				return "", fmt.Errorf("kill switch prefix %s: need IPv4 with host bits zero, not the default route", p)
+			}
+			list[i] = p.String()
+		}
+		if k.TunIface != "" && !utunName.MatchString(k.TunIface) {
+			return "", fmt.Errorf("kill switch interface %q is not a utun", k.TunIface)
+		}
+		fmt.Fprintf(&tables, "table <subtun_guard> const { %s }\n", strings.Join(list, " "))
+		if k.TunIface != "" {
+			fmt.Fprintf(&filter, "pass out quick on %s inet from any to <subtun_guard>\n", k.TunIface)
+		}
+		filter.WriteString("block return out quick inet from any to <subtun_guard>\n")
+	}
+	if r.BlockIPv6 {
+		filter.WriteString("pass out quick on lo0 inet6 all\n")
+		filter.WriteString("pass out quick inet6 from any to { fe80::/10, ff00::/8 }\n")
+		filter.WriteString("block return out quick inet6 all\n")
+	}
+	return tables.String() + rdr.String() + filter.String(), nil
+}
+
+func dnsServers(servers []netip.Addr) (string, error) {
+	if len(servers) == 0 {
+		return "", errors.New("DNS rules need servers")
+	}
+	list := make([]string, len(servers))
+	for i, a := range servers {
+		if !a.Is4() || a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() {
+			return "", fmt.Errorf("DNS server %s: need a unicast IPv4 address", a)
+		}
+		list[i] = a.String()
+	}
+	return strings.Join(list, " "), nil
 }
 
 func (p *PF) run(stdin string, args ...string) (string, error) {
