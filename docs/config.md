@@ -496,8 +496,9 @@ through SOCKS), bytes each way with the rate of the last second, the names it an
 connections the loop guard refused. Then the shared DNS capture (the servers captured now, the
 fallback, the names that stay local) and the kill switch (guarded prefixes).
 
-The log lines are the ones subtun prints, kept in memory only (at most 5000 lines or 4 MB), never
-written to disk.
+The log lines are the ones subtun prints, kept in memory only (at most 5000 lines or 4 MB, so a
+long run keeps its latest lines), never written to disk. With `-v` they include every name resolved
+and every connection captured; `subtun logs` shows them only to your user, like the terminal does.
 
 | Setting | Flag | Values |
 |---|---|---|
