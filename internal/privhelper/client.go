@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/md2k/subnet-tunnel/internal/platform"
+	"github.com/md2k/subnet-tunnel/internal/xdg"
 )
 
 const sudoPrompt = "[subtun] root is needed to create the utun interface and routes (and firewall rules for DNS capture). Password for %u: "
@@ -278,11 +279,10 @@ func (c *Client) kill() {
 
 // runtimeDir is a directory only this user can enter, for the helper socket.
 func runtimeDir() (string, error) {
-	base, err := os.UserCacheDir()
+	dir, err := xdg.RunDir()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(base, "subtun", "run")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}

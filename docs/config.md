@@ -481,7 +481,8 @@ with them).
 ## Status and logs
 
 Every running subtun answers `subtun status` and `subtun logs` through a control socket that only
-your user can use (in `~/Library/Caches/subtun/run`; no root, no network port).
+your user can use (in `~/.local/state/subtun/run`, or `$XDG_RUNTIME_DIR/subtun` when set; no root, no
+network port).
 
 ```sh
 subtun status                    # every running subtun

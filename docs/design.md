@@ -187,7 +187,7 @@ password on the terminal).
 
 ### How the helper is trusted
 
-- subtun creates a unix socket in a private directory (`~/Library/Caches/subtun/run`, mode 0700,
+- subtun creates a unix socket in a private directory (`~/.local/state/subtun/run`, or `$XDG_RUNTIME_DIR/subtun` when set; mode 0700,
   socket 0600) and starts `/usr/bin/sudo -- <subtun> helper --socket <path>`, passing a random
   token on the helper's stdin.
 - The helper refuses to run unless it is root and started through sudo (`SUDO_UID`). It only
@@ -572,7 +572,7 @@ shaped as a list of tunnels: one in a single-profile run, several with `--profil
 **Where it lives.** In the subtun process, which runs as the user; never in the root helper.
 
 - One Unix socket per running subtun, `control-<pid>.sock` in the private run directory
-  (`~/Library/Caches/subtun/run`, 0700; socket 0600). The peer's uid is checked as well (macOS
+  (`~/.local/state/subtun/run`, or `$XDG_RUNTIME_DIR/subtun`; 0700; socket 0600). The peer's uid is checked as well (macOS
   `LOCAL_PEERCRED`). `subtun status` finds every running subtun by its socket and removes sockets
   whose process is gone.
 - JSON over HTTP on that socket, under `/v1/`, so `curl --unix-socket` works too: `/v1/status`,
