@@ -210,8 +210,8 @@ password on the terminal).
 |---|---|---|
 | sudo prompts | one, at start | one, at start |
 | Root process after setup | none: the helper exits | the helper stays up for the session |
-| Accepts after setup | nothing | firewall updates (the DNS servers or the local networks changed), route changes (several profiles), DNS cache flushes and `end` |
-| Changing CIDRs | restart subtun | restart subtun (runtime changes with `control: full` are planned) |
+| Accepts after setup | nothing | firewall updates (the DNS servers or the local networks changed), route changes (several profiles, `control: full`), DNS cache flushes and `end` |
+| Changing CIDRs | restart subtun (`control: full` keeps the helper up: a session) | `subtun route add\|del` with `control: full` |
 | Cleanup | automatic: routes live on the utun, and macOS removes the utun and its routes when subtun exits, crashes or is killed | the same for routes; firewall rules as below |
 | Risk | smallest: root exists only for the seconds of setup | a root process stays reachable (only by subtun, over the private socket) for the whole session |
 
@@ -549,7 +549,7 @@ be routed: the same CIDR twice is an error. Their SOCKS proxies still work, each
 tunnel. Possible later: DNS answers from one tunnel get addresses from a private pool, which
 subtun maps back to the real ones (fake-IP style).
 
-**Status and control:** see [Status and control](#status-and-control-planned). Runtime changes
+**Status and control:** see [Status and control](#status-and-control). Changes while running
 build on the route changes above.
 
 **Rejected:**
@@ -562,7 +562,7 @@ build on the route changes above.
 
 ## Status and control
 
-Status is built; control (`control: full` and the changes) is planned. A running subtun answers
+Both are built (starting a profile that isn't part of the run is next). A running subtun answers
 questions about itself (`subtun status`, `subtun logs`), and on request accepts changes (routes, DNS
 names, profiles) without a restart. Everything is
 shaped as a list of tunnels: one in a single-profile run, several with `--profile a,b`.
@@ -575,7 +575,9 @@ shaped as a list of tunnels: one in a single-profile run, several with `--profil
   whose process is gone.
 - JSON over HTTP on that socket, under `/v1/`, so `curl --unix-socket` works too: `/v1/status`,
   `/v1/connections`, and `/v1/logs` (newline-delimited JSON; with `?follow=1` new lines keep
-  coming). A general event stream (state changes and counters as they happen) and a WebSocket
+  coming); with `control: full` also `POST /v1/routes`, `/v1/dns` and `/v1/profiles` (a JSON change:
+  `op`, `profile`, `cidrs` and `exclude`, `domains` and `patterns`, `reload`, `dryRun`), answered
+  with what changed, or refused with the reason (403 when read only). A general event stream (state changes and counters as they happen) and a WebSocket
   come with the terminal and web UIs; `subtun status --watch` polls once a second meanwhile.
 - Later, for a browser UI: an optional localhost TCP listener with a random token (Jupyter style).
 
@@ -612,13 +614,40 @@ With `control: full` also (each change planned and checked as at start: conflict
 the endpoints; `--dry-run` shows the effect):
 
 ```
-subtun route add|del [--profile P] CIDR...     # a profile's routes
-subtun dns add|del [--profile P] DOMAIN...     # a profile's DNS domains
-subtun profile reconnect|stop|start NAME       # start: from the config file, next to the others
+subtun route add|del [--profile P] [-x] CIDR...                # a profile's routes (-x: excludes)
+subtun dns add|del [--profile P] [DOMAIN...] [--pattern RE]... # a profile's DNS names
+subtun profile stop|start|reconnect [NAME] [--reload]          # one profile; the others go on
 ```
 
 Changes are temporary: they last until subtun stops, and nothing is written back to the config
-file (saving them is a possible later feature).
+file (saving them is a possible later feature). `--profile` (and `NAME`) can be left out when the
+run has one profile.
+
+**How the engine makes them.** The engine's loop owns the plan; changes reach it from the control
+socket and are made one at a time, between tunnel events. Each is planned with the functions used at
+start (`planRoutes`, the endpoint carve, the overlap check, the DNS matcher's rules) and only then
+applied; the loop then brings the router, the DNS matcher and the capture (`Capture.Update`) in line,
+as when a tunnel comes or goes. Each profile's tunnel runs in its own goroutine (a runner); stop,
+start and reconnect replace it, the new one waiting for the old one to finish, and events from a
+replaced runner are ignored. Changes to the plan are refused while the capture is starting (sudo may
+be asking).
+
+**Decisions** (with the user, 2026-11-13):
+- `profile stop` is Ctrl-C for that profile: `killSwitch.mode: on` lifts its blocks, `lockdown`
+  keeps its share blocked until it starts again (or subtun ends: then as lockdown always does). A
+  stopped profile is not a given-up one: subtun goes on while profiles are stopped.
+- `profile start` brings a profile back as it was when stopped (its start-up settings plus the
+  changes since); `--reload` reads it from the config file the run started with instead, and drops
+  the changes. The settings the run shares or set up at start can't change by a reload (refused,
+  restart instead): `tun.*`, `dns.capture`, `dns.servers`, `dns.fallback`, `dns.unrouted`,
+  `killSwitch.*`, `blockIPv6`.
+- `dns add` takes domains and, with `--pattern`, regular expressions, as `dns.domains` and
+  `dns.patterns`.
+- Limits for now: routes only for a profile that started with routes, at least one left; DNS names
+  only when the run captures DNS already, and only for a profile whose DNS servers it captures
+  (starting DNS capture, the firewall, or capturing other servers later in a run isn't done).
+- Exit as before: subtun ends when every profile has given up (one profile: when it gives up), also
+  right after a start or reconnect that failed; stopped profiles keep it running.
 
 **Setting:** global for the run, never per profile: `--control`, or a top-level `control:` key in
 the config file (next to `defaults:` and `profiles:`).
@@ -649,9 +678,12 @@ built once. They keep their behaviour:
 - saving runtime changes back to the config file.
 
 **Order:**
-1. One engine (refactor) and its root test.
-2. Status: the socket, counters, connections, logs, `subtun status` and `subtun logs`.
-3. Control: `control: full` and the changes.
+1. One engine (refactor) and its root test. Done.
+2. Status: the socket, counters, connections, logs, `subtun status` and `subtun logs`. Done.
+3. Control: `control: full` and the changes to the run's profiles. Done.
+4. Starting a profile that isn't part of the run (`profile start NAME` from the config file, next to
+   the others): every per-profile table of the engine (DNS engine, matcher, counters, status) grows
+   while running.
 
 ## Decisions
 
@@ -679,12 +711,14 @@ built once. They keep their behaviour:
 - **Routes don't follow network changes** (the kill switch's guard does: it's recomputed when the
   local networks change, every 5 s). The automatic excludes for local networks are computed at
   start: after joining another network, the old LAN's range stays outside the tunnel, and an
-  exclude that splits the routes inside the new LAN would put parts of it into the tunnel. Needs
-  runtime route changes in the session helper.
+  exclude that splits the routes inside the new LAN would put parts of it into the tunnel. The
+  session helper can change routes while running (several profiles, `control: full`); what's
+  missing is recomputing the automatic excludes when the networks change.
 - **Reconnecting to a recreated pod:** subtun reconnects to the same pod name. A Deployment's new pod
-  has another name; selecting the target by label or by its owner would find it. Also, routes
-  don't change while running, so if the API server's address moves inside the routes after a
-  reconnect, subtun only warns (restart to exclude it).
+  has another name; selecting the target by label or by its owner would find it. Also, if the API
+  server's address moves inside the routes after a reconnect, a one-shot helper (one profile,
+  routes only, without `control: full`) can't change the routes: subtun only warns (restart to
+  exclude it). With a session it is carved out.
 - **Targets with neither a shell nor Python** (distroless static, scratch): an ephemeral debug
   container (Kubernetes) or a helper container in the target's network namespace (Docker).
 - **Aborted streams:** smux has no reset. When the laptop side closes a stream abruptly, an agent

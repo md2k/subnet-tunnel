@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -167,5 +168,46 @@ func TestOwnedByMe(t *testing.T) {
 	}
 	if err := ownedByMe(dir); err == nil {
 		t.Fatal("a directory others can read was accepted")
+	}
+}
+
+// Changes go to the Change function with their kind; a read-only run and
+// a refused change answer with the reason.
+func TestChange(t *testing.T) {
+	srv := testServer()
+	c := &Client{hc: &http.Client{Transport: handlerTransport{srv.Handler()}}}
+	var res Result
+	err := c.Post(context.Background(), "/v1/routes", Change{Op: "add", CIDRs: []string{"10.9.0.0/16"}}, &res)
+	if err == nil || !strings.Contains(err.Error(), "read only (control: status)") {
+		t.Fatalf("read only: %v", err)
+	}
+	var got []Change
+	srv.Change = func(_ context.Context, ch Change) (Result, error) {
+		got = append(got, ch)
+		if ch.Profile == "nope" {
+			return Result{}, errors.New(`no profile "nope" in this run`)
+		}
+		return Result{Profile: ch.Profile, Changed: true, Message: "done"}, nil
+	}
+	c = &Client{hc: &http.Client{Transport: handlerTransport{srv.Handler()}}}
+	for endpoint, kind := range map[string]string{"/v1/routes": KindRoute, "/v1/dns": KindDNS, "/v1/profiles": KindProfile} {
+		got = nil
+		// The kind comes from the endpoint, whatever the body says.
+		if err := c.Post(context.Background(), endpoint, Change{Kind: "other", Op: "x", Profile: "work"}, &res); err != nil {
+			t.Fatalf("%s: %v", endpoint, err)
+		}
+		if len(got) != 1 || got[0].Kind != kind || got[0].Profile != "work" || !res.Changed || res.Message != "done" {
+			t.Errorf("%s: %+v %+v", endpoint, got, res)
+		}
+	}
+	if err := c.Post(context.Background(), "/v1/dns", Change{Op: "add", Profile: "nope"}, &res); err == nil || err.Error() != `no profile "nope" in this run` {
+		t.Errorf("refused: %v", err)
+	}
+	// Unknown fields and other methods are refused.
+	if err := c.Post(context.Background(), "/v1/routes", map[string]any{"op": "add", "cidr": "10.0.0.0/8"}, &res); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Errorf("unknown field: %v", err)
+	}
+	if err := c.Get(context.Background(), "/v1/routes", &res); err == nil {
+		t.Error("GET on a change endpoint worked")
 	}
 }

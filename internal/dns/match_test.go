@@ -277,3 +277,42 @@ func TestSetOwn(t *testing.T) {
 		}
 	}
 }
+
+// Names change while running: the new set replaces the old one whole, a
+// conflict changes nothing, and a target switched off stays off.
+func TestSetNames(t *testing.T) {
+	m, err := NewMultiMatcher([]Names{{Domains: []string{"a.example"}}, {Domains: []string{"b.example"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pick := func(name string) int {
+		if tg, ok := m.Pick(name); ok {
+			return tg
+		}
+		return -1
+	}
+	m.SetOn(1, false)
+	if err := m.SetNames([]Names{{Domains: []string{"a.example", "c.example"}}, {Domains: []string{"."}, Patterns: []string{`^db\.`}}}); err != nil {
+		t.Fatal(err)
+	}
+	if pick("x.c.example") != 0 || pick("db.z.example") != -1 || !m.CatchAll() {
+		t.Errorf("after SetNames: c=%d db=%d all=%v", pick("x.c.example"), pick("db.z.example"), m.CatchAll())
+	}
+	m.SetOn(1, true)
+	if pick("db.z.example") != 1 || pick("github.com") != 1 || pick("b.example") != 1 {
+		t.Errorf("target 1 back on: db=%d github=%d b=%d", pick("db.z.example"), pick("github.com"), pick("b.example"))
+	}
+	for _, bad := range [][]Names{
+		{{Domains: []string{"a.example"}}, {Domains: []string{"a.example"}}}, // the same domain twice
+		{{Domains: []string{"."}}, {Domains: []string{"."}}},                 // "." twice
+		{{Patterns: []string{"("}}, {}},                                      // not an expression
+		{{Domains: []string{"a.example"}}},                                   // a tunnel missing
+	} {
+		if err := m.SetNames(bad); err == nil {
+			t.Errorf("%v accepted", bad)
+		}
+	}
+	if pick("x.c.example") != 0 || !m.CatchAll() {
+		t.Error("a refused change changed the names")
+	}
+}

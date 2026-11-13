@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -138,20 +137,9 @@ func newLogsCmd() *cobra.Command {
 then, with -f, follow new ones until Ctrl-C.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ins, err := instances(pid)
+			in, err := oneInstance(pid)
 			if err != nil {
 				return err
-			}
-			switch len(ins) {
-			case 0:
-				return errors.New("no subtun running")
-			case 1:
-			default:
-				pids := make([]string, len(ins))
-				for i, in := range ins {
-					pids[i] = fmt.Sprint(in.PID)
-				}
-				return fmt.Errorf("%d subtuns are running (pids %s): choose one with --pid", len(ins), strings.Join(pids, ", "))
 			}
 			endpoint := "/v1/logs"
 			if follow {
@@ -164,7 +152,7 @@ then, with -f, follow new ones until Ctrl-C.`,
 				ctx, cancel = context.WithTimeout(ctx, queryTimeout)
 				defer cancel()
 			}
-			return control.NewClient(ins[0].Path).Stream(ctx, endpoint, func(b []byte) error {
+			return control.NewClient(in.Path).Stream(ctx, endpoint, func(b []byte) error {
 				var l logring.Line
 				if err := json.Unmarshal(b, &l); err != nil {
 					return err
@@ -183,6 +171,9 @@ then, with -f, follow new ones until Ctrl-C.`,
 func writeStatus(w io.Writer, is instanceStatus, now time.Time) {
 	st := is.Status
 	fmt.Fprintf(w, "subtun pid %d, %s, up %s", st.PID, st.Version, ago(now, st.Started))
+	if st.Control == controlFull {
+		fmt.Fprint(w, ", control full")
+	}
 	capturing := st.Utun != ""
 	if capturing {
 		fmt.Fprintf(w, "; %s (%s), %s root helper", st.Utun, st.TunAddr, st.Helper)
@@ -222,6 +213,9 @@ func writeStatus(w io.Writer, is instanceStatus, now time.Time) {
 		}
 		if len(what) > 0 {
 			fmt.Fprintf(w, "%s%s\n", pad, strings.Join(what, "; "))
+		}
+		if len(t.Changes) > 0 {
+			fmt.Fprintf(w, "%schanged while running: %s\n", pad, summary(t.Changes, 6))
 		}
 		c := t.Counts
 		fmt.Fprintf(w, "%sconnections %d open, %d total, %d failed", pad, c.Open, c.Total, c.Failed)

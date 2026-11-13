@@ -1,12 +1,14 @@
 // Package control is a running subtun's local API: one Unix socket per
 // process in the private run directory, user-only (the peer's uid is
 // checked too), JSON over HTTP under /v1/. `subtun status` and `subtun
-// logs` use it, and later a terminal or web UI. It lives in the user
-// process, never in the root helper.
+// logs` read it; with control: full, `subtun route`, `subtun dns` and
+// `subtun profile` change the run through it; later a terminal or web UI
+// too. It lives in the user process, never in the root helper.
 package control
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,7 +34,7 @@ type Status struct {
 	PID        int         `json:"pid"`
 	Version    string      `json:"version"`
 	Started    time.Time   `json:"started"`
-	Control    string      `json:"control"`        // status (full: later)
+	Control    string      `json:"control"`        // status, full
 	Utun       string      `json:"utun,omitempty"` // empty: no capture (yet)
 	TunAddr    string      `json:"tunAddr,omitempty"`
 	Helper     string      `json:"helper,omitempty"` // one-shot, session
@@ -47,7 +49,7 @@ type Tunnel struct {
 	Name       string       `json:"name"` // empty: one profile from the command line
 	Target     string       `json:"target,omitempty"`
 	Agent      string       `json:"agent,omitempty"`
-	State      string       `json:"state"` // connecting, up, reconnecting, gave up
+	State      string       `json:"state"` // connecting, up, reconnecting, gave up, stopped
 	Since      time.Time    `json:"since"`
 	Attempt    int          `json:"attempt,omitempty"` // while reconnecting
 	Attempts   int          `json:"attempts,omitempty"`
@@ -59,6 +61,7 @@ type Tunnel struct {
 	Patterns   int          `json:"patterns,omitempty"`
 	SOCKS      string       `json:"socks,omitempty"`
 	KillSwitch string       `json:"killSwitch,omitempty"`
+	Changes    []string     `json:"runtimeChanges,omitempty"` // made through the control socket, until the run ends
 	Counts     meter.Counts `json:"counts"`
 	DNSCounts  DNSCounts    `json:"dnsCounts"`
 }
@@ -85,8 +88,16 @@ type KillSwitch struct {
 	Mode     string `json:"mode"`
 	Guarded  int    `json:"guardedPrefixes"`
 	Lockdown int    `json:"lockdownPrefixes"`
-	DNS      string `json:"dnsWhileHolding"` // blocked, allowed
+	DNS      string `json:"dnsWhileHolding"` // HoldBlocked, HoldAllowed or HoldNoCapture
 }
+
+// What happens to DNS (to the captured servers) while the kill switch
+// holds.
+const (
+	HoldBlocked   = "blocked"
+	HoldAllowed   = "allowed"
+	HoldNoCapture = "no DNS capture" // nothing to hold
+)
 
 // TunnelConns are one tunnel's open connections.
 type TunnelConns struct {
@@ -94,28 +105,96 @@ type TunnelConns struct {
 	Conns []meter.ConnInfo `json:"conns"`
 }
 
+// Change kinds: what the change is to (one endpoint each).
+const (
+	KindRoute   = "route"   // POST /v1/routes: Op add or del, CIDRs, Exclude
+	KindDNS     = "dns"     // POST /v1/dns: Op add or del, Domains, Patterns
+	KindProfile = "profile" // POST /v1/profiles: Op stop, start (Reload) or reconnect
+)
+
+// Change is a change to a running subtun (control: full). It lasts until
+// the run ends.
+type Change struct {
+	Kind     string   `json:"kind,omitempty"` // set by the endpoint
+	Op       string   `json:"op"`
+	Profile  string   `json:"profile,omitempty"` // "": the only one
+	CIDRs    []string `json:"cidrs,omitempty"`
+	Exclude  bool     `json:"exclude,omitempty"` // the CIDRs are excludes
+	Domains  []string `json:"domains,omitempty"`
+	Patterns []string `json:"patterns,omitempty"`
+	Reload   bool     `json:"reload,omitempty"` // start: re-read the profile from the config file
+	DryRun   bool     `json:"dryRun,omitempty"` // only say what would change
+}
+
+// Result is what a change did, or with DryRun would do.
+type Result struct {
+	Profile  string   `json:"profile"`
+	Changed  bool     `json:"changed"`
+	DryRun   bool     `json:"dryRun,omitempty"`
+	Message  string   `json:"message"`
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// apiError is the body of a refused request.
+type apiError struct {
+	Error string `json:"error"`
+}
+
+// maxBody bounds a change request.
+const maxBody = 1 << 20
+
 // Server answers the API.
 type Server struct {
 	Status func() Status
 	Conns  func() []TunnelConns
 	Logs   *logring.Ring
+	// Change applies a change; nil: the run is read only (control: status).
+	Change func(context.Context, Change) (Result, error)
 	Log    *slog.Logger
 }
 
 // Handler returns the API's routes.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, s.Status()) })
-	mux.HandleFunc("GET /v1/connections", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, s.Conns()) })
+	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.Status()) })
+	mux.HandleFunc("GET /v1/connections", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.Conns()) })
 	mux.HandleFunc("GET /v1/logs", s.logs)
+	mux.HandleFunc("POST /v1/routes", s.change(KindRoute))
+	mux.HandleFunc("POST /v1/dns", s.change(KindDNS))
+	mux.HandleFunc("POST /v1/profiles", s.change(KindProfile))
 	return mux
 }
 
-func writeJSON(w http.ResponseWriter, v any) {
+func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(v)
+}
+
+// change answers a change request of one kind.
+func (s *Server) change(kind string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.Change == nil {
+			writeJSON(w, http.StatusForbidden, apiError{"this subtun is read only (control: status); start it with --control full (or control: full in the config file) to change it while it runs"})
+			return
+		}
+		var c Change
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&c); err != nil {
+			writeJSON(w, http.StatusBadRequest, apiError{"reading the request: " + err.Error()})
+			return
+		}
+		c.Kind = kind
+		res, err := s.Change(r.Context(), c)
+		if err != nil {
+			writeJSON(w, http.StatusConflict, apiError{err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	}
 }
 
 // logs returns the ring buffer as newline-delimited JSON; with ?follow=1
@@ -320,16 +399,42 @@ func (c *Client) Stream(ctx context.Context, endpoint string, fn func([]byte) er
 }
 
 func (c *Client) get(ctx context.Context, endpoint string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://subtun"+endpoint, nil)
+	return c.do(ctx, http.MethodGet, endpoint, nil)
+}
+
+// Post sends body as JSON to endpoint and decodes the answer into out. A
+// refused request returns the server's reason.
+func (c *Client) Post(ctx context.Context, endpoint string, body, out any) error {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(ctx, http.MethodPost, endpoint, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c *Client) do(ctx context.Context, method, endpoint string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, "http://subtun"+endpoint, body)
 	if err != nil {
 		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		defer resp.Body.Close()
+		var e apiError
+		if json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(&e) == nil && e.Error != "" {
+			return nil, errors.New(e.Error)
+		}
 		return nil, fmt.Errorf("%s: %s", endpoint, resp.Status)
 	}
 	return resp, nil

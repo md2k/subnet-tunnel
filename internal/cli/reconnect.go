@@ -26,6 +26,7 @@ const (
 var (
 	errReconnecting = fmt.Errorf("the tunnel is down, reconnecting (%w)", netstack.ErrNoTunnel)
 	errGaveUp       = fmt.Errorf("the tunnel gave up reconnecting (%w)", netstack.ErrNoTunnel)
+	errStopped      = fmt.Errorf("the profile was stopped; subtun profile start brings it back (%w)", netstack.ErrNoTunnel)
 )
 
 // liveTunnel is the tunnel client in use, swapped when subtun reconnects.
@@ -33,13 +34,17 @@ var (
 // reconnecting it has none, so new connections and DNS fail at once
 // instead of hanging.
 type liveTunnel struct {
-	cur  atomic.Pointer[tunnel.Client]
-	gone atomic.Bool // gave up (several profiles: the others go on)
+	cur     atomic.Pointer[tunnel.Client]
+	gone    atomic.Bool // gave up (several profiles: the others go on)
+	stopped atomic.Bool // stopped through the control socket
 }
 
 func (l *liveTunnel) set(c *tunnel.Client) { l.cur.Store(c) }
 
 func (l *liveTunnel) down() error {
+	if l.stopped.Load() {
+		return errStopped
+	}
 	if l.gone.Load() {
 		return errGaveUp
 	}
