@@ -700,4 +700,77 @@ func TestEngineAddProfile(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Errorf("runEngine: %v", err)
 	}
+
+	// A run of one profile becomes a run of several: the original profile,
+	// still on its first try, is retried as with several (a new runner).
+	mp = multiPlanFor(t, "dev")
+	mp.specs[0].s.socks = ""
+	mp.specs[0].connect = block("dev")
+	ctx, cancel = context.WithCancel(context.Background())
+	go func() {
+		done <- runEngine(ctx, &globalOpts{config: "testdata/multi.yaml"}, mp, engineOpts{single: true, control: controlFull})
+	}()
+	es = <-ready
+	if name := <-connects; name != "dev" {
+		t.Fatalf("connecting %s", name)
+	}
+	if _, err := start("vault", false); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for range 2 {
+		select {
+		case name := <-connects:
+			got[name]++
+		case <-time.After(3 * time.Second):
+			t.Fatalf("connects after the add: %v", got)
+		}
+	}
+	if got["dev"] != 1 || got["vault"] != 1 {
+		t.Errorf("connects after the add: %v (dev's first try retried by a new runner, vault started)", got)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("runEngine, one profile and an added one: %v", err)
+	}
+}
+
+// A profile takes the run's shared settings, whether they came from the
+// run's flags or another profile; only one its config sets otherwise is
+// a clash.
+func TestInheritShared(t *testing.T) {
+	run := settings{tunAddr: "198.18.249.1", mtu: 9000, dnsFallback: "192.0.2.9"}
+	ns := &tunnelSpec{s: settings{tunAddr: "198.18.249.1", mtu: 9000}}
+	if d := inheritShared(ns, run); len(d) != 0 || ns.s.dnsFallback != "192.0.2.9" {
+		t.Errorf("unset in its config: %v %+v", d, ns.s)
+	}
+	ns = &tunnelSpec{s: settings{tunAddr: "198.18.250.1", mtu: 9000, dnsFallback: "system"}}
+	ns.cfg.Tun.Address, ns.cfg.DNS.Fallback = "198.18.250.1", "system"
+	d := inheritShared(ns, run)
+	if len(d) != 2 || d[0].key != "tun.address" || d[1].key != "dns.fallback" || ns.s.tunAddr != run.tunAddr {
+		t.Errorf("set otherwise: %+v %+v", d, ns.s)
+	}
+}
+
+// Commands without a profile name pick the only profile, never an unnamed
+// one among several; adds need a named run.
+func TestUnnamedTunnel(t *testing.T) {
+	mp := &multiPlan{specs: []*tunnelSpec{{}, {name: "dev"}}}
+	if _, err := mp.profileIndex(""); err == nil || !strings.Contains(err.Error(), "(the tunnel, dev): say which one") {
+		t.Errorf("unnamed among several: %v", err)
+	}
+	one := multiPlanFor(t, "dev")
+	one.specs[0].name = ""
+	ns, err := configSpecs("testdata/multi.yaml", &globalOpts{})("vault")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := one.planAdd(ns, "", nil, one.dns.Match, captureState{}); err == nil || !strings.Contains(err.Error(), "has no profile name") {
+		t.Errorf("add to an unnamed run: %v", err)
+	}
+	m := one.dns.Match
+	m.SetOn(7, true) // a target it doesn't have: ignored, no panic
+	if tg, ok := m.Pick("x.cluster.local"); !ok || tg != 0 {
+		t.Errorf("pick: %d %v", tg, ok)
+	}
 }

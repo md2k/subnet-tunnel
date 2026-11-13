@@ -1321,7 +1321,16 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		if c == nil { // the capture starts with them
 			mp.allowDNS, mp.blockIPv6, mp.ipv6Why = ac.allowDNS, ac.blockIPv6, ac.ipv6Why
 		}
-		single = false
+		if single { // a run of several from now on
+			logs[0] = log.With("tunnel", mp.specs[0].name) // its next runner names it
+			if c == nil && starting == nil && !roundOver && firstRound == nil {
+				firstRound = time.After(firstRoundWait)
+			}
+			if states[0] == stateConnecting && !tried[0] {
+				startRunner(0, startRetry) // its first try is retried, as with several
+			}
+			single = false
+		}
 		if _, err := mp.addEndpoints(ac.addrs); err != nil {
 			tl.Warn("excluding its endpoint from the routes failed", "err", err)
 		}

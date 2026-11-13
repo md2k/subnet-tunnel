@@ -687,7 +687,9 @@ built once. They keep their behaviour:
    under `mp.smu`, runners, SOCKS listeners, the DNS engine's tunnels via `Engine.AddTunnel`, the
    matcher's targets, which start switched off); the profile is planned with the config's settings
    only, against the run (`planAdd`). A profile with routes needs a run with a capture, one with a
-   kill switch a capture with a guard; DNS names need the run's DNS capture and its servers.
+   kill switch a capture with a guard; DNS names are ignored without the run's DNS capture and
+   refused for servers it doesn't capture; `killSwitch.dns` and a full tunnel's IPv6 block only warn
+   once the capture runs. Not for runs whose tunnel has no profile name (`subtun k8s`, `docker`).
 
 ## Decisions
 

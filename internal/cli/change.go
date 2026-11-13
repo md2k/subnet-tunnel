@@ -65,10 +65,10 @@ func (mp *multiPlan) profileIndex(name string) (int, error) {
 	}
 	var names []string
 	for i, sp := range mp.specs {
-		if sp.name == name {
+		if name != "" && sp.name == name {
 			return i, nil
 		}
-		names = append(names, sp.name)
+		names = append(names, profileName(sp.name))
 	}
 	switch {
 	case name == "":
@@ -452,6 +452,29 @@ func fixedChanges(was, now settings) []string {
 	return out
 }
 
+// sharedDiff is a shared setting a profile's config sets otherwise than
+// the run.
+type sharedDiff struct{ key, got, run string }
+
+// inheritShared gives a profile the run's values of the settings every
+// profile shares (tun.address, tun.mtu, dns.fallback: they may come from
+// the run's flags or another profile), and lists those its config sets
+// otherwise.
+func inheritShared(ns *tunnelSpec, run settings) []sharedDiff {
+	var out []sharedDiff
+	if ns.cfg.Tun.Address != "" && ns.s.tunAddr != run.tunAddr {
+		out = append(out, sharedDiff{"tun.address", ns.s.tunAddr, run.tunAddr})
+	}
+	if ns.cfg.Tun.MTU != 0 && ns.s.mtu != run.mtu {
+		out = append(out, sharedDiff{"tun.mtu", strconv.Itoa(ns.s.mtu), strconv.Itoa(run.mtu)})
+	}
+	if f, rf := fixedDefaults(ns.s).dnsFallback, fixedDefaults(run).dnsFallback; ns.cfg.DNS.Fallback != "" && f != rf {
+		out = append(out, sharedDiff{"dns.fallback", f, rf})
+	}
+	ns.s.tunAddr, ns.s.mtu, ns.s.dnsFallback = run.tunAddr, run.mtu, run.dnsFallback
+	return out
+}
+
 // fixedDefaults spells out the defaults of the settings fixedChanges
 // compares, so leaving one out and writing its default are the same.
 func fixedDefaults(s settings) settings {
@@ -482,12 +505,8 @@ func (mp *multiPlan) planReload(i int, ns *tunnelSpec, host string, addrs []neti
 	ns.name = old.name
 	specs := slices.Clone(mp.specs)
 	specs[i] = ns
-	if len(specs) > 1 {
-		tunAddr, mtu, fallback, err := agreeShared(specs)
-		if err != nil {
-			return nil, err
-		}
-		applyShared(ns, tunAddr, mtu, fallback)
+	for _, d := range inheritShared(ns, old.s) {
+		return nil, fmt.Errorf("%s: %s changed in the config file (%s; the run uses %s), which needs a subtun restart", label, d.key, d.got, d.run)
 	}
 	if fixed := fixedChanges(old.s, ns.s); len(fixed) > 0 {
 		return nil, fmt.Errorf("%s: %s changed in the config file, which needs a subtun restart (a reload takes the target, agent, routes, excludes, DNS domains and patterns, SOCKS address and reconnect settings)",
@@ -759,17 +778,12 @@ type addChange struct {
 // host and addrs are its target's endpoint.
 func (mp *multiPlan) planAdd(ns *tunnelSpec, host string, addrs []netip.Addr, m *dns.Matcher, cs captureState) (*addChange, error) {
 	label := "profile " + ns.name
-	run := mp.specs[0].s
-	if a := ns.cfg.Tun.Address; a != "" && a != run.tunAddr {
-		return nil, fmt.Errorf("%s: tun.address %s differs from the run's (%s): it is shared by every profile of a run", label, a, run.tunAddr)
+	if mp.specs[0].name == "" {
+		return nil, errors.New("this run's tunnel has no profile name (subtun k8s, subtun docker), so it couldn't be told apart from added ones: add profiles to a run started with subtun up")
 	}
-	if v := ns.cfg.Tun.MTU; v != 0 && v != run.mtu {
-		return nil, fmt.Errorf("%s: tun.mtu %d differs from the run's (%d): it is shared by every profile of a run", label, v, run.mtu)
+	for _, d := range inheritShared(ns, mp.specs[0].s) {
+		return nil, fmt.Errorf("%s: %s %s differs from the run's (%s): it is shared by every profile of a run", label, d.key, d.got, d.run)
 	}
-	if f, rf := fixedDefaults(ns.s).dnsFallback, fixedDefaults(run).dnsFallback; ns.cfg.DNS.Fallback != "" && f != rf {
-		return nil, fmt.Errorf("%s: dns.fallback %s differs from the run's (%s): it is shared by every profile of a run", label, f, rf)
-	}
-	ns.s.tunAddr, ns.s.mtu, ns.s.dnsFallback = run.tunAddr, run.mtu, run.dnsFallback
 	ns.base = ns.s
 	ac := &addChange{spec: ns, host: host, addrs: addrs, allowDNS: mp.allowDNS, blockIPv6: mp.blockIPv6, ipv6Why: mp.ipv6Why}
 	ac.policy = reconnectPolicy{attempts: ns.s.reconnectAttempts, delay: ns.s.reconnectDelay, maxDelay: ns.s.reconnectMaxDelay}

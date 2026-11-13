@@ -165,9 +165,17 @@ func (m *Matcher) CatchAll() bool { return m.names.Load().all >= 0 }
 
 // SetOn switches a target on or off. A target that is off matches nothing:
 // its names go to the next match, or the fallback.
-func (m *Matcher) SetOn(target int, on bool) { (*m.off.Load())[target].Store(!on) }
+// A target the matcher doesn't have (yet) is off.
+func (m *Matcher) SetOn(target int, on bool) {
+	if off := *m.off.Load(); target < len(off) {
+		off[target].Store(!on)
+	}
+}
 
-func (m *Matcher) on(target int) bool { return !(*m.off.Load())[target].Load() }
+func (m *Matcher) on(target int) bool {
+	off := *m.off.Load()
+	return target < len(off) && !off[target].Load()
+}
 
 // SetLocal sets the system's search domains and the machine's networks.
 // With ".", names under "local" (multicast DNS), under the search domains
