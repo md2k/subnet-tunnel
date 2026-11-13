@@ -46,13 +46,17 @@ type DNSTunnel struct {
 func (o *DNSOptions) Engine(fallback dns.TCPUpstream, log *slog.Logger) *dns.Engine {
 	e := &dns.Engine{Match: o.Match, Fallback: fallback, FallbackCounts: o.FallbackCounts, Log: log}
 	for _, t := range o.Tunnels {
-		dt := dns.Tunnel{Name: t.Name, Upstream: t.Upstream, Counts: t.Counts}
-		if t.Unreachable != nil {
-			dt.Unrouted = &dns.Unrouted{Mode: t.Unrouted, Unreachable: t.Unreachable, Log: log}
-		}
-		e.Tunnels = append(e.Tunnels, dt)
+		e.Tunnels = append(e.Tunnels, t.engineTunnel(log))
 	}
 	return e
+}
+
+func (t DNSTunnel) engineTunnel(log *slog.Logger) dns.Tunnel {
+	dt := dns.Tunnel{Name: t.Name, Upstream: t.Upstream, Counts: t.Counts}
+	if t.Unreachable != nil {
+		dt.Unrouted = &dns.Unrouted{Mode: t.Unrouted, Unreachable: t.Unreachable, Log: log}
+	}
+	return dt
 }
 
 // dnsRuntime is the running DNS engine: listener, fallback forwarder and the
@@ -64,6 +68,8 @@ type dnsRuntime struct {
 	ln         net.Listener
 	listenPort uint16
 	fwd        *dns.Forwarder
+	eng        *dns.Engine
+	log        *slog.Logger
 	bypassPort uint16
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
@@ -89,6 +95,7 @@ func startDNS(ctx context.Context, opts *DNSOptions, log *slog.Logger) (*dnsRunt
 	r.servers.Store(&servers)
 	r.fwd = dns.NewForwarder(bpc, dial, r.fallback)
 	eng := opts.Engine(r.fwd, log)
+	r.eng, r.log = eng, log
 	r.wg.Add(2)
 	go func() {
 		defer r.wg.Done()

@@ -49,6 +49,7 @@ func (f *fakeHelper) ApplyFirewall(r platform.Rules, persist *platform.Rules) er
 	}
 	return f.rec("firewall guard=%v kept=%s", r.KillSwitch.Prefixes, kept)
 }
+func (f *fakeHelper) ClearFirewall() error { return f.rec("clear firewall") }
 func (f *fakeHelper) rec(format string, args ...any) error {
 	f.calls = append(f.calls, fmt.Sprintf(format, args...))
 	return nil
@@ -99,6 +100,25 @@ func TestUpdateOrder(t *testing.T) {
 	if !slices.Equal(c.Routes(), work) {
 		t.Fatalf("routes: %v", c.Routes())
 	}
+}
+
+// Every profile with a kill switch stopped, and nothing else needs rules
+// (no DNS capture, no IPv6 block): the rules go, the stopped profile's
+// route too; they come back with the profile.
+func TestUpdateClearsFirewall(t *testing.T) {
+	work := mps("10.0.0.0/8")
+	c, h := testCapture(t, work, Guard{Base: work})
+	if err := c.Update(nil, Guard{}); err != nil {
+		t.Fatal(err)
+	}
+	checkHelperCalls(t, h, "clear firewall", "delete 10.0.0.0/8")
+	if n, _ := c.GuardCounts(); n != 0 {
+		t.Errorf("guarded: %d", n)
+	}
+	if err := c.Update(work, Guard{Base: work}); err != nil {
+		t.Fatal(err)
+	}
+	checkHelperCalls(t, h, "add 10.0.0.0/8", "firewall guard=[10.0.0.0/8] kept=[10.0.0.0/8]")
 }
 
 func TestUpdateNeedsSession(t *testing.T) {

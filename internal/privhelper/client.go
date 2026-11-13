@@ -179,6 +179,13 @@ func (c *Client) FlushDNSCache() error {
 	return err
 }
 
+// ClearFirewall removes subtun's firewall rules during a session, when none
+// is needed any more; a later ApplyFirewall puts rules in place again.
+func (c *Client) ClearFirewall() error {
+	_, _, err := c.call(Request{Op: OpClearFirewall})
+	return err
+}
+
 // ApplyFirewall replaces subtun's firewall rules. persist, if not nil, is
 // what stays in place when the tunnel goes away (kill switch): after a
 // crash, a lost tunnel, or End(true). Rules applied during setup need

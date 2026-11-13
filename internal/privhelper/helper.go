@@ -157,7 +157,7 @@ func (h *helper) handle(req Request) (Response, []int) {
 		return Response{Error: err.Error()}, nil
 	}
 	switch req.Op {
-	case OpApplyFirewall, OpAddRoute, OpDeleteRoute, OpFlushDNS:
+	case OpApplyFirewall, OpClearFirewall, OpAddRoute, OpDeleteRoute, OpFlushDNS:
 	default:
 		if h.session.Load() {
 			return fail(fmt.Errorf("%s: setup is finished; only firewall, route and DNS cache updates are accepted", req.Op))
@@ -251,6 +251,16 @@ func (h *helper) handle(req Request) (Response, []int) {
 		h.log.Info("firewall rules applied", "dns", req.Rules.DNS != nil, "kill_switch", req.Rules.KillSwitch != nil,
 			"block_ipv6", req.Rules.BlockIPv6, "kept_if_tunnel_lost", req.Persist != nil)
 		h.dnsRedirect(req.Rules.DNS != nil)
+		return Response{OK: true}, nil
+
+	case OpClearFirewall:
+		if h.drivers.Firewall == nil {
+			return fail(errors.New("no firewall driver on this system"))
+		}
+		// Only subtun's own rules go: what it applied (the same as the end
+		// of the session does). Nothing stays if the tunnel goes away.
+		h.flushFirewall()
+		h.persist = nil
 		return Response{OK: true}, nil
 
 	case OpFlushDNS:

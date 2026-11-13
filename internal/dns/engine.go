@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,10 +41,32 @@ type TCPUpstream interface {
 // Engine answers queries.
 type Engine struct {
 	Match          *Matcher
-	Tunnels        []Tunnel    // by the matcher's targets
+	Tunnels        []Tunnel    // by the matcher's targets; more come with AddTunnel
 	Fallback       TCPUpstream // everything else
 	FallbackCounts *Counts     // names the fallback answered; nil: not counted
 	Log            *slog.Logger
+
+	added atomic.Pointer[[]Tunnel] // Tunnels plus those added while running
+}
+
+// AddTunnel adds a tunnel while the engine runs (a profile added to a
+// running subtun): the next target. Add it before the matcher's names point
+// at it. One caller at a time.
+func (e *Engine) AddTunnel(t Tunnel) {
+	cur := e.Tunnels
+	if p := e.added.Load(); p != nil {
+		cur = *p
+	}
+	next := append(slices.Clone(cur), t)
+	e.added.Store(&next)
+}
+
+// tunnel returns target t's tunnel.
+func (e *Engine) tunnel(t int) *Tunnel {
+	if p := e.added.Load(); p != nil {
+		return &(*p)[t]
+	}
+	return &e.Tunnels[t]
 }
 
 // Counts are the queries an upstream answered or failed (for status).
@@ -93,7 +116,7 @@ func (e *Engine) Answer(ctx context.Context, msg []byte, udp bool) []byte {
 	var answer []byte
 	var tun *Tunnel
 	if t, ok := e.Match.Pick(q.name); ok {
-		route, tun = "tunnel", &e.Tunnels[t]
+		route, tun = "tunnel", e.tunnel(t)
 		if tun.Name != "" {
 			route = "tunnel:" + tun.Name
 		}

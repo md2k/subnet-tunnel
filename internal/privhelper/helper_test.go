@@ -313,6 +313,33 @@ func TestHelperSessionRouteChanges(t *testing.T) {
 		"add 10.50.0.0/16 utun0", "add 172.20.0.0/16 utun0", "delete 10.50.0.0/16 utun0")
 }
 
+// A session clears its rules when none is needed any more, and can apply
+// them again; nothing stays if subtun then goes away.
+func TestHelperSessionClearsFirewall(t *testing.T) {
+	d := &fake.Drivers{}
+	c, done := startHelper(t, context.Background(), d)
+	call(t, c, createReq)
+	if r := call(t, c, Request{Op: OpApplyFirewall, Rules: &platform.Rules{BlockIPv6: true}}); !r.OK {
+		t.Fatalf("apply: %+v", r)
+	}
+	call(t, c, Request{Op: OpDone, Session: true})
+	for i, want := range []string{"clear", "clear again", "apply again", "clear after"} {
+		req := Request{Op: OpClearFirewall}
+		if want == "apply again" {
+			req = Request{Op: OpApplyFirewall, Rules: &platform.Rules{BlockIPv6: true}}
+		}
+		if r := call(t, c, req); !r.OK {
+			t.Fatalf("%d %s: %+v", i, want, r)
+		}
+	}
+	_ = c.Close()
+	if err := wait(t, done); err != nil {
+		t.Fatalf("session end: %v", err)
+	}
+	// Cleared twice: the second time there was nothing to remove.
+	checkCalls(t, d, created, "firewall ipv6", "release utun0", "flush", "firewall ipv6", "flush")
+}
+
 func TestHelperSessionEndsOnInterrupt(t *testing.T) {
 	d := &fake.Drivers{}
 	ctx, cancel := context.WithCancel(context.Background())

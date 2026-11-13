@@ -198,7 +198,9 @@ password on the terminal).
   `delete_route` (only a route it added), `flush_dns_cache` (only while DNS is redirected),
   `apply_firewall` (rules as intent, not pf text: DNS servers unicast IPv4, ports at least 1024,
   kill switch prefixes IPv4 and not the default route; plus the rules that stay when the tunnel
-  goes away, which may only block), `done`, `end` (session: keep the blocking rules or not), and as
+  goes away, which may only block), `clear_firewall` (session: remove its own rules when none is
+  needed any more, e.g. every kill switch profile stopped), `done`, `end` (session: keep the
+  blocking rules or not), and as
   a first command only `adopt` or `cleanup` (rules an earlier session left, below). The platform
   drivers run `/sbin/ifconfig`, `/sbin/route` and `/sbin/pfctl` with fixed argument lists, never a
   shell; the pf rules are rendered by the helper from the validated intent. The utun's file
@@ -210,7 +212,7 @@ password on the terminal).
 |---|---|---|
 | sudo prompts | one, at start | one, at start |
 | Root process after setup | none: the helper exits | the helper stays up for the session |
-| Accepts after setup | nothing | firewall updates (the DNS servers or the local networks changed), route changes (several profiles, `control: full`), DNS cache flushes and `end` |
+| Accepts after setup | nothing | firewall updates (the DNS servers or the local networks changed) or their removal, route changes (several profiles, `control: full`), DNS cache flushes and `end` |
 | Changing CIDRs | restart subtun (`control: full` keeps the helper up: a session) | `subtun route add\|del` with `control: full` |
 | Cleanup | automatic: routes live on the utun, and macOS removes the utun and its routes when subtun exits, crashes or is killed | the same for routes; firewall rules as below |
 | Risk | smallest: root exists only for the seconds of setup | a root process stays reachable (only by subtun, over the private socket) for the whole session |
@@ -562,7 +564,7 @@ build on the route changes above.
 
 ## Status and control
 
-Both are built (starting a profile that isn't part of the run is next). A running subtun answers
+Both are built. A running subtun answers
 questions about itself (`subtun status`, `subtun logs`), and on request accepts changes (routes, DNS
 names, profiles) without a restart. Everything is
 shaped as a list of tunnels: one in a single-profile run, several with `--profile a,b`.
@@ -617,6 +619,7 @@ the endpoints; `--dry-run` shows the effect):
 subtun route add|del [--profile P] [-x] CIDR...                # a profile's routes (-x: excludes)
 subtun dns add|del [--profile P] [DOMAIN...] [--pattern RE]... # a profile's DNS names
 subtun profile stop|start|reconnect [NAME] [--reload]          # one profile; the others go on
+                                                               # (start NAME not in the run: add it)
 ```
 
 Changes are temporary: they last until subtun stops, and nothing is written back to the config
@@ -682,8 +685,13 @@ built once. They keep their behaviour:
 2. Status: the socket, counters, connections, logs, `subtun status` and `subtun logs`. Done.
 3. Control: `control: full` and the changes to the run's profiles. Done.
 4. Starting a profile that isn't part of the run (`profile start NAME` from the config file, next to
-   the others): every per-profile table of the engine (DNS engine, matcher, counters, status) grows
-   while running.
+   the others). Done: the engine's per-profile tables grow while running (the plan and the status
+   under `mp.smu`, runners, SOCKS listeners, the DNS engine's tunnels via `Engine.AddTunnel`, the
+   matcher's targets, which start switched off); the profile is planned with the config's settings
+   only, against the run (`planAdd`). A profile with routes needs a run with a capture, one with a
+   kill switch a capture with a guard; DNS names are ignored without the run's DNS capture and
+   refused for servers it doesn't capture; `killSwitch.dns` and a full tunnel's IPv6 block only warn
+   once the capture runs. Not for runs whose tunnel has no profile name (`subtun k8s`, `docker`).
 
 ## Decisions
 

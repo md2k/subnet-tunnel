@@ -228,6 +228,32 @@ func TestAnswerRoutesToTunnels(t *testing.T) {
 	}
 }
 
+// A tunnel added while running answers its names once the matcher points
+// at it and it is switched on.
+func TestAddTunnel(t *testing.T) {
+	m, err := NewMultiMatcher([]Names{{Domains: []string{"work.example"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	work, dev, fb := &fakeUpstream{records: 1}, &fakeUpstream{records: 2}, &fakeUpstream{records: 3}
+	e := &Engine{Match: m, Tunnels: []Tunnel{{Name: "work", Upstream: work}}, Fallback: fb, Log: slog.New(slog.DiscardHandler)}
+	e.AddTunnel(Tunnel{Name: "dev", Upstream: dev})
+	if err := m.SetNames([]Names{{Domains: []string{"work.example"}}, {Domains: []string{"dev.example"}}}); err != nil {
+		t.Fatal(err)
+	}
+	ask := func(id uint16, name string, records int) {
+		t.Helper()
+		q := buildQuery(id, name, 0)
+		if got := e.Answer(context.Background(), q, true); !bytes.Equal(got, buildAnswer(q, records)) {
+			t.Errorf("%s: wrong upstream", name)
+		}
+	}
+	ask(1, "b.dev.example.", 3) // off until switched on: the fallback
+	m.SetOn(1, true)
+	ask(2, "b.dev.example.", 2)
+	ask(3, "a.work.example.", 1)
+}
+
 // Answers are counted per tunnel and for the fallback.
 func TestAnswerCounts(t *testing.T) {
 	m, err := NewMatcher([]string{"svc.cluster.local"}, nil)

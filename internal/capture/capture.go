@@ -83,6 +83,7 @@ type sessionHelper interface {
 	AddRoute(netip.Prefix) error
 	DeleteRoute(netip.Prefix) error
 	ApplyFirewall(platform.Rules, *platform.Rules) error
+	ClearFirewall() error
 	FlushDNSCache() error
 	End(keep bool) error
 	Close() error
@@ -222,6 +223,15 @@ func (c *Capture) Update(prefixes []netip.Prefix, g Guard) error {
 	return errors.Join(errs...)
 }
 
+// AddDNSTunnel adds a tunnel to the running DNS engine (a profile added
+// while running), as the next target; before the matcher's names point at
+// it. Without DNS capture it does nothing.
+func (c *Capture) AddDNSTunnel(t DNSTunnel) {
+	if c.dns != nil {
+		c.dns.eng.AddTunnel(t.engineTunnel(c.dns.log))
+	}
+}
+
 // FlushDNSCache has the system forget cached DNS answers: some came from a
 // tunnel that is gone, or are failures from while it was down. Only with
 // DNS capture (a session); a no-op once stopping.
@@ -240,6 +250,10 @@ func (c *Capture) FlushDNSCache() error {
 // BlockingIPv6 reports whether outgoing IPv6 is blocked (it is skipped
 // when subtun's own connection may use IPv6).
 func (c *Capture) BlockingIPv6() bool { return c.helper != nil && c.opts.BlockIPv6 }
+
+// Guarding reports whether the capture has a kill switch guard (a profile
+// had a kill switch when it started): only then can profiles with one join.
+func (c *Capture) Guarding() bool { return c.guard != nil }
 
 // HoldsDNS reports whether DNS to the captured servers stays blocked while
 // the kill switch holds.
@@ -292,7 +306,9 @@ func (c *Capture) applyLocked() error {
 	}
 	running, persist := rules(c.opts, guarded, guarded, c.Name, c.dns)
 	if running.Empty() {
-		return errors.New("no firewall rules left to apply")
+		// The kill switch's profiles all stopped, and nothing else needs
+		// rules: none stay (a later update applies them again).
+		return c.helper.ClearFirewall()
 	}
 	return c.helper.ApplyFirewall(running, persist)
 }

@@ -95,6 +95,21 @@ func newEngineStatus(mp *multiPlan, control string) *engineStatus {
 	return es
 }
 
+// grow adds a profile's status (a profile added while running); the caller
+// holds mp.smu.
+func (es *engineStatus) grow(info *tunnelInfo, m *meter.Meter, dc *dns.Counts) {
+	es.infos = append(es.infos, info)
+	es.meters = append(es.meters, m)
+	es.dnsCounts = append(es.dnsCounts, dc)
+}
+
+// meter returns profile i's meter, from any goroutine.
+func (es *engineStatus) meter(i int) *meter.Meter {
+	es.mp.smu.RLock()
+	defer es.mp.smu.RUnlock()
+	return es.meters[i]
+}
+
 // routesOn records which tunnels have all their routes on the utun.
 func (es *engineStatus) routesOn(active []bool, onUtun []netip.Prefix) {
 	for i, on := range active {
@@ -112,7 +127,10 @@ func (es *engineStatus) sample(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			for _, m := range es.meters {
+			es.mp.smu.RLock()
+			meters := slices.Clone(es.meters)
+			es.mp.smu.RUnlock()
+			for _, m := range meters {
 				m.Sample(now)
 			}
 		}

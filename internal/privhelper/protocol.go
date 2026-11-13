@@ -37,6 +37,7 @@ const (
 	OpDeleteRoute   = "delete_route"    // a route this helper added; also during a session
 	OpFlushDNS      = "flush_dns_cache" // during a session: answers cached while a tunnel was down go
 	OpApplyFirewall = "apply_firewall"
+	OpClearFirewall = "clear_firewall" // during a session: none of its rules is needed any more (kill switch profiles stopped)
 	OpDone          = "done"
 	OpEnd           = "end"     // session: end it, keeping the persist rules or not
 	OpAdopt         = "adopt"   // first: take over rules an earlier session left, DNS relaxed

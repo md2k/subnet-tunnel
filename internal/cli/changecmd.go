@@ -167,8 +167,9 @@ stop is Ctrl-C for that profile: its routes and DNS names are removed
 (kill switch on lifts its blocks; lockdown keeps them, refusing its
 traffic). start connects it again with the settings it had, changes made
 while running included; with --reload it reads the profile from the config
-file again instead, dropping those changes. reconnect drops its connection
-and connects again now.
+file again instead, dropping those changes. start of a profile that isn't
+part of the run adds it from the config file, checked against the others as
+at start. reconnect drops its connection and connects again now.
 ` + changeNote,
 	}
 	op := func(name, short string, reload bool) *cobra.Command {
@@ -194,7 +195,7 @@ and connects again now.
 	}
 	cmd.AddCommand(
 		op("stop", "Stop a profile: as Ctrl-C, for that profile only", false),
-		op("start", "Start a stopped (or given up) profile again", true),
+		op("start", "Start a stopped or given-up profile again, or add one from the config file", true),
 		op("reconnect", "Drop a profile's connection and connect again now", false),
 	)
 	return cmd
