@@ -715,3 +715,25 @@ func TestHelperFlushesDNSCache(t *testing.T) {
 	wait(t, done)
 	checkCalls(t, d, "adopt old", "flush", "flush dns cache")
 }
+
+// A session may flush the DNS cache while DNS is redirected to subtun (a
+// tunnel came back); without a redirect there is nothing to flush.
+func TestHelperFlushDNSCacheOp(t *testing.T) {
+	d := &fake.Drivers{DNSCache: true}
+	c, done := startHelper(t, context.Background(), d)
+	call(t, c, createReq)
+	if r := call(t, c, Request{Op: OpFlushDNS}); r.OK || !strings.Contains(r.Error, "isn't redirected") {
+		t.Fatalf("flush without a redirect: %+v", r)
+	}
+	call(t, c, firewallReq("192.168.1.1"))
+	call(t, c, Request{Op: OpDone, Session: true})
+	if r := call(t, c, Request{Op: OpFlushDNS}); !r.OK {
+		t.Fatalf("flush in a session: %+v", r)
+	}
+	_ = c.Close()
+	if err := wait(t, done); err != nil {
+		t.Fatal(err)
+	}
+	checkCalls(t, d, created, "firewall dns [192.168.1.1] 53530 53531", "flush dns cache", "release utun0",
+		"flush dns cache", "flush", "flush dns cache")
+}

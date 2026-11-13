@@ -33,8 +33,9 @@ import (
 // Ops.
 const (
 	OpCreateTun     = "create_tun"
-	OpAddRoute      = "add_route"    // also during a session
-	OpDeleteRoute   = "delete_route" // a route this helper added; also during a session
+	OpAddRoute      = "add_route"       // also during a session
+	OpDeleteRoute   = "delete_route"    // a route this helper added; also during a session
+	OpFlushDNS      = "flush_dns_cache" // during a session: answers cached while a tunnel was down go
 	OpApplyFirewall = "apply_firewall"
 	OpDone          = "done"
 	OpEnd           = "end"     // session: end it, keeping the persist rules or not

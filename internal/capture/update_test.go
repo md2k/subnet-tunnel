@@ -34,6 +34,7 @@ func (f *fakeHelper) DeleteRoute(p netip.Prefix) error {
 	return f.rec("delete %s", p)
 }
 func (f *fakeHelper) End(keep bool) error     { return f.rec("end keep=%v", keep) }
+func (f *fakeHelper) FlushDNSCache() error    { return f.rec("flush dns cache") }
 func (f *fakeHelper) Close() error            { return f.rec("close") }
 func (f *fakeHelper) Exited() <-chan struct{} { return nil }
 func (f *fakeHelper) ApplyFirewall(r platform.Rules, persist *platform.Rules) error {
@@ -196,4 +197,26 @@ func TestUpdateAddsPastAFailure(t *testing.T) {
 	if !slices.Equal(c.Routes(), mps("10.2.0.0/16")) {
 		t.Fatalf("routes: %v", c.Routes())
 	}
+}
+
+// The DNS cache is flushed through the helper only with DNS capture, and
+// not once stopping.
+func TestFlushDNSCache(t *testing.T) {
+	c, h := testCapture(t, nil, Guard{})
+	if err := c.FlushDNSCache(); err != nil {
+		t.Fatal(err)
+	}
+	checkHelperCalls(t, h) // no DNS capture: nothing to flush
+	c.dns = &dnsRuntime{}
+	if err := c.FlushDNSCache(); err != nil {
+		t.Fatal(err)
+	}
+	checkHelperCalls(t, h, "flush dns cache")
+	c.guard = nil
+	c.stopHelper(true)
+	h.calls = nil
+	if err := c.FlushDNSCache(); err != nil {
+		t.Fatal(err)
+	}
+	checkHelperCalls(t, h)
 }

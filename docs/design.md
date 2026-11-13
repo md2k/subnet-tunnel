@@ -195,7 +195,7 @@ password on the terminal).
   anyone else, then proves itself with the token.
 - It accepts a fixed set of commands, in lock-step: `create_tun` (MTU and address validated),
   `add_route` (IPv4, host bits zero, never the default route, loopback or multicast),
-  `delete_route` (only a route it added),
+  `delete_route` (only a route it added), `flush_dns_cache` (only while DNS is redirected),
   `apply_firewall` (rules as intent, not pf text: DNS servers unicast IPv4, ports at least 1024,
   kill switch prefixes IPv4 and not the default route; plus the rules that stay when the tunnel
   goes away, which may only block), `done`, `end` (session: keep the blocking rules or not), and as
@@ -210,7 +210,7 @@ password on the terminal).
 |---|---|---|
 | sudo prompts | one, at start | one, at start |
 | Root process after setup | none: the helper exits | the helper stays up for the session |
-| Accepts after setup | nothing | firewall updates (the DNS servers or the local networks changed), route changes (several profiles) and `end` |
+| Accepts after setup | nothing | firewall updates (the DNS servers or the local networks changed), route changes (several profiles), DNS cache flushes and `end` |
 | Changing CIDRs | restart subtun | restart subtun (runtime changes with `control: full` are planned) |
 | Cleanup | automatic: routes live on the utun, and macOS removes the utun and its routes when subtun exits, crashes or is killed | the same for routes; firewall rules as below |
 | Risk | smallest: root exists only for the seconds of setup | a root process stays reachable (only by subtun, over the private socket) for the whole session |
@@ -353,6 +353,9 @@ dns:
   and when it takes over or cleans up an earlier session's rules. Otherwise answers from before the
   capture bypass it for their TTL, and, after it, answers obtained through the tunnel point at
   addresses only reachable through it (a name kept failing for its TTL after subtun stopped).
+  During a session subtun asks for a flush (`flush_dns_cache`) when a tunnel with DNS names comes
+  back after an outage (a lookup that failed while it was down kept failing for a moment after
+  the reconnect), and when a profile's names start or stop going through a tunnel.
 - **How queries reach it** is a driver choice:
 
 | `capture` | Mechanism | Notes |

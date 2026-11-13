@@ -172,6 +172,13 @@ func (c *Client) DeleteRoute(p netip.Prefix) error {
 	return err
 }
 
+// FlushDNSCache flushes the system's DNS cache while DNS is redirected to
+// subtun (a tunnel came back: failures cached while it was down go).
+func (c *Client) FlushDNSCache() error {
+	_, _, err := c.call(Request{Op: OpFlushDNS})
+	return err
+}
+
 // ApplyFirewall replaces subtun's firewall rules. persist, if not nil, is
 // what stays in place when the tunnel goes away (kill switch): after a
 // crash, a lost tunnel, or End(true). Rules applied during setup need

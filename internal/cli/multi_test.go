@@ -293,3 +293,26 @@ func TestDNSLocalsSkipTheUtun(t *testing.T) {
 		t.Fatalf("without a utun address: %v", got)
 	}
 }
+
+// When the system's cached DNS answers no longer hold.
+func TestDNSFlushNeeded(t *testing.T) {
+	mp := multiPlanFor(t, "work", "dev", "vault") // work: ".", kill switch; dev: cluster.local; vault: no DNS
+	for _, tc := range []struct {
+		i         int
+		prev, now tunnelState
+		capturing bool
+		want      bool
+	}{
+		{1, stateReconnecting, stateUp, true, true},      // dev came back: its failures go
+		{1, stateConnecting, stateUp, true, true},        // dev came up after the capture started
+		{1, stateConnecting, stateUp, false, false},      // before the capture: starting it flushes anyway
+		{1, stateUp, stateReconnecting, true, false},     // lost: its names fail at once, nothing cached to fix
+		{1, stateReconnecting, stateGaveUp, true, true},  // gave up: its names go to the fallback now
+		{0, stateReconnecting, stateGaveUp, true, false}, // kill switch: its names stay (and fail)
+		{2, stateReconnecting, stateUp, true, false},     // no DNS names
+	} {
+		if got := mp.dnsFlushNeeded(tc.i, tc.prev, tc.now, tc.capturing); got != tc.want {
+			t.Errorf("profile %d %v→%v capturing=%v: %v, want %v", tc.i, tc.prev, tc.now, tc.capturing, got, tc.want)
+		}
+	}
+}

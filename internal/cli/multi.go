@@ -433,6 +433,25 @@ func (mp *multiPlan) activeSet(states []tunnelState) []bool {
 	return active
 }
 
+// dnsFlushNeeded reports whether profile i changing from prev to now
+// leaves answers in the system's DNS cache that no longer hold: failures
+// from while its tunnel was down (it came back), answers from before its
+// names went through a tunnel (it came up after the capture started), or
+// answers its tunnel gave (it gave up, and its names go elsewhere now).
+func (mp *multiPlan) dnsFlushNeeded(i int, prev, now tunnelState, capturing bool) bool {
+	names := mp.dnsNames[i]
+	if mp.dns == nil || !capturing || len(names.Domains) == 0 && len(names.Patterns) == 0 {
+		return false
+	}
+	switch {
+	case now == stateUp:
+		return prev == stateReconnecting || prev == stateConnecting
+	case now == stateGaveUp:
+		return mp.ks[i] == "off" // with a kill switch its names stay (and fail)
+	}
+	return false
+}
+
 // owned is a prefix and the profile that carries it.
 type owned struct {
 	prefix netip.Prefix
@@ -965,7 +984,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	if !eo.single {
 		firstRound = time.After(firstRoundWait)
 	}
-	roundOver, anyUp, devStarted := false, false, false
+	roundOver, anyUp, devStarted, flushDNS := false, false, false, false
 	// A stop the user asked for (or --max-duration) is deliberate. Before
 	// anything was up (connecting, the sudo prompt), --max-duration also
 	// says so as an error.
@@ -1024,6 +1043,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			tl := logs[ev.i]
 			prev := states[ev.i]
 			states[ev.i], tried[ev.i] = ev.state, true
+			flushDNS = flushDNS || mp.dnsFlushNeeded(ev.i, prev, ev.state, c != nil)
 			switch ev.state {
 			case stateUp:
 				anyUp = true
@@ -1112,6 +1132,12 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		} else if lastErr != "" {
 			log.Info("routes updated")
 			lastErr, retryWait, retry = "", layoutRetry, nil
+		}
+		if flushDNS {
+			flushDNS = false
+			if err := c.FlushDNSCache(); err != nil {
+				log.Warn("flushing the DNS cache failed", "err", err)
+			}
 		}
 	}
 }

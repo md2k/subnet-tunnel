@@ -156,8 +156,12 @@ func (h *helper) handle(req Request) (Response, []int) {
 		h.log.Warn("refused", "op", req.Op, "err", err)
 		return Response{Error: err.Error()}, nil
 	}
-	if h.session.Load() && req.Op != OpApplyFirewall && req.Op != OpAddRoute && req.Op != OpDeleteRoute {
-		return fail(fmt.Errorf("%s: setup is finished; only firewall and route updates are accepted", req.Op))
+	switch req.Op {
+	case OpApplyFirewall, OpAddRoute, OpDeleteRoute, OpFlushDNS:
+	default:
+		if h.session.Load() {
+			return fail(fmt.Errorf("%s: setup is finished; only firewall, route and DNS cache updates are accepted", req.Op))
+		}
 	}
 	switch req.Op {
 	case OpCreateTun:
@@ -247,6 +251,13 @@ func (h *helper) handle(req Request) (Response, []int) {
 		h.log.Info("firewall rules applied", "dns", req.Rules.DNS != nil, "kill_switch", req.Rules.KillSwitch != nil,
 			"block_ipv6", req.Rules.BlockIPv6, "kept_if_tunnel_lost", req.Persist != nil)
 		h.dnsRedirect(req.Rules.DNS != nil)
+		return Response{OK: true}, nil
+
+	case OpFlushDNS:
+		if !h.dnsOn {
+			return fail(errors.New("DNS isn't redirected to subtun"))
+		}
+		h.flushDNSCache()
 		return Response{OK: true}, nil
 
 	case OpAdopt:
