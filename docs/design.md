@@ -452,14 +452,19 @@ app ──► SOCKS (one per profile) ───── its own tunnel only
 - **Shared:** one utun, one root helper, one firewall rule set, one DNS engine. The utun carries
   the routes of the profiles that are running. The root side gains one thing: route changes
   during a session (see Starting and failing).
-- **Connections:** each goes to the tunnel whose route matches its destination most specifically,
-  the rule routes and excludes already follow. The stack's dialer becomes a router over the
-  tunnels; the stack, the loop guard and the hand-back stay as they are.
+- **Connections:** of the profiles whose own routes (after their own excludes) cover the
+  destination, the one whose configured route containing it is most specific carries it, the
+  rule routes and excludes already follow within a profile. The address space is split into
+  prefixes, each carried by one profile; the stack's dialer becomes a router over them, and the
+  kill switch's guard and `dns.unrouted` use the same split. The stack, the loop guard and the
+  hand-back stay as they are.
 - **DNS:** a name goes to the tunnel with the most specific matching domain (`db.corp.example`
   goes to the profile listing `corp.example`, not to one listing `example`); then to the first
   matching pattern, in profile order; then to the profile with `.`, if any (local names still
-  stay local); else to the fallback. `dns.unrouted` checks a tunnel's answers against that
-  tunnel's own routes, since a connection to an address another tunnel routes would go there.
+  stay local); else to the fallback. `dns.unrouted` checks a tunnel's answers against the
+  addresses that tunnel carries, since a connection to an address another tunnel carries would
+  go there. The targets' own endpoint names never go through a tunnel, so a tunnel that is down
+  can still look up its API server.
 - **Per tunnel:** target, agent, agent directory, SOCKS proxy (it dials only its own tunnel, and
   hostnames resolve on that agent), reconnect, `dns.unrouted`, the warning about a target on this
   machine, its state, and later its counters. Log lines carry `tunnel=<profile>`.
@@ -481,15 +486,17 @@ app ──► SOCKS (one per profile) ───── its own tunnel only
 - The same CIDR in the routes of two profiles is an error, and so are the same DNS domain, `.` in
   more than one profile, and the same SOCKS address.
 - Overlapping routes follow most specific wins: dev's `10.50.0.0/16` takes those addresses from
-  work's `10.0.0.0/8`. The dry run lists each route with its tunnel and shows which routes take
-  over part of another.
+  work's `10.0.0.0/8`. The dry run lists each profile's routes and notes the parts another
+  profile carries.
 - A full tunnel in one profile carries whatever the others don't route.
 - A profile's excludes apply to its own routes: work's `10.50.0.0/16` exclude doesn't stop dev
-  from routing it. Excludes in `defaults:` apply to every profile.
+  from routing it, and an address dev excludes goes to work if work routes it. Excludes in
+  `defaults:` apply to every profile.
 - The automatic excludes apply to each profile as today. Every tunnel's own endpoints (API
   servers, Docker daemons) are excluded from every route, so no tunnel's connection runs inside
   another tunnel. They come from the kubeconfig or docker context, so they are known before a
-  tunnel connects.
+  tunnel connects; they are looked up after rules an earlier session left (which may block DNS)
+  are taken over, and a failed lookup is reported.
 - Later: a priority for a CIDR or domain listed in two profiles, and with it failover (the same
   CIDR through two remotes, the second used while the first is down). Until then both are errors
   at start.
@@ -513,9 +520,10 @@ app ──► SOCKS (one per profile) ───── its own tunnel only
   or the fallback.
 - A profile with a kill switch puts its routes in at start and keeps them when it gives up: its
   traffic is refused rather than leaking, and if subtun exits, the guard holds.
-- The capture starts first (sudo comes before connecting), with the routes of the profiles that
-  have a kill switch. Then all tunnels connect in parallel; one that can't connect retries by its
-  reconnect policy.
+- All tunnels try to connect once, in parallel, before the capture starts, as a single profile
+  does (connect, then sudo): a first connection never depends on DNS or routes through a tunnel
+  that is down. The capture then starts with the routes of the profiles that are up and of
+  those with a kill switch; one that couldn't connect retries by its reconnect policy.
 - Each tunnel reconnects on its own. While one is down, only its destinations get resets and only
   its names SERVFAIL; the others carry on.
 - subtun exits on Ctrl-C, or when every profile has given up. A profile giving up is logged, and
@@ -600,6 +608,10 @@ subtun maps back to the real ones (fake-IP style).
   client opening more connections to one address and port at once would be refused for 10 s.
   Targets in a VM on a bridge network (an address on a local network rather than loopback) don't
   trigger the start warning; only the caps catch their loops.
+- **Reconnecting through a full tunnel** while the tunnel is down: a kubeconfig whose
+  credentials come from an exec plugin (a cloud login) needs the internet, which the full
+  tunnel's routes send into the tunnel that is down. The first connection is made before the
+  capture starts; a reconnect that needs the plugin again can't reach its login service.
 - **IPv6 DNS servers** are not captured yet (IPv4 only, like sshuttle with `--disable-ipv6`).
 - **UDP through the tunnel:** a fallback resolver inside a routed CIDR fails, because the utun
   carries TCP only so far.

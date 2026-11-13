@@ -241,7 +241,7 @@ Several profiles (--profile, repeatable or comma-separated, plus the
 argument) run at once, each through its own target: connections and DNS
 names go to the profile whose route or domain matches most specifically.
 They are configured in the config file only: the command line then takes
---dry-run and nothing else.
+--dry-run, not settings or CIDRs.
 
 Without a profile name, lists the profiles.`,
 		Example: `  subtun up dev-cluster

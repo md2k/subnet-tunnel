@@ -108,8 +108,9 @@ subtun up --profile work --profile dev --dry-run
 ```
 
 Each profile connects to its own target, and they share one utun: a connection goes to the profile
-whose route matches its destination most specifically, a DNS name to the profile with the longest
-matching domain (then the first matching pattern, in profile order, then the profile with `.`).
+whose configured route matches its destination most specifically (a profile's excludes only take
+addresses out of its own routes), a DNS name to the profile with the longest matching domain (then
+the first matching pattern, in profile order, then the profile with `.`).
 So a work cluster can carry `10.0.0.0/8` and everything else while a dev cluster carries
 `10.50.0.0/16` and `cluster.local`:
 
@@ -146,12 +147,13 @@ profiles:
   one. Two remotes that use the same addresses (two clusters with the default service range) can
   only be reached through their SOCKS proxies.
 - **Config only.** With several profiles, the command line takes `--dry-run` (and the global
-  flags) and nothing else; settings and CIDRs come from the config file. The dry run lists each
-  profile's routes, shows which ones take over part of another profile's, and the shared DNS and
-  kill switch setup.
-- **Root.** sudo asks before the tunnels connect, and the root helper stays up while subtun runs,
-  to add and remove routes as profiles come and go. Every target's API server or Docker daemon
-  address is kept out of every route.
+  flags), not settings or CIDRs; those come from the config file. The dry run lists each
+  profile's routes, notes the parts another profile carries, and shows the shared DNS and kill
+  switch setup.
+- **Root.** Every profile tries to connect once before sudo asks, as with one profile. The root
+  helper then stays up while subtun runs, to add and remove routes as profiles come and go. Every
+  target's API server or Docker daemon address is kept out of every route, and with DNS capture
+  their names never resolve through a tunnel.
 
 ## Examples
 
