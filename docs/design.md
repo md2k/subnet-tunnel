@@ -560,10 +560,11 @@ build on the route changes above.
 - `subtun up work dev` with several profile names as arguments: they can't be told apart from
   CIDRs reliably (see Command line).
 
-## Status and control (planned)
+## Status and control
 
-Not built yet. A running subtun answers questions about itself (`subtun status`, `subtun logs`),
-and on request accepts changes (routes, DNS names, profiles) without a restart. Everything is
+Status is built; control (`control: full` and the changes) is planned. A running subtun answers
+questions about itself (`subtun status`, `subtun logs`), and on request accepts changes (routes, DNS
+names, profiles) without a restart. Everything is
 shaped as a list of tunnels: one in a single-profile run, several with `--profile a,b`.
 
 **Where it lives.** In the subtun process, which runs as the user; never in the root helper.
@@ -572,9 +573,10 @@ shaped as a list of tunnels: one in a single-profile run, several with `--profil
   (`~/Library/Caches/subtun/run`, 0700; socket 0600). The peer's uid is checked as well (macOS
   `LOCAL_PEERCRED`). `subtun status` finds every running subtun by its socket and removes sockets
   whose process is gone.
-- JSON over HTTP on that socket, under `/v1/`, so `curl --unix-socket` works too. Live updates
-  (state changes, counters, log lines) come as newline-delimited JSON on one long response
-  (`/v1/events`); a WebSocket comes with the web UI.
+- JSON over HTTP on that socket, under `/v1/`, so `curl --unix-socket` works too: `/v1/status`,
+  `/v1/connections`, and `/v1/logs` (newline-delimited JSON; with `?follow=1` new lines keep
+  coming). A general event stream (state changes and counters as they happen) and a WebSocket
+  come with the terminal and web UIs; `subtun status --watch` polls once a second meanwhile.
 - Later, for a browser UI: an optional localhost TCP listener with a random token (Jupyter style).
 
 **What it reports:**

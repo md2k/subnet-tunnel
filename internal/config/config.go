@@ -24,8 +24,22 @@ import (
 
 // File is the whole config file.
 type File struct {
+	// Control is the control socket for every run (status, off): global,
+	// never per profile.
+	Control  Word               `json:"control,omitempty"`
 	Defaults Profile            `json:"defaults,omitempty"` // every key except target
 	Profiles map[string]Profile `json:"profiles"`
+}
+
+// ValidControl checks a control mode (the setting and --control).
+func ValidControl(v string) error {
+	switch v {
+	case "", "status", "off":
+		return nil
+	case "full":
+		return errors.New(`control "full" (changes while running) isn't there yet; use status or off`)
+	}
+	return fmt.Errorf("control %q: use status or off", v)
 }
 
 // Profile is one named setup, run with `subtun up NAME`.
@@ -241,6 +255,9 @@ func Parse(data []byte, name string) (*File, error) {
 	}
 	if len(f.Profiles) == 0 {
 		return nil, fmt.Errorf("%s: no profiles", name)
+	}
+	if err := ValidControl(string(f.Control)); err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	if f.Defaults.Target.K8s != nil || f.Defaults.Target.Docker != nil {
 		return nil, fmt.Errorf("%s: defaults: target can only be set in a profile", name)

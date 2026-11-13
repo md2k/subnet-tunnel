@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/md2k/subnet-tunnel/internal/config"
+	"github.com/md2k/subnet-tunnel/internal/meter"
 	"github.com/md2k/subnet-tunnel/internal/routes"
 )
 
@@ -127,7 +128,7 @@ func TestLayoutFollowsProfiles(t *testing.T) {
 	rt := &router{}
 	check := func(states []tunnelState, devRouted bool) {
 		t.Helper()
-		all, entries, guard, err := mp.layout(mp.activeSet(states), lives)
+		all, entries, guard, err := mp.layout(mp.activeSet(states), []meter.Dialer{lives[0], lives[1], lives[2]})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -186,7 +187,7 @@ func TestRunTunnelGivesUp(t *testing.T) {
 	var got []tunnelEvent
 	send := func(ev tunnelEvent) bool { got = append(got, ev); return true }
 	p := reconnectPolicy{attempts: 2, delay: time.Millisecond, maxDelay: time.Millisecond}
-	runTunnel(context.Background(), 3, &liveTunnel{}, p, true, try, send, discardLogger())
+	runTunnel(context.Background(), 3, &liveTunnel{}, p, true, try, send, discardLogger(), nil)
 	// The first failure is reported (the first round is over), then the give-up.
 	if tries != 3 || len(got) != 2 || got[0].state != stateConnecting || got[0].err == nil ||
 		got[1].i != 3 || got[1].state != stateGaveUp || got[1].err == nil {
@@ -216,7 +217,7 @@ func TestOwnershipFollowsConfiguredRoutes(t *testing.T) {
 		}
 	}
 	active := mp.activeSet([]tunnelState{stateUp, stateUp})
-	_, entries, guard, err := mp.layout(active, []*liveTunnel{{}, {}})
+	_, entries, guard, err := mp.layout(active, []meter.Dialer{&liveTunnel{}, &liveTunnel{}})
 	if err != nil {
 		t.Fatal(err)
 	}

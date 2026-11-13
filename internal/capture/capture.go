@@ -61,6 +61,9 @@ type Options struct {
 	// routes can change while running (Update; several tunnels).
 	Session bool
 
+	// OnRefuse is told about connections the loop guard refuses.
+	OnRefuse func(dst string)
+
 	// Helper, if set, was started earlier (to take over an earlier session's
 	// rules before connecting) and is used instead of starting one.
 	Helper *privhelper.Client
@@ -234,6 +237,32 @@ func (c *Capture) FlushDNSCache() error {
 	return c.helper.FlushDNSCache()
 }
 
+// BlockingIPv6 reports whether outgoing IPv6 is blocked (it is skipped
+// when subtun's own connection may use IPv6).
+func (c *Capture) BlockingIPv6() bool { return c.helper != nil && c.opts.BlockIPv6 }
+
+// HoldsDNS reports whether DNS to the captured servers stays blocked while
+// the kill switch holds.
+func (c *Capture) HoldsDNS() bool { return c.dns != nil && c.opts.killSwitch() && !c.opts.AllowDNS }
+
+// GuardCounts returns how many prefixes the kill switch guards now, and how
+// many of them stay after a deliberate stop.
+func (c *Capture) GuardCounts() (guarded, lockdown int) {
+	if c.guard == nil {
+		return 0, 0
+	}
+	return len(c.guard.get()), len(c.guard.getLockdown())
+}
+
+// DNS returns the captured DNS servers now and where unmatched names go;
+// nothing without DNS capture.
+func (c *Capture) DNS() (servers []netip.Addr, fallback []netip.AddrPort) {
+	if c.dns == nil {
+		return nil, nil
+	}
+	return c.dns.current()
+}
+
 // Session reports whether the root helper stays up, so routes can change
 // (Update).
 func (c *Capture) Session() bool { return c.helper != nil }
@@ -348,7 +377,7 @@ func Start(ctx context.Context, prefixes []netip.Prefix, opts Options, dialer ne
 		}
 		return nil, err
 	}
-	st, err := netstack.New(dev, dialer, netstack.Options{Logger: log, TunAddr: opts.TunAddr})
+	st, err := netstack.New(dev, dialer, netstack.Options{Logger: log, TunAddr: opts.TunAddr, OnRefuse: opts.OnRefuse})
 	if err != nil {
 		_ = dev.Close()
 		if session {

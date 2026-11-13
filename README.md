@@ -128,13 +128,17 @@ each connection and DNS name goes to the profile whose route or domain matches m
 and each profile reconnects, or gives up, on its own. See
 [Several profiles at once](docs/config.md#several-profiles-at-once).
 
+**Status.** `subtun status` shows what every running subtun is doing: each tunnel's state, routes,
+DNS names, connections and traffic; `subtun logs -f` follows its log. See
+[Status and logs](docs/config.md#status-and-logs).
+
 See [Configuration](docs/config.md). Coming from sshuttle? `subtun import sshuttle FILE --name NAME`
 turns an sshuttle options file into a profile ([details](docs/config.md#importing-from-sshuttle)).
 
 ## Planned
 
-- `subtun status` and a local control API; change CIDRs and DNS at runtime without a restart (opt-in),
-  routes that follow network changes, and DNS answers outside the routes routed into the tunnel.
+- Change CIDRs and DNS at runtime without a restart (opt-in), routes that follow network changes,
+  and DNS answers outside the routes routed into the tunnel; a terminal and a web UI.
 - SSH transport to any host.
 - DNS without firewall rules: subtun as the system resolver, or only for the listed domains.
 - UDP and IPv6 through the tunnel; capture on Linux (TUN) and Windows (wintun).
@@ -142,8 +146,8 @@ turns an sshuttle options file into a profile ([details](docs/config.md#importin
 ## Documentation
 
 - [Configuration](docs/config.md): commands, profiles and defaults, several profiles at once,
-  examples, routes and excludes, full tunnel, split DNS, kill switch, reconnect, IPv6, safety
-  checks, importing from sshuttle.
+  examples, routes and excludes, full tunnel, split DNS, kill switch, reconnect, IPv6, status and
+  logs, safety checks, importing from sshuttle.
 - [Design](docs/design.md): measurements, architecture and open questions.
 - [Development](docs/development.md): tests, code layout, the local test setup, and trying a full
   tunnel or the kill switch safely.

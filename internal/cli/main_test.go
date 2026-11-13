@@ -14,6 +14,8 @@ import (
 // Dry runs don't depend on the machine's networks: one LAN, 192.168.77.0/24
 // on en0, with its gateway.
 func TestMain(m *testing.M) {
+	// Never the user's own config file.
+	os.Setenv("SUBTUN_CONFIG", "testdata/no-such-config.yaml")
 	localNetworks = func() []routes.Local {
 		return []routes.Local{{Iface: "en0", Network: netip.MustParsePrefix("192.168.77.0/24")}}
 	}

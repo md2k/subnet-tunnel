@@ -22,6 +22,9 @@ type DNSOptions struct {
 	Pinned   []netip.Addr     // with Auto: captured as well as the system's (several profiles)
 	Fallback []netip.AddrPort // for names not matched; nil: the captured servers
 	Tunnels  []DNSTunnel      // by the matcher's targets
+	// FallbackCounts counts the names the fallback answered; nil: not
+	// counted.
+	FallbackCounts *dns.Counts
 	// Locals reads the machine's networks: with ".", their reverse zones
 	// stay with the fallback, following network changes. nil: none.
 	Locals func() []netip.Prefix
@@ -36,13 +39,14 @@ type DNSTunnel struct {
 	// (dns.unrouted); nil: no check.
 	Unrouted    string
 	Unreachable func(netip.Addr) bool
+	Counts      *dns.Counts // nil: not counted
 }
 
 // Engine builds the DNS engine for these options.
 func (o *DNSOptions) Engine(fallback dns.TCPUpstream, log *slog.Logger) *dns.Engine {
-	e := &dns.Engine{Match: o.Match, Fallback: fallback, Log: log}
+	e := &dns.Engine{Match: o.Match, Fallback: fallback, FallbackCounts: o.FallbackCounts, Log: log}
 	for _, t := range o.Tunnels {
-		dt := dns.Tunnel{Name: t.Name, Upstream: t.Upstream}
+		dt := dns.Tunnel{Name: t.Name, Upstream: t.Upstream, Counts: t.Counts}
 		if t.Unreachable != nil {
 			dt.Unrouted = &dns.Unrouted{Mode: t.Unrouted, Unreachable: t.Unreachable, Log: log}
 		}
@@ -113,6 +117,11 @@ func (r *dnsRuntime) fallback() []netip.AddrPort {
 		out[i] = netip.AddrPortFrom(a, 53)
 	}
 	return out
+}
+
+// current returns the captured servers and where unmatched names go.
+func (r *dnsRuntime) current() (servers []netip.Addr, fallback []netip.AddrPort) {
+	return slices.Clone(*r.servers.Load()), r.fallback()
 }
 
 func (r *dnsRuntime) redirect() *platform.DNSRedirect {

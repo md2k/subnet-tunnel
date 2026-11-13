@@ -75,6 +75,9 @@ type Options struct {
 	// that hit one is refused. 0: the defaults.
 	MaxOpening, MaxOpen int
 	LoopHold            time.Duration
+	// OnRefuse is told about each connection the loop guard refuses
+	// (status counts them); nil: nothing.
+	OnRefuse func(dst string)
 }
 
 const (
@@ -199,6 +202,9 @@ func (st *Stack) forward(r *tcp.ForwarderRequest) {
 
 	ok, warn, refused := st.guard.acquire(dst)
 	if !ok {
+		if st.opts.OnRefuse != nil {
+			st.opts.OnRefuse(dst)
+		}
 		if warn {
 			log.Warn("refusing connections to this destination for a while: too many at once, likely a routing loop (the target reaches it through this machine, and the routes send that back into the tunnel)",
 				"for", st.opts.LoopHold, "refused", refused)

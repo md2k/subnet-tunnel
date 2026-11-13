@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sync/atomic"
 
+	"github.com/md2k/subnet-tunnel/internal/meter"
 	"github.com/md2k/subnet-tunnel/internal/netstack"
 )
 
@@ -22,8 +23,8 @@ type router struct {
 
 type routeEntry struct {
 	prefix netip.Prefix
-	tunnel *liveTunnel
-	i      int // the profile
+	tunnel meter.Dialer // the profile's tunnel, counted
+	i      int          // the profile
 }
 
 // set replaces the table.
@@ -34,7 +35,7 @@ func (r *router) set(entries []routeEntry) {
 }
 
 // pick returns the tunnel for a destination address.
-func (r *router) pick(a netip.Addr) *liveTunnel {
+func (r *router) pick(a netip.Addr) meter.Dialer {
 	if e := r.entry(a); e != nil {
 		return e.tunnel
 	}

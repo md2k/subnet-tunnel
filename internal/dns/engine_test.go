@@ -227,3 +227,22 @@ func TestAnswerRoutesToTunnels(t *testing.T) {
 		t.Error("a tunnel switched off still answers")
 	}
 }
+
+// Answers are counted per tunnel and for the fallback.
+func TestAnswerCounts(t *testing.T) {
+	m, err := NewMatcher([]string{"svc.cluster.local"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc, fc := &Counts{}, &Counts{}
+	tun := &fakeUpstream{records: 1}
+	e := &Engine{Match: m, Tunnels: []Tunnel{{Upstream: tun, Counts: tc}}, Fallback: &fakeUpstream{records: 1},
+		FallbackCounts: fc, Log: slog.New(slog.DiscardHandler)}
+	e.Answer(context.Background(), buildQuery(1, "a.svc.cluster.local.", 0), true)
+	e.Answer(context.Background(), buildQuery(2, "example.org.", 0), true)
+	tun.err = errors.New("down")
+	e.Answer(context.Background(), buildQuery(3, "b.svc.cluster.local.", 0), true)
+	if tc.Answered.Load() != 1 || tc.Failed.Load() != 1 || fc.Answered.Load() != 1 || fc.Failed.Load() != 0 {
+		t.Fatalf("tunnel %d/%d, fallback %d/%d", tc.Answered.Load(), tc.Failed.Load(), fc.Answered.Load(), fc.Failed.Load())
+	}
+}

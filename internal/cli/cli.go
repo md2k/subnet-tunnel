@@ -60,7 +60,7 @@ func newRoot() *cobra.Command {
 	}
 	root.PersistentFlags().BoolVarP(&g.verbose, "verbose", "v", false, "debug logging")
 	root.PersistentFlags().StringVar(&g.config, "config", "", "config file (default: $SUBTUN_CONFIG or ~/.config/subtun/config.yaml)")
-	root.AddCommand(newUpCmd(g), newK8sCmd(g), newDockerCmd(g), newImportCmd(g), newCleanupCmd(g), newVersionCmd(), newHelperCmd())
+	root.AddCommand(newUpCmd(g), newK8sCmd(g), newDockerCmd(g), newStatusCmd(), newLogsCmd(), newImportCmd(g), newCleanupCmd(g), newVersionCmd(), newHelperCmd())
 	return root
 }
 
@@ -131,6 +131,8 @@ type settings struct {
 	reconnectAttempts int
 	reconnectDelay    time.Duration
 	reconnectMaxDelay time.Duration
+
+	control string // the control socket: status or off (global for the run)
 }
 
 func (s *settings) register(cmd *cobra.Command) {
@@ -162,6 +164,7 @@ func (s *settings) register(cmd *cobra.Command) {
 	f.DurationVar(&s.reconnectDelay, "reconnect-delay", defaultReconnectDelay, "wait before the first reconnect attempt; it doubles after each one")
 	f.DurationVar(&s.reconnectMaxDelay, "reconnect-max-delay", defaultReconnectMaxDelay, "longest wait between reconnect attempts")
 	_ = f.MarkHidden("max-duration")
+	f.StringVar(&s.control, "control", controlStatus, "the control socket for subtun status and subtun logs: status or off")
 }
 
 // applyProfile fills settings from a profile; flags given on the command
@@ -269,6 +272,9 @@ Without a profile name, lists the profiles.`,
 				fmt.Fprintf(cmd.OutOrStdout(), "profiles in %s:\n  %s\n", path, strings.Join(f.Names(), "\n  "))
 				return nil
 			}
+			if !cmd.Flags().Changed("control") && f.Control != "" {
+				s.control = string(f.Control) // the config file's, for every run
+			}
 			if len(names) > 1 {
 				return upSeveral(cmd, g, f, path, names, args, s)
 			}
@@ -300,7 +306,7 @@ func upSeveral(cmd *cobra.Command, g *globalOpts, f *config.File, path string, n
 	var refused []string
 	cmd.Flags().Visit(func(fl *pflag.Flag) {
 		switch fl.Name {
-		case "profile", "dry-run", "max-duration", "verbose", "config":
+		case "profile", "dry-run", "max-duration", "verbose", "config", "control":
 		default:
 			refused = append(refused, "--"+fl.Name)
 		}
@@ -320,7 +326,10 @@ func upSeveral(cmd *cobra.Command, g *globalOpts, f *config.File, path string, n
 		sp.connect, sp.endpoint = profileTarget(p, &sp.s, g)
 		specs[i] = sp
 	}
-	return runMulti(cmd.Context(), cmd.OutOrStdout(), g, specs, defaults.dryRun, defaults.maxDuration)
+	if err := config.ValidControl(defaults.control); err != nil {
+		return err
+	}
+	return runMulti(cmd.Context(), cmd.OutOrStdout(), g, specs, defaults.dryRun, defaults.maxDuration, defaults.control)
 }
 
 // profileTarget returns how to connect to a profile's target, and how to
@@ -372,6 +381,7 @@ runs as you. --socks adds a SOCKS5 proxy, for example for a browser.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			t.Pod = strings.TrimPrefix(args[0], "pod/")
 			s.routes = args[1:]
+			controlFromConfig(cmd, g, &s)
 			return run(cmd.Context(), cmd.OutOrStdout(), g, s, func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
 				return k8s.Connect(ctx, t, agents, s.transport(g), log)
 			})
@@ -405,6 +415,7 @@ CIDRs are captured transparently through a utun interface (sudo asks once);
 		RunE: func(cmd *cobra.Command, args []string) error {
 			t.Container = args[0]
 			s.routes = args[1:]
+			controlFromConfig(cmd, g, &s)
 			return run(cmd.Context(), cmd.OutOrStdout(), g, s, func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
 				return docker.Connect(ctx, t, agents, s.transport(g), log)
 			})
@@ -414,6 +425,31 @@ CIDRs are captured transparently through a utun interface (sudo asks once);
 	cmd.Flags().StringVar(&t.Context, "context", "", "docker context (default: $DOCKER_CONTEXT, then the current context)")
 	s.register(cmd)
 	return cmd
+}
+
+// controlFromConfig applies the config file's top-level control: to a run
+// without a profile (subtun k8s, subtun docker) unless --control was
+// given: it is global for every run. No config file is fine; a broken one
+// only loses the setting.
+func controlFromConfig(cmd *cobra.Command, g *globalOpts, s *settings) {
+	if cmd.Flags().Changed("control") {
+		return
+	}
+	path := g.config
+	if path == "" {
+		path = config.DefaultPath()
+	}
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+	f, err := config.Load(path)
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %v (its control: setting is ignored)\n", err)
+		return
+	}
+	if f.Control != "" {
+		s.control = string(f.Control)
+	}
 }
 
 type connectFunc func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error)
@@ -510,6 +546,9 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 	if s.maxDuration < 0 {
 		return errors.New("--max-duration must be positive")
 	}
+	if err := config.ValidControl(s.control); err != nil {
+		return err
+	}
 	policy := reconnectPolicy{attempts: s.reconnectAttempts, delay: s.reconnectDelay, maxDelay: s.reconnectMaxDelay}
 	if err := policy.validate(); err != nil {
 		return err
@@ -560,7 +599,8 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		return err
 	}
 	mp := singlePlan(s, connect, policy, rp, dnsOpts, gp, warns)
-	return runEngine(ctx, g, mp, engineOpts{single: true, maxDuration: s.maxDuration, agentFile: s.agentFile, dnsListen: s.dnsListen})
+	return runEngine(ctx, g, mp, engineOpts{single: true, maxDuration: s.maxDuration, agentFile: s.agentFile, dnsListen: s.dnsListen,
+		control: s.control})
 }
 
 // singlePlan turns one profile's checked plan into the engine's plan.
@@ -623,11 +663,16 @@ func isLoopback(host string) bool {
 }
 
 func newLogger(verbose bool) *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, logOptions(verbose)))
+}
+
+// logOptions: info (debug with -v), times without the date.
+func logOptions(verbose bool) *slog.HandlerOptions {
 	level := slog.LevelInfo
 	if verbose {
 		level = slog.LevelDebug
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+	return &slog.HandlerOptions{
 		Level: level,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if len(groups) == 0 && a.Key == slog.TimeKey {
@@ -635,5 +680,5 @@ func newLogger(verbose bool) *slog.Logger {
 			}
 			return a
 		},
-	}))
+	}
 }
