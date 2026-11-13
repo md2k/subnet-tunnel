@@ -21,6 +21,11 @@ const (
 	KeyDst   = "dst"   // a destination, address:port or name:port (SOCKS)
 	KeyAddrs = "addrs" // addresses a DNS answer points at
 	KeyErr   = "err"
+
+	// AgentPrefix starts the agent's own log lines, relayed as messages
+	// ("agent: level=DEBUG msg=connected addr=10.1.2.3:443"): masked as
+	// error texts are.
+	AgentPrefix = "agent: "
 )
 
 var (
@@ -138,6 +143,10 @@ func (m *Masker) Replace(_ []string, a slog.Attr) slog.Attr {
 		}
 	case KeyErr:
 		return slog.String(a.Key, m.scrub(a.Value.String()))
+	case slog.MessageKey:
+		if s := a.Value.String(); strings.HasPrefix(s, AgentPrefix) {
+			return slog.String(a.Key, m.scrub(s))
+		}
 	}
 	return a
 }

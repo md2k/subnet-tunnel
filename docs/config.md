@@ -553,11 +553,11 @@ log:
   firewall, kill switch), `helper` (the root helper), `control`, `socks` (every connection through
   the proxy at debug), `transport` (reaching the pod or container, the agent). `-v` is debug for
   all. `--log-level info,dns=debug` is all you need to follow DNS.
-- **Masking** replaces DNS names and destinations (connections, the addresses answers point at, and
-  the ones errors repeat) by short hashes: the same name or address gives the same hash during a
+- **Masking** replaces DNS names and destinations (connections, the addresses answers point at, the
+  ones errors repeat, and the agent's own lines at debug) by short hashes: the same name or address gives the same hash during a
   run, nothing links two runs. A masked name keeps the configured domain it falls under
-  (`h3fa9c1.corp.example`), else its last two labels; a SOCKS destination given by name is masked as
-  a name. Useful to share a log; leave it off to investigate. Other lines (routes, DNS servers, the
+  (`h3fa9c1.corp.example`), else its last two labels (a name of one or two labels becomes just
+  the hash, `h3fa9c1`); a SOCKS destination given by name is masked as a name. Useful to share a log; leave it off to investigate. Other lines (routes, DNS servers, the
   root helper's) aren't masked.
 - `log` is set once for the whole run, never per profile (as `control`); flags win over the file,
   and `--log-level` replaces both `log.level` and `log.levels`.

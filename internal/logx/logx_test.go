@@ -99,6 +99,13 @@ func TestMask(t *testing.T) {
 		!strings.Contains(out, ".svc.corp.example:5432") || !strings.Contains(out, "connection refused") {
 		t.Errorf("errors and SOCKS names:\n%s", out)
 	}
+	// The agent's relayed lines carry destinations in the message.
+	b.Reset()
+	log.Info("agent: level=DEBUG msg=connected stream=3 addr=10.96.0.1:443")
+	log.Info("route added cidr=10.96.0.1/32") // not the agent's: left alone (routes aren't masked)
+	if out := b.String(); strings.Count(out, "10.96.0.1") != 1 || !strings.Contains(out, "addr=ip-") {
+		t.Errorf("agent lines:\n%s", out)
+	}
 	dnsOnly := NewMasker(true, false, nil)
 	if got := dnsOnly.Replace(nil, slog.String("dst", "db.corp.example:5432")).Value.String(); strings.Contains(got, "db.") {
 		t.Errorf("a SOCKS name with dns masking: %q", got)
