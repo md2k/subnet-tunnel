@@ -255,3 +255,40 @@ block return out quick inet6 all
 		}
 	}
 }
+
+// A table the new rules no longer mention is removed (pf would keep it):
+// the guard once the kill switch's profiles stopped, the DNS table once the
+// redirect went.
+func TestPFRemovesUnusedTables(t *testing.T) {
+	f := &fakePfctl{}
+	p := &PF{Run: f.run}
+	withGuard := dnsRules()
+	withGuard.KillSwitch = &platform.KillSwitch{TunIface: "utun10", Prefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}}
+	kills := func() []string {
+		var out []string
+		for _, c := range f.calls {
+			if strings.HasSuffix(c, "-T kill") {
+				out = append(out, c)
+			}
+		}
+		f.calls = nil
+		return out
+	}
+	for i, tc := range []struct {
+		r    platform.Rules
+		want []string
+	}{
+		{withGuard, nil},
+		{withGuard, nil},
+		{dnsRules(), []string{"-a com.apple/subtun -t subtun_guard -T kill"}},
+		{dnsRules(), nil},
+		{platform.Rules{BlockIPv6: true}, []string{"-a com.apple/subtun -t subtun_dns -T kill"}},
+	} {
+		if err := p.Apply(tc.r); err != nil {
+			t.Fatal(err)
+		}
+		if got := kills(); !slices.Equal(got, tc.want) {
+			t.Errorf("apply %d: %q, want %q", i, got, tc.want)
+		}
+	}
+}

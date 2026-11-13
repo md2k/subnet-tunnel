@@ -38,7 +38,8 @@ type PF struct {
 
 	checked bool
 	token   string
-	adopted bool // token taken over: verify pf is still enabled
+	adopted bool            // token taken over: verify pf is still enabled
+	tables  map[string]bool // the tables the rules loaded last define
 }
 
 var pfToken = regexp.MustCompile(`Token : ([0-9]+)`)
@@ -58,6 +59,15 @@ func (p *PF) Apply(r platform.Rules) error {
 	if _, err := p.run(text, "-a", Anchor, "-f", "/dev/stdin"); err != nil {
 		return err
 	}
+	// pf keeps a table the new rules no longer mention (pfctl -t ... -T
+	// test still finds it, though nothing refers to it): remove it.
+	now := map[string]bool{"subtun_dns": r.DNS != nil || len(r.DNSBlock) > 0, "subtun_guard": r.KillSwitch != nil}
+	for _, name := range []string{"subtun_dns", "subtun_guard"} {
+		if !now[name] && (p.tables[name] || p.adopted) {
+			_, _ = p.run("", "-a", Anchor, "-t", name, "-T", "kill") // gone already is fine
+		}
+	}
+	p.tables = now
 	if p.adopted {
 		// The reference came from an earlier session; if pf was disabled
 		// since (pfctl -d), it no longer holds pf enabled.
@@ -105,6 +115,7 @@ func (p *PF) Adopt(token string) { p.token, p.adopted = token, token != "" }
 
 // Flush empties subtun's anchor and releases the enable token.
 func (p *PF) Flush() error {
+	p.tables = nil
 	var errs []error
 	for _, what := range []string{"rules", "nat", "Tables"} {
 		if _, err := p.run("", "-a", Anchor, "-F", what); err != nil {

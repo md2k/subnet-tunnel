@@ -36,6 +36,9 @@ func (*Client) DeleteRoute(netip.Prefix) error { return errUnsupported }
 // ApplyFirewall is not implemented on this platform yet.
 func (*Client) ApplyFirewall(platform.Rules, *platform.Rules) error { return errUnsupported }
 
+// ClearFirewall is not implemented on this platform yet.
+func (*Client) ClearFirewall() error { return errUnsupported }
+
 // End is not implemented on this platform yet.
 func (*Client) End(bool) error { return errUnsupported }
 

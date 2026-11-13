@@ -198,7 +198,9 @@ password on the terminal).
   `delete_route` (only a route it added), `flush_dns_cache` (only while DNS is redirected),
   `apply_firewall` (rules as intent, not pf text: DNS servers unicast IPv4, ports at least 1024,
   kill switch prefixes IPv4 and not the default route; plus the rules that stay when the tunnel
-  goes away, which may only block), `done`, `end` (session: keep the blocking rules or not), and as
+  goes away, which may only block), `clear_firewall` (session: remove its own rules when none is
+  needed any more, e.g. every kill switch profile stopped), `done`, `end` (session: keep the
+  blocking rules or not), and as
   a first command only `adopt` or `cleanup` (rules an earlier session left, below). The platform
   drivers run `/sbin/ifconfig`, `/sbin/route` and `/sbin/pfctl` with fixed argument lists, never a
   shell; the pf rules are rendered by the helper from the validated intent. The utun's file
@@ -210,7 +212,7 @@ password on the terminal).
 |---|---|---|
 | sudo prompts | one, at start | one, at start |
 | Root process after setup | none: the helper exits | the helper stays up for the session |
-| Accepts after setup | nothing | firewall updates (the DNS servers or the local networks changed), route changes (several profiles, `control: full`), DNS cache flushes and `end` |
+| Accepts after setup | nothing | firewall updates (the DNS servers or the local networks changed) or their removal, route changes (several profiles, `control: full`), DNS cache flushes and `end` |
 | Changing CIDRs | restart subtun (`control: full` keeps the helper up: a session) | `subtun route add\|del` with `control: full` |
 | Cleanup | automatic: routes live on the utun, and macOS removes the utun and its routes when subtun exits, crashes or is killed | the same for routes; firewall rules as below |
 | Risk | smallest: root exists only for the seconds of setup | a root process stays reachable (only by subtun, over the private socket) for the whole session |

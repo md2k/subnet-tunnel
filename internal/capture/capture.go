@@ -83,6 +83,7 @@ type sessionHelper interface {
 	AddRoute(netip.Prefix) error
 	DeleteRoute(netip.Prefix) error
 	ApplyFirewall(platform.Rules, *platform.Rules) error
+	ClearFirewall() error
 	FlushDNSCache() error
 	End(keep bool) error
 	Close() error
@@ -305,7 +306,9 @@ func (c *Capture) applyLocked() error {
 	}
 	running, persist := rules(c.opts, guarded, guarded, c.Name, c.dns)
 	if running.Empty() {
-		return errors.New("no firewall rules left to apply")
+		// The kill switch's profiles all stopped, and nothing else needs
+		// rules: none stay (a later update applies them again).
+		return c.helper.ClearFirewall()
 	}
 	return c.helper.ApplyFirewall(running, persist)
 }
