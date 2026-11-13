@@ -14,12 +14,17 @@ import (
 // several tunnels, through which one: each domain and pattern belongs to a
 // target (the tunnel's index).
 type Matcher struct {
+	names atomic.Pointer[table]    // replaced whole by SetNames
+	off   []atomic.Bool            // per target: switched off (its tunnel gave up)
+	local atomic.Pointer[[]string] // suffixes "." leaves alone; see SetLocal
+	own   atomic.Pointer[[]string] // names never resolved through a tunnel; see SetOwn
+}
+
+// table is every target's domains and patterns.
+type table struct {
 	all      int // target of ".", -1: none
 	domains  []domain
 	patterns []pattern
-	off      []atomic.Bool            // per target: switched off (its tunnel gave up)
-	local    atomic.Pointer[[]string] // suffixes "." leaves alone; see SetLocal
-	own      atomic.Pointer[[]string] // names never resolved through a tunnel; see SetOwn
 }
 
 type domain struct {
@@ -58,7 +63,34 @@ func NewMatcher(domains, patterns []string) (*Matcher, error) {
 // target with "." (local names excepted). The same domain for two targets,
 // or "." for more than one, is an error.
 func NewMultiMatcher(sets []Names) (*Matcher, error) {
-	m := &Matcher{all: -1, off: make([]atomic.Bool, len(sets))}
+	t, err := newTable(sets)
+	if err != nil {
+		return nil, err
+	}
+	m := &Matcher{off: make([]atomic.Bool, len(sets))}
+	m.names.Store(t)
+	m.SetLocal(nil, nil)
+	m.SetOwn(nil)
+	return m, nil
+}
+
+// SetNames replaces every target's domains and patterns (changes while
+// running), by the same rules as NewMultiMatcher; on an error nothing
+// changes. Targets keep whether they are on.
+func (m *Matcher) SetNames(sets []Names) error {
+	if len(sets) != len(m.off) {
+		return fmt.Errorf("DNS names for %d tunnels, the matcher has %d", len(sets), len(m.off))
+	}
+	t, err := newTable(sets)
+	if err != nil {
+		return err
+	}
+	m.names.Store(t)
+	return nil
+}
+
+func newTable(sets []Names) (*table, error) {
+	tb := &table{all: -1}
 	owner := map[string]int{}
 	for t, set := range sets {
 		for _, d := range set.Domains {
@@ -67,10 +99,10 @@ func NewMultiMatcher(sets []Names) (*Matcher, error) {
 				return nil, err
 			}
 			if n == "." {
-				if m.all >= 0 && m.all != t {
+				if tb.all >= 0 && tb.all != t {
 					return nil, errors.New(`DNS domain ".": only one tunnel can resolve all names`)
 				}
-				m.all = t
+				tb.all = t
 				continue
 			}
 			if o, ok := owner[n]; ok {
@@ -80,19 +112,17 @@ func NewMultiMatcher(sets []Names) (*Matcher, error) {
 				continue
 			}
 			owner[n] = t
-			m.domains = append(m.domains, domain{n, t})
+			tb.domains = append(tb.domains, domain{n, t})
 		}
 		for _, p := range set.Patterns {
 			re, err := regexp.Compile(p)
 			if err != nil {
 				return nil, fmt.Errorf("DNS pattern %q: %w", p, err)
 			}
-			m.patterns = append(m.patterns, pattern{re, t})
+			tb.patterns = append(tb.patterns, pattern{re, t})
 		}
 	}
-	m.SetLocal(nil, nil)
-	m.SetOwn(nil)
-	return m, nil
+	return tb, nil
 }
 
 // SetOwn sets names that never go through a tunnel, whatever matches them:
@@ -114,7 +144,7 @@ func (m *Matcher) SetOwn(names []string) {
 func (m *Matcher) Own() []string { return *m.own.Load() }
 
 // CatchAll reports whether "." is among the domains.
-func (m *Matcher) CatchAll() bool { return m.all >= 0 }
+func (m *Matcher) CatchAll() bool { return m.names.Load().all >= 0 }
 
 // SetOn switches a target on or off. A target that is off matches nothing:
 // its names go to the next match, or the fallback.
@@ -151,7 +181,10 @@ func (m *Matcher) SetLocal(search []string, networks []netip.Prefix) bool {
 func (m *Matcher) Local() []string { return *m.local.Load() }
 
 // Empty reports whether the matcher matches nothing.
-func (m *Matcher) Empty() bool { return m.all < 0 && len(m.domains) == 0 && len(m.patterns) == 0 }
+func (m *Matcher) Empty() bool {
+	t := m.names.Load()
+	return t.all < 0 && len(t.domains) == 0 && len(t.patterns) == 0
+}
 
 // Match reports whether name (any case, trailing dot optional) goes through
 // a tunnel.
@@ -166,8 +199,9 @@ func (m *Matcher) Pick(name string) (target int, ok bool) {
 	if slices.Contains(*m.own.Load(), name) {
 		return -1, false
 	}
+	t := m.names.Load()
 	best, bestLen := -1, -1
-	for _, d := range m.domains {
+	for _, d := range t.domains {
 		if len(d.name) > bestLen && m.on(d.target) && under(name, d.name) {
 			best, bestLen = d.target, len(d.name)
 		}
@@ -175,12 +209,12 @@ func (m *Matcher) Pick(name string) (target int, ok bool) {
 	if best >= 0 {
 		return best, true
 	}
-	for _, p := range m.patterns {
+	for _, p := range t.patterns {
 		if m.on(p.target) && p.re.MatchString(name) {
 			return p.target, true
 		}
 	}
-	if m.all < 0 || !m.on(m.all) {
+	if t.all < 0 || !m.on(t.all) {
 		return -1, false
 	}
 	for _, d := range *m.local.Load() {
@@ -188,7 +222,7 @@ func (m *Matcher) Pick(name string) (target int, ok bool) {
 			return -1, false
 		}
 	}
-	return m.all, true
+	return t.all, true
 }
 
 // under reports whether name is d or below it.
