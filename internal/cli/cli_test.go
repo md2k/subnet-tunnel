@@ -466,3 +466,33 @@ func TestDNSCatchAllLeavesLocal(t *testing.T) {
 		t.Fatalf("local exception without a catch-all:\n%s", out)
 	}
 }
+
+func TestDNSUnroutedSetting(t *testing.T) {
+	fakeSystemDNS(t)
+	base := []string{"k8s", "debug", "203.0.113.0/24", "--dns-domain", "company.com", "--dry-run"}
+	for flag, want := range map[string]string{"": "warn", "fallback": "fallback", "block": "block"} {
+		args := base
+		if flag != "" {
+			args = append(append([]string{}, base...), "--dns-unrouted", flag)
+		}
+		out, err := runCLI(t, args...)
+		if err != nil {
+			t.Fatalf("%q: %v", flag, err)
+		}
+		if !strings.Contains(out, "private addresses no route covers: "+want+"\n") {
+			t.Errorf("%q: missing mode %s in\n%s", flag, want, out)
+		}
+	}
+	if _, err := runCLI(t, append(append([]string{}, base...), "--dns-unrouted", "tunnel")...); err == nil {
+		t.Error("unbuilt mode accepted")
+	}
+}
+
+func TestUnreachable(t *testing.T) {
+	f := unreachable([]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")})
+	for s, want := range map[string]bool{"10.1.2.3": false, "100.64.1.1": true, "192.168.77.5": true, "140.82.112.3": false} {
+		if got := f(netip.MustParseAddr(s)); got != want {
+			t.Errorf("unreachable(%s) = %v", s, got)
+		}
+	}
+}

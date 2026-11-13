@@ -142,6 +142,7 @@ type DNS struct {
 	Domains  []string   `json:"domains,omitempty"`  // suffixes resolved through the tunnel; "." = all
 	Patterns []string   `json:"patterns,omitempty"` // regular expressions, also through the tunnel
 	Fallback string     `json:"fallback,omitempty"` // system (default) or ip[:port] for everything else
+	Unrouted string     `json:"unrouted,omitempty"` // warn (default), fallback or block: tunnel answers outside the routes
 }
 
 // ServerList is "auto" or a list of addresses; in YAML either
@@ -241,6 +242,7 @@ func merge(d, p Profile) Profile {
 	}
 	out.DNS.Capture = pick(p.DNS.Capture, d.DNS.Capture)
 	out.DNS.Fallback = pick(p.DNS.Fallback, d.DNS.Fallback)
+	out.DNS.Unrouted = pick(p.DNS.Unrouted, d.DNS.Unrouted)
 	if len(out.DNS.Servers) == 0 {
 		out.DNS.Servers = d.DNS.Servers
 	}

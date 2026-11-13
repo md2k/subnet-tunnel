@@ -331,6 +331,12 @@ dns:
   stack hands packets for the utun's own address straight back to the system, so the answer
   reaches the app. Fallback queries to such a server still fail: they are UDP into the utun, which
   carries TCP only so far.
+- **Answers outside the routes** (`dns.unrouted`). A tunnel answer with private addresses no route
+  covers (request 006: a remote resolver answered `github.com` with `100.64.0.0/10`) is kept with a
+  warning (`warn`, default), replaced by the fallback's answer (`fallback`), or rewritten without
+  those A records (`block`). Planned: `tunnel`, routing such addresses into the utun for the session
+  (needs runtime `add_route` in the session helper), and `auto`, which would start as `tunnel` and
+  fall back to the normal path when replies don't come.
 - **DNS cache.** The helper flushes the system's DNS cache (a `DNSCache` driver; macOS:
   `dscacheutil -flushcache` and SIGHUP to mDNSResponder) whenever the DNS redirect goes on or off,
   and when it takes over or cleans up an earlier session's rules. Otherwise answers from before the

@@ -98,7 +98,7 @@ defaults:
   agent: python
   killSwitch: {mode: on, dns: allow}
   blockIPv6: true
-  dns: {domains: [company.com], fallback: 192.168.1.1}
+  dns: {domains: [company.com], fallback: 192.168.1.1, unrouted: fallback}
 profiles:
   plain:
     target: {k8s: {pod: p}}
@@ -110,7 +110,7 @@ profiles:
     agent: binary
     killSwitch: {mode: lockdown}
     blockIPv6: auto
-    dns: {domains: [cluster.local]}
+    dns: {domains: [cluster.local], unrouted: block}
   loose:
     target: {k8s: {pod: p}}
     routes: [10.0.0.0/8]
@@ -126,12 +126,14 @@ func TestDefaults(t *testing.T) {
 	}
 	plain, _ := f.Profile("plain")
 	if plain.Agent != "python" || plain.KillSwitch.Mode != "on" || plain.KillSwitch.DNS != "allow" || plain.BlockIPv6 != "true" ||
-		strings.Join(plain.Exclude, ",") != "192.168.1.0/24" || strings.Join(plain.DNS.Domains, ",") != "company.com" || plain.DNS.Fallback != "192.168.1.1" {
+		strings.Join(plain.Exclude, ",") != "192.168.1.0/24" || strings.Join(plain.DNS.Domains, ",") != "company.com" || plain.DNS.Fallback != "192.168.1.1" ||
+		plain.DNS.Unrouted != "fallback" {
 		t.Errorf("plain: %+v", plain)
 	}
 	strict, _ := f.Profile("strict")
 	if strict.Agent != "binary" || strict.KillSwitch.Mode != "lockdown" || strict.KillSwitch.DNS != "allow" || strict.BlockIPv6 != "auto" ||
-		strings.Join(strict.Exclude, ",") != "192.168.1.0/24,10.1.0.0/16" || strings.Join(strict.DNS.Domains, ",") != "company.com,cluster.local" {
+		strings.Join(strict.Exclude, ",") != "192.168.1.0/24,10.1.0.0/16" || strings.Join(strict.DNS.Domains, ",") != "company.com,cluster.local" ||
+		strict.DNS.Unrouted != "block" {
 		t.Errorf("strict: %+v", strict)
 	}
 	// YAML reads bare off/false as booleans.

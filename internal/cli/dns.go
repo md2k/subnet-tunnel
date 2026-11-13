@@ -24,6 +24,10 @@ var (
 // sudo. It returns nil options when DNS capture is off (no domains or
 // patterns, or capture: off), and notes worth a warning.
 func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
+	unrouted, err := dns.ParseUnrouted(s.dnsUnrouted)
+	if err != nil {
+		return nil, nil, err
+	}
 	if len(s.dnsDomains) == 0 && len(s.dnsPatterns) == 0 {
 		return nil, nil, nil
 	}
@@ -46,7 +50,7 @@ func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
 			m.SetLocal(search)
 		}
 	}
-	opts := &capture.DNSOptions{Match: m}
+	opts := &capture.DNSOptions{Match: m, Unrouted: unrouted}
 	var notes []string
 
 	if len(s.dnsServers) == 0 || len(s.dnsServers) == 1 && s.dnsServers[0] == "auto" {
@@ -131,6 +135,7 @@ func printDNSPlan(w io.Writer, d *capture.DNSOptions, domains, patterns []string
 	if d.Match.CatchAll() {
 		fmt.Fprintf(w, "  except names under %s (local network; list one to send it through the tunnel)\n", strings.Join(d.Match.Local(), ", "))
 	}
+	fmt.Fprintf(w, "  answers through the tunnel at private addresses no route covers: %s\n", d.Unrouted)
 	if d.Fallback != nil {
 		fmt.Fprintf(w, "  other names: %s\n", d.Fallback[0])
 	} else {
@@ -166,7 +171,7 @@ func serveDNSDev(ctx context.Context, addr string, d *capture.DNSOptions, log *s
 		}
 	}
 	fwd := dns.NewForwarder(bpc, dial, func() []netip.AddrPort { return fallback })
-	eng := &dns.Engine{Match: d.Match, Tunnel: d.Tunnel, Fallback: fwd, Log: log}
+	eng := d.Engine(fwd, log)
 	go func() { _ = eng.ServeUDP(ctx, pc) }()
 	go func() { _ = eng.ServeTCP(ctx, ln) }()
 	log.Info("DNS listener ready (development, nothing captured)", "addr", addr, "fallback", fallback)

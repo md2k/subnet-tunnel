@@ -156,6 +156,7 @@ curl http://web.team-a.svc.cluster.local:8080/      # any program, no proxy sett
 | `servers` | `--dns-servers` | `auto` | DNS servers whose queries are captured: `auto` (the system's) or IPv4 addresses |
 | `fallback` | `--dns-fallback` | `system` | resolver for everything else: `system` (the servers the query was meant for) or `IP[:port]` |
 | `capture` | `--dns-capture` | `firewall` | `firewall` (pf on macOS) or `off` |
+| `unrouted` | `--dns-unrouted` | `warn` | a name resolved through the tunnel to a private address no route covers: `warn`, `fallback` or `block` (below) |
 
 DNS capture is on as soon as `domains` or `patterns` are set, and it needs routes: it runs with the
 utun capture, and the addresses it returns are reached through your routes.
@@ -173,6 +174,20 @@ names) go to the fallback resolver: they belong to your network, and the target'
 answer them. List one to send it through the tunnel anyway: `--dns-domain . --dns-domain
 cluster.local`. Patterns win the same way. The search domains follow the system when the network
 changes (with `servers: auto`); `--dry-run` and the log list them.
+
+**Answers outside the routes** (`unrouted`). The target's resolver can answer with private addresses
+your routes don't cover: an address in its own network, or one from a VPN on that side (one answered
+`github.com` with `100.64.0.0/10` addresses). With split routes such an address goes out through your
+own network, where it means nothing, or something else entirely. Private here means 10/8, 172.16/12,
+192.168/16, 100.64/10, 169.254/16 and 198.18/15; public addresses outside the routes are reachable
+anyway, and 0.0.0.0 or 127.0.0.1 (resolvers blocking a name) are left alone. What subtun does:
+- `warn` (default): keeps the answer and logs the name and addresses, at most every 10 minutes per name;
+- `fallback`: answers from the fallback resolver instead (github's public addresses, through your
+  network);
+- `block`: drops those addresses from the answer, so programs fail at once instead of timing out.
+
+Like every setting, it works in `defaults:` and per profile. Routing such addresses into the tunnel
+automatically is planned.
 
 **Servers.** With `auto`, subtun reads the system's IPv4 DNS servers from `/etc/resolv.conf` and
 follows them when the network changes (Wi-Fi switch, VPN up or down). IPv6 DNS servers and local

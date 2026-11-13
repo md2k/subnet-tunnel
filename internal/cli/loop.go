@@ -1,6 +1,10 @@
 package cli
 
-import "net/netip"
+import (
+	"net/netip"
+
+	"github.com/md2k/subnet-tunnel/internal/dns"
+)
 
 // notInternet are the IPv4 ranges that aren't on the public internet:
 // private, shared (CGNAT), loopback, link-local, benchmarking (subtun's
@@ -55,3 +59,20 @@ func covered(r netip.Prefix, set []netip.Prefix) bool {
 const localLoopWarning = "the target seems to run on this machine (subtun connects to a local socket or loopback): " +
 	"its connections to the routed internet addresses leave through this machine and loop back into the tunnel. " +
 	"subtun cuts such loops, so those addresses won't work through this target; use one outside this machine for them"
+
+// unreachable reports addresses a DNS answer from the tunnel can't usefully
+// point at: private ones no route covers (they mean something only inside
+// the target's network, which only the routes reach).
+func unreachable(routes []netip.Prefix) func(netip.Addr) bool {
+	return func(a netip.Addr) bool {
+		if !dns.Private(a) {
+			return false
+		}
+		for _, r := range routes {
+			if r.Contains(a) {
+				return false
+			}
+		}
+		return true
+	}
+}
