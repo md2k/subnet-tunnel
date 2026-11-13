@@ -33,7 +33,7 @@ func TestMaxDurationWhileConnecting(t *testing.T) {
 		return nil, ctx.Err()
 	}
 	start := time.Now()
-	err := run(context.Background(), io.Discard, &globalOpts{}, s, connect)
+	err := run(context.Background(), io.Discard, &globalOpts{}, &tunnelSpec{s: s, connect: connect})
 	if err == nil || !strings.Contains(err.Error(), "--max-duration reached before the tunnel was up") {
 		t.Fatalf("got %v", err)
 	}

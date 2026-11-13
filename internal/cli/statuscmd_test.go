@@ -14,14 +14,14 @@ import (
 func TestWriteStatus(t *testing.T) {
 	now := time.Date(2026, 11, 13, 15, 0, 0, 0, time.UTC)
 	is := instanceStatus{Status: control.Status{
-		PID: 4242, Version: "v0.1.0", Started: now.Add(-time.Hour), Utun: "utun10", TunAddr: "198.18.249.1", Helper: "session",
+		PID: 4242, Version: "v0.1.0", Started: now.Add(-time.Hour), Control: "full", Utun: "utun10", TunAddr: "198.18.249.1", Helper: "session",
 		Tunnels: []control.Tunnel{
 			{Name: "work", State: "up", Since: now.Add(-2 * time.Minute), Target: "pod ops/toolbox, binary agent",
 				Routes: []string{"0.0.0.0/1", "128.0.0.0/1"}, RoutesOn: true, Domains: []string{"."}, KillSwitch: "on",
 				Counts:    meter.Counts{Open: 3, Total: 120, Failed: 2, ViaSOCKS: 10, Up: 1_200_000, Down: 34_000_000, UpRate: 5000, DownRate: 120_000},
 				DNSCounts: control.DNSCounts{Answered: 340, Failed: 2}},
 			{Name: "dev", State: "reconnecting", Since: now.Add(-10 * time.Second), Attempt: 2, Attempts: 10, NextTry: now.Add(3 * time.Second),
-				Routes: []string{"10.50.0.0/16"}, RoutesOn: true, LastError: "pod tools/debug: not found"},
+				Routes: []string{"10.50.0.0/16"}, RoutesOn: true, LastError: "pod tools/debug: not found", Changes: []string{"+route 10.50.0.0/16", "-dns x.example"}},
 		},
 		DNS:        &control.DNS{Servers: []string{"192.168.1.1"}, Follow: true, Fallback: []string{"the captured servers"}, Local: []string{"local", "lan"}},
 		KillSwitch: &control.KillSwitch{Mode: "on", Guarded: 98, DNS: "blocked"},
@@ -31,7 +31,8 @@ func TestWriteStatus(t *testing.T) {
 	writeStatus(&b, is, now)
 	out := b.String()
 	for _, want := range []string{
-		"subtun pid 4242, v0.1.0, up 1h0m0s; utun10 (198.18.249.1), session root helper\n",
+		"subtun pid 4242, v0.1.0, up 1h0m0s, control full; utun10 (198.18.249.1), session root helper\n",
+		"changed while running: +route 10.50.0.0/16, -dns x.example\n",
 		"  work  up for 2m0s; pod ops/toolbox, binary agent\n",
 		"routes 0.0.0.0/1, 128.0.0.0/1 (on the utun); DNS .; kill switch on\n",
 		"connections 3 open, 120 total, 2 failed (10 through SOCKS)\n",

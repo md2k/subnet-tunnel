@@ -54,10 +54,8 @@ func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
 		search, _ := systemSearch()
 		m.SetLocal(search, dnsLocals(tunAddr)())
 	}
-	opts := &capture.DNSOptions{Match: m, Tunnels: []capture.DNSTunnel{{Unrouted: unrouted}}}
-	if m.CatchAll() {
-		opts.Locals = dnsLocals(tunAddr)
-	}
+	// Locals too without ".": one may be added while running.
+	opts := &capture.DNSOptions{Match: m, Tunnels: []capture.DNSTunnel{{Unrouted: unrouted}}, Locals: dnsLocals(tunAddr)}
 	var notes []string
 
 	if len(s.dnsServers) == 0 || len(s.dnsServers) == 1 && s.dnsServers[0] == "auto" {

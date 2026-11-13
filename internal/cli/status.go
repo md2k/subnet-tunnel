@@ -18,10 +18,11 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/version"
 )
 
-// Control modes (control / --control): status answers questions; off has
-// no socket. full (changes at runtime) comes later.
+// Control modes (control / --control): status answers questions; full
+// also takes changes while running; off has no socket.
 const (
 	controlStatus = "status"
+	controlFull   = "full"
 	controlOff    = "off"
 )
 
@@ -52,6 +53,8 @@ func (s tunnelState) String() string {
 		return "reconnecting"
 	case stateGaveUp:
 		return "gave up"
+	case stateStopped:
+		return "stopped"
 	}
 	return "connecting"
 }
@@ -68,6 +71,16 @@ type engineStatus struct {
 	dnsOpts   *capture.DNSOptions // captured or development DNS; nil: none
 	devDNS    bool                // dnsOpts is the development listener
 	capt      atomic.Pointer[capture.Capture]
+	// change makes a change through the engine's loop; nil: read only.
+	change func(context.Context, control.Change) (control.Result, error)
+}
+
+// matcher is the run's DNS matcher; nil: no DNS.
+func (es *engineStatus) matcher() *dns.Matcher {
+	if es.dnsOpts == nil {
+		return nil
+	}
+	return es.dnsOpts.Match
 }
 
 func newEngineStatus(mp *multiPlan, control string) *engineStatus {
@@ -119,6 +132,8 @@ func (es *engineStatus) status() control.Status {
 			st.Helper = "session"
 		}
 	}
+	mp.smu.RLock()
+	defer mp.smu.RUnlock()
 	for i, sp := range mp.specs {
 		info := es.infos[i]
 		info.mu.Lock()
@@ -137,6 +152,7 @@ func (es *engineStatus) status() control.Status {
 		if mp.ks[i] != "off" {
 			t.KillSwitch = mp.ks[i]
 		}
+		t.Changes = runtimeChanges(sp.base, sp.s)
 		t.Counts = es.meters[i].Counts()
 		t.DNSCounts = control.DNSCounts{Answered: es.dnsCounts[i].Answered.Load(), Failed: es.dnsCounts[i].Failed.Load()}
 		st.Tunnels = append(st.Tunnels, t)
@@ -179,6 +195,8 @@ func (es *engineStatus) status() control.Status {
 
 // conns are the open connections per tunnel.
 func (es *engineStatus) conns() []control.TunnelConns {
+	es.mp.smu.RLock()
+	defer es.mp.smu.RUnlock()
 	out := make([]control.TunnelConns, len(es.mp.specs))
 	for i, sp := range es.mp.specs {
 		out[i] = control.TunnelConns{Name: sp.name, Conns: es.meters[i].Conns()}
@@ -187,8 +205,8 @@ func (es *engineStatus) conns() []control.TunnelConns {
 }
 
 // startControl opens this run's control socket; a failure only costs
-// status, so it's a warning.
-func startControl(ctx context.Context, es *engineStatus, ring *logring.Ring, log *slog.Logger) {
+// status, so it's a warning. Replaced in tests.
+var startControl = func(ctx context.Context, es *engineStatus, ring *logring.Ring, log *slog.Logger) {
 	dir, err := control.RunDir()
 	if err != nil {
 		log.Warn("no control socket, so subtun status can't see this run", "err", err)
@@ -199,7 +217,7 @@ func startControl(ctx context.Context, es *engineStatus, ring *logring.Ring, log
 		log.Warn("no control socket, so subtun status can't see this run", "err", err)
 		return
 	}
-	srv := &control.Server{Status: es.status, Conns: es.conns, Logs: ring, Log: log}
+	srv := &control.Server{Status: es.status, Conns: es.conns, Logs: ring, Change: es.change, Log: log}
 	go func() {
 		if err := srv.Serve(ctx, ln, path); err != nil {
 			log.Debug("control socket stopped", "err", err)

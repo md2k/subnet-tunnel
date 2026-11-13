@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/netip"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/md2k/subnet-tunnel/internal/capture"
 	"github.com/md2k/subnet-tunnel/internal/config"
+	"github.com/md2k/subnet-tunnel/internal/control"
 	"github.com/md2k/subnet-tunnel/internal/dns"
 	"github.com/md2k/subnet-tunnel/internal/meter"
 	"github.com/md2k/subnet-tunnel/internal/privhelper"
@@ -26,8 +26,13 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/tunnel"
 )
 
-// lookupEndpoint looks up a target's endpoint addresses; replaced in tests.
-var lookupEndpoint = transport.LookupEndpoint
+// Replaced in tests: looking up a target's endpoint addresses, whether an
+// earlier session left firewall rules, and starting the capture.
+var (
+	lookupEndpoint  = transport.LookupEndpoint
+	leftoversMarked = privhelper.LeftoversMarked
+	startCapture    = startMultiCapture
+)
 
 const (
 	// layoutRetry is how soon a failed route update is tried again; the
@@ -38,13 +43,17 @@ const (
 	firstRoundWait = 30 * time.Second
 )
 
-// tunnelSpec is one profile of a run with several.
+// tunnelSpec is one profile of a run.
 type tunnelSpec struct {
 	name     string
-	s        settings
+	s        settings       // as running: changes through the control socket included
+	base     settings       // as started (or reloaded): status shows what changed since
 	cfg      config.Profile // as configured (defaults applied): which shared values it sets
 	connect  connectFunc
 	endpoint func() (string, error) // the target's endpoint, without connecting
+	// reload reads the profile from the config file again, as the run read
+	// it at start (profile start --reload); nil: not from a config file.
+	reload func() (*tunnelSpec, error)
 }
 
 // multiPlan is the validated setup of a run with several profiles. Index i
@@ -59,6 +68,11 @@ type multiPlan struct {
 
 	mu        sync.Mutex
 	endpoints []netip.Addr // every target's: excluded from every route
+
+	// smu guards what status reads while the engine's loop changes it
+	// (control: full): specs (the slice's elements) and dnsNames. The loop
+	// writes under it, and reads without.
+	smu sync.RWMutex
 
 	tunAddr   netip.Addr
 	mtu       int
@@ -95,32 +109,14 @@ func planMulti(specs []*tunnelSpec) (*multiPlan, error) {
 	note := func(name, msg string) { mp.warns = append(mp.warns, name+": "+msg) }
 
 	// Shared settings that can't be merged: the values profiles set must agree.
-	tunAddr, err := agree(specs, "tun.address", func(p config.Profile) string { return p.Tun.Address })
-	if err != nil {
-		return nil, err
-	}
-	mtu, err := agree(specs, "tun.mtu", func(p config.Profile) string {
-		if p.Tun.MTU == 0 {
-			return ""
-		}
-		return strconv.Itoa(p.Tun.MTU)
-	})
-	if err != nil {
-		return nil, err
-	}
-	fallback, err := agree(specs, "dns.fallback", func(p config.Profile) string { return p.DNS.Fallback })
+	tunAddr, mtu, fallback, err := agreeShared(specs)
 	if err != nil {
 		return nil, err
 	}
 	socksBy := map[string]string{}
 	for i, sp := range specs {
-		if tunAddr != "" {
-			sp.s.tunAddr = tunAddr
-		}
-		if mtu != "" {
-			sp.s.mtu, _ = strconv.Atoi(mtu) // the config checked it
-		}
-		sp.s.dnsFallback = fallback
+		applyShared(sp, tunAddr, mtu, fallback)
+		sp.base = sp.s
 		if a := sp.s.socks; a != "" {
 			if other, ok := socksBy[a]; ok {
 				return nil, fmt.Errorf("profiles %s and %s both want the SOCKS address %s", other, sp.name, a)
@@ -238,13 +234,15 @@ func agree(specs []*tunnelSpec, key string, get func(config.Profile) string) (st
 // checkOverlaps refuses the same CIDR in the routes of two profiles: the
 // most specific route decides which profile carries an address, and two
 // equal ones leave it undecided.
-func checkOverlaps(mp *multiPlan) error {
+func checkOverlaps(mp *multiPlan) error { return checkOverlapsOf(mp.specs, mp.rps) }
+
+func checkOverlapsOf(specs []*tunnelSpec, rps []*routePlan) error {
 	owner := map[netip.Prefix]string{}
-	for i, rp := range mp.rps {
+	for i, rp := range rps {
 		if rp == nil {
 			continue
 		}
-		name := mp.specs[i].name
+		name := specs[i].name
 		for _, p := range rp.includes {
 			if other, ok := owner[p]; ok && other != name {
 				return fmt.Errorf("%s is routed by both profiles %s and %s: a CIDR can belong to one profile only", p, other, name)
@@ -272,10 +270,8 @@ func planMultiDNS(mp *multiPlan, participants []int) error {
 		own[i] = transport.HostName(h)
 	}
 	m.SetOwn(own)
-	opts := &capture.DNSOptions{Match: m, Tunnels: make([]capture.DNSTunnel, len(mp.specs))}
-	if m.CatchAll() {
-		opts.Locals = dnsLocals(mp.tunAddr)
-	}
+	// Locals too without ".": one may be added while running.
+	opts := &capture.DNSOptions{Match: m, Tunnels: make([]capture.DNSTunnel, len(mp.specs)), Locals: dnsLocals(mp.tunAddr)}
 	for i, sp := range mp.specs {
 		opts.Tunnels[i] = capture.DNSTunnel{Name: sp.name, Unrouted: mp.unrouted[i]}
 	}
@@ -421,15 +417,23 @@ const (
 	stateUp                              // connected
 	stateReconnecting                    // lost, trying again
 	stateGaveUp                          // out of attempts
+	stateStopped                         // stopped through the control socket (profile stop)
 )
 
 // activeSet reports which profiles' routes and names are in use: while
 // their tunnel is up or reconnecting, and always with a kill switch (the
-// traffic is refused rather than leaking).
+// traffic is refused rather than leaking). A stopped profile is as after
+// Ctrl-C: only lockdown keeps its share.
 func (mp *multiPlan) activeSet(states []tunnelState) []bool {
 	active := make([]bool, len(mp.specs))
 	for i, st := range states {
-		active[i] = mp.rps[i] != nil && (mp.ks[i] != "off" || st == stateUp || st == stateReconnecting)
+		switch {
+		case mp.rps[i] == nil:
+		case st == stateStopped:
+			active[i] = mp.ks[i] == "lockdown"
+		default:
+			active[i] = mp.ks[i] != "off" || st == stateUp || st == stateReconnecting
+		}
 	}
 	return active
 }
@@ -449,6 +453,8 @@ func (mp *multiPlan) dnsFlushNeeded(i int, prev, now tunnelState, capturing bool
 		return prev == stateReconnecting || prev == stateConnecting
 	case now == stateGaveUp:
 		return mp.ks[i] == "off" // with a kill switch its names stay (and fail)
+	case now == stateStopped:
+		return mp.ks[i] != "lockdown" // in lockdown its names stay (and fail)
 	}
 	return false
 }
@@ -706,18 +712,28 @@ func carriedBy(mp *multiPlan, i int, p netip.Prefix, carried map[netip.Prefix]in
 // tunnelEvent is a profile's tunnel changing state.
 type tunnelEvent struct {
 	i       int
+	gen     int // the runner's: events of a runner since replaced are ignored
 	state   tunnelState
 	carrier *transport.Carrier // stateUp
 	agent   string             // stateUp: the agent's version
 	err     error              // stateGaveUp, or stateConnecting after the first attempt failed
 }
 
-// runTunnel keeps one profile's tunnel connected by its reconnect policy.
-// With retryFirst the first connection too is retried (several profiles);
-// without, a failed first connection gives up at once (one profile).
-func runTunnel(ctx context.Context, i int, live *liveTunnel, policy reconnectPolicy, retryFirst bool,
+// startMode is how a tunnel's runner starts.
+type startMode int
+
+const (
+	startOnce      startMode = iota // one profile's first connection: a failure gives up at once
+	startRetry                      // a failed first connection is retried by the policy (several profiles, profile start)
+	startReconnect                  // profile reconnect: connect again now, then retry by the policy
+)
+
+// runTunnel keeps one profile's tunnel connected by its reconnect policy,
+// starting as mode says.
+func runTunnel(ctx context.Context, i int, live *liveTunnel, policy reconnectPolicy, mode startMode,
 	try func(context.Context) (*session, error), send func(tunnelEvent) bool, log *slog.Logger,
 	progress func(attempt int, next time.Time, err error)) {
+	live.gone.Store(false)
 	var cur *session
 	defer func() {
 		live.set(nil)
@@ -736,17 +752,25 @@ func runTunnel(ctx context.Context, i int, live *liveTunnel, policy reconnectPol
 		if ctx.Err() != nil {
 			return
 		}
-		if !retryFirst {
+		switch mode {
+		case startOnce:
 			gaveUp(err)
 			return
-		}
-		log.Warn("connecting failed", "err", err, "policy", policy.String())
-		if !send(tunnelEvent{i: i, state: stateConnecting, err: err}) {
-			return
-		}
-		if s, err = reconnect(ctx, policy, nil, try, log, progress); err != nil {
-			gaveUp(fmt.Errorf("could not connect; %w", err))
-			return
+		case startRetry:
+			log.Warn("connecting failed", "err", err, "policy", policy.String())
+			if !send(tunnelEvent{i: i, state: stateConnecting, err: err}) {
+				return
+			}
+			if s, err = reconnect(ctx, policy, nil, try, log, progress); err != nil {
+				gaveUp(fmt.Errorf("could not connect; %w", err))
+				return
+			}
+		case startReconnect:
+			log.Warn("reconnecting failed", "err", err, "policy", policy.String())
+			if s, err = reconnect(ctx, policy, nil, try, log, progress); err != nil {
+				gaveUp(fmt.Errorf("reconnecting failed; %w", err))
+				return
+			}
 		}
 	}
 	for {
@@ -811,17 +835,17 @@ type engineOpts struct {
 // runEngine runs a plan: one utun, helper and rule set, each profile's
 // tunnel connecting and reconnecting on its own. Every tunnel tries to
 // connect once before the capture (and sudo) starts. It ends on Ctrl-C, or
-// when every profile has given up.
+// when every profile has given up. With control: full, changes through the
+// control socket (routes, DNS names, profiles) are made by its loop.
 func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts) error {
 	log, ring := newRunLogger(g.verbose)
-	specs := mp.specs
 	ctx, done := withMaxDuration(ctx, eo.maxDuration, log)
 	defer done() // last: the watchdog covers stopping
 
-	n := len(specs)
+	n := len(mp.specs)
 	lives := make([]*liveTunnel, n)
 	logs := make([]*slog.Logger, n)
-	for i, sp := range specs {
+	for i, sp := range mp.specs {
 		lives[i], logs[i] = &liveTunnel{}, log.With("tunnel", sp.name)
 		if eo.single {
 			logs[i] = log
@@ -866,6 +890,28 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			d.Tunnels[i].Counts = es.dnsCounts[i]
 		}
 	}
+	// Changes (control: full) are made by the loop below, one at a time.
+	changes := make(chan changeRequest)
+	loopDone := make(chan struct{})
+	defer close(loopDone)
+	if eo.control == controlFull {
+		es.change = func(rctx context.Context, ch control.Change) (control.Result, error) {
+			req := changeRequest{ch: ch, reply: make(chan changeReply, 1)}
+			select {
+			case changes <- req:
+			case <-rctx.Done():
+				return control.Result{}, rctx.Err()
+			case <-loopDone:
+				return control.Result{}, errors.New("subtun is stopping")
+			}
+			select {
+			case r := <-req.reply:
+				return r.res, r.err
+			case <-rctx.Done():
+				return control.Result{}, rctx.Err()
+			}
+		}
+	}
 	sctx, stopStatus := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopStatus()
 	go es.sample(sctx)
@@ -873,32 +919,48 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		startControl(sctx, es, ring, log)
 	}
 
-	// Listen before connecting, so a busy port fails fast.
+	// Listen before connecting, so a busy port fails fast. A listener is
+	// replaced when a reloaded profile moves its SOCKS address.
 	errc := make(chan error, n)
-	var listeners []net.Listener
+	socksLns := make([]*socksListener, n)
 	defer func() {
-		for _, ln := range listeners {
-			_ = ln.Close()
+		for _, l := range socksLns {
+			l.close()
 		}
 	}()
-	for i, sp := range specs {
+	listenSOCKS := func(i int, addr string) (*socksListener, error) {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+		if host, _, _ := net.SplitHostPort(addr); !isLoopback(host) {
+			logs[i].Warn("SOCKS proxy is reachable from other hosts and has no authentication", "addr", ln.Addr())
+		}
+		lctx, lcancel := context.WithCancel(ctx)
+		srv := &socks.Server{Dialer: es.meters[i].Dialer(meter.ViaSOCKS, lives[i]), Logger: logs[i]}
+		go func() {
+			if err := srv.Serve(lctx, ln); err != nil { // nil: Ctrl-C, or replaced
+				select {
+				case errc <- err:
+				default:
+				}
+			}
+		}()
+		logs[i].Info("SOCKS5 proxy ready", "addr", ln.Addr().String())
+		return &socksListener{ln: ln, cancel: lcancel}, nil
+	}
+	for i, sp := range mp.specs {
 		if sp.s.socks == "" {
 			continue
 		}
-		ln, err := net.Listen("tcp", sp.s.socks)
+		l, err := listenSOCKS(i, sp.s.socks)
 		if err != nil {
 			if eo.single {
 				return fmt.Errorf("SOCKS listener: %w", err)
 			}
 			return fmt.Errorf("profile %s: SOCKS listener: %w", sp.name, err)
 		}
-		listeners = append(listeners, ln)
-		if host, _, _ := net.SplitHostPort(sp.s.socks); !isLoopback(host) {
-			logs[i].Warn("SOCKS proxy is reachable from other hosts and has no authentication", "addr", ln.Addr())
-		}
-		srv := &socks.Server{Dialer: es.meters[i].Dialer(meter.ViaSOCKS, lives[i]), Logger: logs[i]}
-		go func() { errc <- srv.Serve(ctx, ln) }()
-		logs[i].Info("SOCKS5 proxy ready", "addr", ln.Addr().String())
+		socksLns[i] = l
 	}
 
 	// Rules an earlier session may have left (kill switch, a killed helper)
@@ -906,7 +968,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	// them over first.
 	marker := &leftovers{mark: privhelper.MarkLeftovers, clear: privhelper.ClearLeftovers}
 	var early *privhelper.Client
-	if privhelper.LeftoversMarked() {
+	if leftoversMarked() {
 		if !mp.hasRoutes() {
 			log.Warn("firewall rules from another subtun session may be in place; if networking misbehaves and none is running, run: subtun cleanup")
 		} else {
@@ -966,43 +1028,82 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		}
 	}()
 
+	// Each profile's tunnel runs in its own goroutine (its runner). A
+	// profile stopped, started or reconnected through the control socket
+	// gets a new runner, which waits for the old one to finish; events of a
+	// runner since stopped or replaced are ignored.
 	events := make(chan tunnelEvent)
-	send := func(ev tunnelEvent) bool {
-		select {
-		case events <- ev:
-			return true
-		case <-tctx.Done():
-			return false
-		}
-	}
 	started := time.Now()
-	for i, sp := range specs {
+	runners := make([]runner, n)
+	startRunner := func(i int, mode startMode) {
+		r := &runners[i]
+		if r.cancel != nil {
+			r.cancel()
+		}
+		prev := r.done
+		r.gen++
+		gen := r.gen
+		rctx, rcancel := context.WithCancel(tctx)
+		done := make(chan struct{})
+		r.cancel, r.done = rcancel, done
+		sp, policy, live, tl := mp.specs[i], mp.policies[i], lives[i], logs[i]
 		try := func(ctx context.Context) (*session, error) {
-			carrier, err := sp.connect(ctx, agents, logs[i])
+			carrier, err := sp.connect(ctx, agents, tl)
 			if err != nil {
 				return nil, err
 			}
 			hctx, hcancel := context.WithTimeout(ctx, 30*time.Second)
-			client, err := tunnel.NewClient(hctx, carrier, tunnel.Options{ExpectSHA256: carrier.SHA256, Logger: logs[i]})
+			client, err := tunnel.NewClient(hctx, carrier, tunnel.Options{ExpectSHA256: carrier.SHA256, Logger: tl})
 			hcancel()
 			if err != nil {
 				return nil, fmt.Errorf("starting agent in %s: %w", carrier.Desc, err)
 			}
 			return &session{carrier: carrier, client: client}, nil
 		}
+		send := func(ev tunnelEvent) bool {
+			ev.gen = gen
+			select {
+			case events <- ev:
+				return true
+			case <-rctx.Done():
+				return false
+			}
+		}
+		progress := func(attempt int, next time.Time, err error) {
+			if rctx.Err() != nil {
+				return
+			}
+			es.infos[i].update(func(t *tunnelInfo) {
+				t.attempt, t.attempts, t.nextTry = attempt, policy.attempts, next
+				if err != nil {
+					t.lastErr = err.Error()
+				}
+			})
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			progress := func(attempt int, next time.Time, err error) {
-				es.infos[i].update(func(t *tunnelInfo) {
-					t.attempt, t.attempts, t.nextTry = attempt, mp.policies[i].attempts, next
-					if err != nil {
-						t.lastErr = err.Error()
-					}
-				})
+			defer close(done)
+			if prev != nil {
+				<-prev // its last act clears the live tunnel
 			}
-			runTunnel(tctx, i, lives[i], mp.policies[i], !eo.single, try, send, logs[i], progress)
+			runTunnel(rctx, i, live, policy, mode, try, send, tl, progress)
 		}()
+	}
+	stopRunner := func(i int) {
+		r := &runners[i]
+		if r.cancel != nil {
+			r.cancel()
+			r.cancel = nil
+		}
+		r.gen++
+	}
+	first := startRetry
+	if eo.single {
+		first = startOnce
+	}
+	for i := range n {
+		startRunner(i, first)
 	}
 
 	states := make([]tunnelState, n)
@@ -1043,6 +1144,218 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		}
 		return nil
 	}
+	// relayout brings the capture's routes and guard, the router and the
+	// DNS matcher in line with the plan and the tunnels' states. A failure
+	// is tried again from the loop.
+	relayout := func() error {
+		if c == nil || !c.Session() {
+			return nil // not capturing yet (it starts as the plan is then), or one-shot: routes can't change
+		}
+		err := applyLayout(c, mp, states, utun, rt)
+		es.routesOn(mp.activeSet(states), c.Routes())
+		if err != nil {
+			if err.Error() != lastErr {
+				log.Warn("updating the routes failed; trying again", "err", err, "in", retryWait)
+			} else {
+				log.Debug("updating the routes failed again", "err", err, "in", retryWait)
+			}
+			lastErr = err.Error()
+			retry = time.After(retryWait)
+			retryWait = min(2*retryWait, time.Minute)
+		} else if lastErr != "" {
+			log.Info("routes updated")
+			lastErr, retryWait, retry = "", layoutRetry, nil
+		}
+		if flushDNS {
+			flushDNS = false
+			if err := c.FlushDNSCache(); err != nil {
+				log.Warn("flushing the DNS cache failed", "err", err)
+			}
+		}
+		return err
+	}
+
+	// Changes through the control socket.
+	setState := func(i int, st tunnelState, lastErr string) {
+		states[i] = st
+		es.infos[i].update(func(t *tunnelInfo) {
+			t.state, t.since, t.attempt, t.nextTry = st, time.Now(), 0, time.Time{}
+			if lastErr != "" {
+				t.lastErr = lastErr
+			}
+		})
+	}
+	reloadPlan := func(i int) (*reloadChange, error) {
+		sp := mp.specs[i]
+		if sp.reload == nil {
+			return nil, errors.New("--reload: this run's profile doesn't come from the config file (subtun k8s, subtun docker); restart subtun instead")
+		}
+		ns, err := sp.reload()
+		if err != nil {
+			return nil, err
+		}
+		host, err := ns.endpoint()
+		if err != nil {
+			return nil, err
+		}
+		var addrs []netip.Addr
+		var warns []string
+		if host != mp.hosts[i] { // a new target: keep its endpoint out of the routes before it connects
+			lctx, lcancel := context.WithTimeout(ctx, 3*time.Second)
+			addrs, err = lookupEndpoint(lctx, host)
+			lcancel()
+			if err != nil {
+				warns = append(warns, fmt.Sprintf("looking up %s failed (%v); if its address lies inside the routes, its connection goes into a tunnel and can't connect", transport.HostName(host), err))
+			}
+		}
+		rl, err := mp.planReload(i, ns, host, addrs, es.matcher())
+		if err != nil {
+			return nil, err
+		}
+		rl.warns = append(warns, rl.warns...)
+		return rl, nil
+	}
+	applyReload := func(rl *reloadChange) error {
+		i := rl.i
+		if was, now := mp.specs[i].s.socks, rl.spec.s.socks; was != now {
+			var l *socksListener
+			if now != "" {
+				var err error
+				if l, err = listenSOCKS(i, now); err != nil {
+					return fmt.Errorf("SOCKS listener: %w", err)
+				}
+			}
+			socksLns[i].close()
+			socksLns[i] = l
+		}
+		return mp.applyReload(rl, es.matcher())
+	}
+	handleChange := func(req control.Change) (control.Result, error) {
+		i, err := mp.profileIndex(req.Profile)
+		if err != nil {
+			return control.Result{}, err
+		}
+		sp := mp.specs[i]
+		res := control.Result{Profile: sp.name, DryRun: req.DryRun}
+		plan := req.Kind != control.KindProfile || req.Op == "start" && req.Reload
+		if plan && starting != nil && !req.DryRun {
+			return res, errors.New("the capture is starting (sudo may be asking for a password in subtun's terminal); try again once it runs")
+		}
+		switch req.Kind {
+		case control.KindRoute:
+			rc, err := mp.planRouteChange(i, req)
+			if err != nil {
+				return res, err
+			}
+			res.Changed, res.Message, res.Warnings = rc.changed, rc.message, rc.warns
+			if req.DryRun || !rc.changed {
+				return res, nil
+			}
+			mp.applyRouteChange(rc)
+			logs[i].Info("control: "+rc.logMsg, "profile", sp.name, "cidrs", rc.cidrs)
+		case control.KindDNS:
+			m := es.matcher()
+			dc, err := mp.planDNSChange(i, req, m)
+			if err != nil {
+				return res, err
+			}
+			res.Changed, res.Message, res.Warnings = dc.changed, dc.message, dc.warns
+			if req.DryRun || !dc.changed {
+				return res, nil
+			}
+			if err := mp.applyDNSChange(dc, m); err != nil {
+				return res, err
+			}
+			flushDNS = true // answers cached for these names went elsewhere
+			logs[i].Info("control: "+dc.logMsg, "profile", sp.name, "domains", dc.domains, "patterns", len(dc.patterns))
+		case control.KindProfile:
+			label, arg := profileWords(sp.name)
+			switch req.Op {
+			case "stop":
+				if states[i] == stateStopped {
+					res.Message = "already stopped"
+					return res, nil
+				}
+				res.Changed, res.Message = true, "stopped: "+mp.stopEffect(i)
+				if req.DryRun {
+					res.Message = "would stop it: " + mp.stopEffect(i)
+					return res, nil
+				}
+				stopRunner(i)
+				lives[i].stopped.Store(true)
+				prev := states[i]
+				setState(i, stateStopped, "")
+				tried[i] = true
+				flushDNS = flushDNS || mp.dnsFlushNeeded(i, prev, stateStopped, c != nil)
+				logs[i].Info("control: stopped", "profile", sp.name)
+			case "start":
+				if st := states[i]; st != stateStopped && st != stateGaveUp {
+					return res, fmt.Errorf("%s is %s; to connect it again now: subtun profile reconnect%s", label, st, arg)
+				}
+				var rl *reloadChange
+				if req.Reload {
+					if rl, err = reloadPlan(i); err != nil {
+						return res, err
+					}
+					res.Warnings = rl.warns
+				}
+				res.Changed, res.Message = true, "starting: connecting to its target"
+				if rl != nil {
+					res.Message = "reloaded from the config file and starting: " + rl.summary
+				}
+				if req.DryRun {
+					res.Message = "would start it"
+					if rl != nil {
+						res.Message = "would reload it from the config file and start it: " + rl.summary
+					}
+					return res, nil
+				}
+				if rl != nil {
+					if err := applyReload(rl); err != nil {
+						return res, err
+					}
+					flushDNS = true // its names may have changed
+					if _, err := mp.addEndpoints(rl.addrs); err != nil {
+						res.Warnings = append(res.Warnings, fmt.Sprintf("excluding its endpoint from the routes failed: %v", err))
+					}
+				}
+				lives[i].stopped.Store(false)
+				setState(i, stateConnecting, "")
+				startRunner(i, startRetry)
+				logs[i].Info("control: starting", "profile", sp.name, "reloaded", rl != nil)
+			case "reconnect":
+				if st := states[i]; st == stateStopped || st == stateGaveUp {
+					return res, fmt.Errorf("%s is %s; start it with: subtun profile start%s", label, st, arg)
+				}
+				res.Changed, res.Message = true, "reconnecting now"
+				if req.DryRun {
+					res.Message = "would reconnect it now"
+					return res, nil
+				}
+				startRunner(i, startReconnect)
+				if states[i] == stateUp {
+					setState(i, stateReconnecting, "reconnect asked for")
+					lost[i] = time.Now()
+				}
+				logs[i].Info("control: reconnecting", "profile", sp.name)
+			default:
+				return res, fmt.Errorf("profile %q: use stop, start or reconnect", req.Op)
+			}
+		default:
+			return res, fmt.Errorf("unknown change %q", req.Kind)
+		}
+		if err := relayout(); err != nil {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("applying it failed, subtun tries again: %v", err))
+		}
+		if req.Kind != control.KindProfile && !mp.activeSet(states)[i] {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("it is %s: its routes and names are used once its tunnel is up", states[i]))
+		}
+		if plan && c == nil && mp.hasRoutes() {
+			res.Warnings = append(res.Warnings, "the capture hasn't started yet (connecting, or sudo is asking): it starts with this")
+		}
+		return res, nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -1059,6 +1372,10 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			case <-time.After(300 * time.Millisecond):
 			}
 			return errors.New("the root helper exited unexpectedly; its firewall rules may still be in place: the next subtun run takes them over, or remove them with: subtun cleanup")
+		case req := <-changes:
+			res, err := handleChange(req.ch)
+			req.reply <- changeReply{res, err}
+			continue
 		case <-retry:
 			retry = nil
 		case <-firstRound:
@@ -1076,6 +1393,9 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			es.routesOn(mp.activeSet(states), c.Routes())
 			// Below: catch up with what changed while it started.
 		case ev := <-events:
+			if ev.gen != runners[ev.i].gen {
+				continue // a runner since stopped or replaced
+			}
 			tl := logs[ev.i]
 			prev := states[ev.i]
 			states[ev.i], tried[ev.i] = ev.state, true
@@ -1147,12 +1467,9 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 				return errors.New("every profile gave up")
 			}
 		}
-		if !mp.hasRoutes() {
-			continue
-		}
 		if c == nil {
-			if starting != nil || !roundOver && slices.Contains(tried, false) {
-				continue // starting, or the first round isn't over
+			if !mp.hasRoutes() || starting != nil || !roundOver && slices.Contains(tried, false) {
+				continue // nothing to capture, starting, or the first round isn't over
 			}
 			// Off this loop: sudo may ask for a while, and tunnels must
 			// keep reporting (and reconnecting) meanwhile.
@@ -1166,36 +1483,14 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 					}
 				}
 			}
+			session := !eo.single || eo.control == controlFull // routes can change while running
 			go func() {
-				c, err := startMultiCapture(ctx, mp, active, lives, utun, rt, e, marker, !eo.single, onRefuse, log)
+				c, err := startCapture(ctx, mp, active, lives, utun, rt, e, marker, session, onRefuse, log)
 				starting <- startResult{c, err}
 			}()
 			continue
 		}
-		if !c.Session() {
-			continue // one-shot helper: routes can't change (warned above)
-		}
-		err := applyLayout(c, mp, states, utun, rt)
-		es.routesOn(mp.activeSet(states), c.Routes())
-		if err != nil {
-			if err.Error() != lastErr {
-				log.Warn("updating the routes failed; trying again", "err", err, "in", retryWait)
-			} else {
-				log.Debug("updating the routes failed again", "err", err, "in", retryWait)
-			}
-			lastErr = err.Error()
-			retry = time.After(retryWait)
-			retryWait = min(2*retryWait, time.Minute)
-		} else if lastErr != "" {
-			log.Info("routes updated")
-			lastErr, retryWait, retry = "", layoutRetry, nil
-		}
-		if flushDNS {
-			flushDNS = false
-			if err := c.FlushDNSCache(); err != nil {
-				log.Warn("flushing the DNS cache failed", "err", err)
-			}
-		}
+		_ = relayout()
 	}
 }
 

@@ -60,7 +60,8 @@ func newRoot() *cobra.Command {
 	}
 	root.PersistentFlags().BoolVarP(&g.verbose, "verbose", "v", false, "debug logging")
 	root.PersistentFlags().StringVar(&g.config, "config", "", "config file (default: $SUBTUN_CONFIG or ~/.config/subtun/config.yaml)")
-	root.AddCommand(newUpCmd(g), newK8sCmd(g), newDockerCmd(g), newStatusCmd(), newLogsCmd(), newImportCmd(g), newCleanupCmd(g), newVersionCmd(), newHelperCmd())
+	root.AddCommand(newUpCmd(g), newK8sCmd(g), newDockerCmd(g), newStatusCmd(), newLogsCmd(), newRouteCmd(), newDNSCmd(), newProfileCmd(),
+		newImportCmd(g), newCleanupCmd(g), newVersionCmd(), newHelperCmd())
 	return root
 }
 
@@ -132,7 +133,7 @@ type settings struct {
 	reconnectDelay    time.Duration
 	reconnectMaxDelay time.Duration
 
-	control string // the control socket: status or off (global for the run)
+	control string // the control socket: status, full or off (global for the run)
 }
 
 func (s *settings) register(cmd *cobra.Command) {
@@ -164,7 +165,7 @@ func (s *settings) register(cmd *cobra.Command) {
 	f.DurationVar(&s.reconnectDelay, "reconnect-delay", defaultReconnectDelay, "wait before the first reconnect attempt; it doubles after each one")
 	f.DurationVar(&s.reconnectMaxDelay, "reconnect-max-delay", defaultReconnectMaxDelay, "longest wait between reconnect attempts")
 	_ = f.MarkHidden("max-duration")
-	f.StringVar(&s.control, "control", controlStatus, "the control socket for subtun status and subtun logs: status or off")
+	f.StringVar(&s.control, "control", controlStatus, "the control socket: status (subtun status and subtun logs), full (also changes while running: subtun route, dns, profile) or off")
 }
 
 // applyProfile fills settings from a profile; flags given on the command
@@ -278,18 +279,15 @@ Without a profile name, lists the profiles.`,
 			if len(names) > 1 {
 				return upSeveral(cmd, g, f, path, names, args, s)
 			}
-			p, err := f.Profile(names[0])
-			if err != nil {
-				return fmt.Errorf("%s: %w", path, err)
-			}
+			var extra []string
 			if len(args) > 0 {
-				s.routes = args[1:]
-			} else {
-				s.routes = nil
+				extra = args[1:]
 			}
-			s.applyProfile(p, cmd.Flags())
-			connect, _ := profileTarget(p, &s, g)
-			return run(cmd.Context(), cmd.OutOrStdout(), g, s, connect)
+			sp, err := profileSpec(f, path, names[0], s, extra, cmd.Flags(), g)
+			if err != nil {
+				return err
+			}
+			return run(cmd.Context(), cmd.OutOrStdout(), g, sp)
 		},
 	}
 	s.register(cmd)
@@ -316,20 +314,40 @@ func upSeveral(cmd *cobra.Command, g *globalOpts, f *config.File, path string, n
 	}
 	specs := make([]*tunnelSpec, len(names))
 	for i, name := range names {
-		p, err := f.Profile(name)
+		sp, err := profileSpec(f, path, name, defaults, nil, cmd.Flags(), g)
 		if err != nil {
-			return fmt.Errorf("%s: %w", path, err)
+			return err
 		}
-		sp := &tunnelSpec{name: name, s: defaults, cfg: p}
-		sp.s.routes = nil
-		sp.s.applyProfile(p, cmd.Flags())
-		sp.connect, sp.endpoint = profileTarget(p, &sp.s, g)
 		specs[i] = sp
 	}
 	if err := config.ValidControl(defaults.control); err != nil {
 		return err
 	}
 	return runMulti(cmd.Context(), cmd.OutOrStdout(), g, specs, defaults.dryRun, defaults.maxDuration, defaults.control)
+}
+
+// profileSpec builds a profile of the config file at path: base settings
+// (the flags' defaults and values), then the profile's, flags given on the
+// command line winning; extra routes are added to the profile's. Its
+// reload reads the file again and builds it the same way.
+func profileSpec(f *config.File, path, name string, base settings, extra []string, flags *pflag.FlagSet, g *globalOpts) (*tunnelSpec, error) {
+	p, err := f.Profile(name)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	sp := &tunnelSpec{name: name, s: base, cfg: p}
+	sp.s.routes = slices.Clone(extra)
+	sp.s.applyProfile(p, flags)
+	sp.base = sp.s
+	sp.connect, sp.endpoint = profileTarget(p, &sp.s, g)
+	sp.reload = func() (*tunnelSpec, error) {
+		f, err := config.Load(path)
+		if err != nil {
+			return nil, err
+		}
+		return profileSpec(f, path, name, base, extra, flags, g)
+	}
+	return sp, nil
 }
 
 // profileTarget returns how to connect to a profile's target, and how to
@@ -382,9 +400,9 @@ runs as you. --socks adds a SOCKS5 proxy, for example for a browser.`,
 			t.Pod = strings.TrimPrefix(args[0], "pod/")
 			s.routes = args[1:]
 			controlFromConfig(cmd, g, &s)
-			return run(cmd.Context(), cmd.OutOrStdout(), g, s, func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
+			return run(cmd.Context(), cmd.OutOrStdout(), g, &tunnelSpec{s: s, connect: func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
 				return k8s.Connect(ctx, t, agents, s.transport(g), log)
-			})
+			}})
 		},
 	}
 	cmd.Flags().StringVarP(&t.Namespace, "namespace", "n", "", "namespace (default: from kubeconfig)")
@@ -416,9 +434,9 @@ CIDRs are captured transparently through a utun interface (sudo asks once);
 			t.Container = args[0]
 			s.routes = args[1:]
 			controlFromConfig(cmd, g, &s)
-			return run(cmd.Context(), cmd.OutOrStdout(), g, s, func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
+			return run(cmd.Context(), cmd.OutOrStdout(), g, &tunnelSpec{s: s, connect: func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
 				return docker.Connect(ctx, t, agents, s.transport(g), log)
-			})
+			}})
 		},
 	}
 	cmd.Flags().StringVarP(&t.Host, "host", "H", "", "Docker daemon address (default: $DOCKER_HOST, then the docker context)")
@@ -539,7 +557,8 @@ func printPlan(w io.Writer, rp *routePlan, warns []string) {
 // run runs one profile (subtun up NAME, subtun k8s, subtun docker): it plans
 // and checks everything before connecting, prints the plan with --dry-run,
 // and otherwise runs it on the same engine as several profiles.
-func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect connectFunc) error {
+func run(ctx context.Context, out io.Writer, g *globalOpts, sp *tunnelSpec) error {
+	s := sp.s
 	if s.socks == "" && len(s.routes) == 0 && s.dnsListen == "" {
 		return errors.New("nothing to do: give CIDRs to capture, --socks ADDR, or both")
 	}
@@ -598,15 +617,17 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 	if err != nil {
 		return err
 	}
-	mp := singlePlan(s, connect, policy, rp, dnsOpts, gp, warns)
+	mp := singlePlan(sp, policy, rp, dnsOpts, gp, warns)
 	return runEngine(ctx, g, mp, engineOpts{single: true, maxDuration: s.maxDuration, agentFile: s.agentFile, dnsListen: s.dnsListen,
 		control: s.control})
 }
 
 // singlePlan turns one profile's checked plan into the engine's plan.
-func singlePlan(s settings, connect connectFunc, policy reconnectPolicy, rp *routePlan, dnsOpts *capture.DNSOptions, gp *guardPlan, warns []string) *multiPlan {
+func singlePlan(sp *tunnelSpec, policy reconnectPolicy, rp *routePlan, dnsOpts *capture.DNSOptions, gp *guardPlan, warns []string) *multiPlan {
+	s := sp.s
+	sp.base = s
 	mp := &multiPlan{
-		specs:    []*tunnelSpec{{s: s, connect: connect}},
+		specs:    []*tunnelSpec{sp},
 		policies: []reconnectPolicy{policy},
 		ks:       []string{"off"},
 		rps:      []*routePlan{rp},
