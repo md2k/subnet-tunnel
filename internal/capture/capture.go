@@ -222,6 +222,15 @@ func (c *Capture) Update(prefixes []netip.Prefix, g Guard) error {
 	return errors.Join(errs...)
 }
 
+// AddDNSTunnel adds a tunnel to the running DNS engine (a profile added
+// while running), as the next target; before the matcher's names point at
+// it. Without DNS capture it does nothing.
+func (c *Capture) AddDNSTunnel(t DNSTunnel) {
+	if c.dns != nil {
+		c.dns.eng.AddTunnel(t.engineTunnel(c.dns.log))
+	}
+}
+
 // FlushDNSCache has the system forget cached DNS answers: some came from a
 // tunnel that is gone, or are failures from while it was down. Only with
 // DNS capture (a session); a no-op once stopping.

@@ -14,10 +14,10 @@ import (
 // several tunnels, through which one: each domain and pattern belongs to a
 // target (the tunnel's index).
 type Matcher struct {
-	names atomic.Pointer[table]    // replaced whole by SetNames
-	off   []atomic.Bool            // per target: switched off (its tunnel gave up)
-	local atomic.Pointer[[]string] // suffixes "." leaves alone; see SetLocal
-	own   atomic.Pointer[[]string] // names never resolved through a tunnel; see SetOwn
+	names atomic.Pointer[table]          // replaced whole by SetNames
+	off   atomic.Pointer[[]*atomic.Bool] // per target: switched off (its tunnel gave up); grows with SetNames
+	local atomic.Pointer[[]string]       // suffixes "." leaves alone; see SetLocal
+	own   atomic.Pointer[[]string]       // names never resolved through a tunnel; see SetOwn
 }
 
 // table is every target's domains and patterns.
@@ -67,7 +67,12 @@ func NewMultiMatcher(sets []Names) (*Matcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &Matcher{off: make([]atomic.Bool, len(sets))}
+	m := &Matcher{}
+	off := make([]*atomic.Bool, len(sets))
+	for i := range off {
+		off[i] = &atomic.Bool{}
+	}
+	m.off.Store(&off)
 	m.names.Store(t)
 	m.SetLocal(nil, nil)
 	m.SetOwn(nil)
@@ -76,14 +81,26 @@ func NewMultiMatcher(sets []Names) (*Matcher, error) {
 
 // SetNames replaces every target's domains and patterns (changes while
 // running), by the same rules as NewMultiMatcher; on an error nothing
-// changes. Targets keep whether they are on.
+// changes. Targets keep whether they are on. More sets than targets add
+// targets (a tunnel added while running), switched off until SetOn; fewer
+// is an error.
 func (m *Matcher) SetNames(sets []Names) error {
-	if len(sets) != len(m.off) {
-		return fmt.Errorf("DNS names for %d tunnels, the matcher has %d", len(sets), len(m.off))
+	off := *m.off.Load()
+	if len(sets) < len(off) {
+		return fmt.Errorf("DNS names for %d tunnels, the matcher has %d", len(sets), len(off))
 	}
 	t, err := newTable(sets)
 	if err != nil {
 		return err
+	}
+	if len(sets) > len(off) {
+		grown := slices.Clone(off)
+		for len(grown) < len(sets) {
+			b := &atomic.Bool{}
+			b.Store(true)
+			grown = append(grown, b)
+		}
+		m.off.Store(&grown) // before the names: Pick never sees a target without its flag
 	}
 	m.names.Store(t)
 	return nil
@@ -148,9 +165,9 @@ func (m *Matcher) CatchAll() bool { return m.names.Load().all >= 0 }
 
 // SetOn switches a target on or off. A target that is off matches nothing:
 // its names go to the next match, or the fallback.
-func (m *Matcher) SetOn(target int, on bool) { m.off[target].Store(!on) }
+func (m *Matcher) SetOn(target int, on bool) { (*m.off.Load())[target].Store(!on) }
 
-func (m *Matcher) on(target int) bool { return !m.off[target].Load() }
+func (m *Matcher) on(target int) bool { return !(*m.off.Load())[target].Load() }
 
 // SetLocal sets the system's search domains and the machine's networks.
 // With ".", names under "local" (multicast DNS), under the search domains

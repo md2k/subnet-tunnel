@@ -316,3 +316,24 @@ func TestSetNames(t *testing.T) {
 		t.Error("a refused change changed the names")
 	}
 }
+
+// A tunnel added while running: a new target, off until switched on.
+func TestSetNamesGrows(t *testing.T) {
+	m, err := NewMultiMatcher([]Names{{Domains: []string{"a.example"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SetNames([]Names{{Domains: []string{"a.example"}}, {Domains: []string{"b.example"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Pick("x.b.example"); ok {
+		t.Error("a new target is on before SetOn")
+	}
+	m.SetOn(1, true)
+	if tg, ok := m.Pick("x.b.example"); !ok || tg != 1 {
+		t.Errorf("after SetOn: %d %v", tg, ok)
+	}
+	if tg, _ := m.Pick("x.a.example"); tg != 0 {
+		t.Errorf("target 0: %d", tg)
+	}
+}
