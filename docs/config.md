@@ -15,7 +15,7 @@ defaults:                          # optional: any profile key except target, fo
   killSwitch: {mode: on}
 
 profiles:
-  dev-cluster:                     # lowercase letters, digits, '.', '_', '-'
+  dev-cluster:                     # a lowercase letter or digit, then also '.', '_', '-'
     target:                        # exactly one of k8s / docker
       k8s:
         kubeconfig: ~/.kube/dev    # default: $KUBECONFIG or ~/.kube/config
@@ -39,6 +39,8 @@ profiles:
       patterns: ['^db-[0-9]+\.prod\.']
       servers: auto                # default
       fallback: system             # default
+      capture: firewall            # default; off disables DNS capture
+      unrouted: warn               # default: tunnel answers outside the routes, see below
     killSwitch:                    # see below
       mode: off                    # off (default) | on | lockdown
       dns: block                   # block (default) | allow
@@ -57,23 +59,97 @@ A profile needs `routes`, `socks` or both (its own or from `defaults`).
 
 **Defaults.** Settings under `defaults` apply to every profile. A profile's own value wins; lists
 (`routes`, `exclude`, `dns.domains`, `dns.patterns`) add up, so a home-LAN exclude in `defaults`
-applies everywhere. YAML treats bare `on`, `off`, `yes` and `no` as booleans; subtun reads them as
-the words you meant (`mode: off` works).
+applies everywhere. Settings that need routes (DNS capture, the kill switch, IPv6 blocking) are
+ignored, with a warning, in a profile without routes, so a kill switch in `defaults` doesn't break
+a SOCKS-only profile. YAML treats bare `on`, `off`, `yes` and `no` as booleans; subtun reads them as
+the words you meant (`mode: off`, `capture: off` work).
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `subtun k8s POD [CIDR...]` | tunnel through a pod (`-n`, `-c`, `--context`, `--kubeconfig`) |
+| `subtun docker CONTAINER [CIDR...]` | tunnel through a container (`-H`, `--context`) |
+| `subtun up [PROFILE] [CIDR...]` | run a profile from the config file; without a name, list them |
+| `subtun cleanup` | remove firewall rules an earlier session left (a kill switch's blocks), without starting one |
+| `subtun import sshuttle FILE` | turn an sshuttle options file into a profile ([below](#importing-from-sshuttle)) |
+| `subtun version` | print the version |
+
+Global flags: `--config FILE`, `-v` (debug logging, in subtun and in the agent). Hidden flags for
+testing (`--max-duration`, `--dns-listen`, `--agent-file`) are described in
+[Development](development.md).
 
 ## Command line and profiles together
 
 ```sh
 subtun up                                  # list profiles
 subtun up dev-cluster                      # run it
-subtun up dev-cluster --dry-run            # show the planned routes and exit
+subtun up dev-cluster --dry-run            # show the planned routes, DNS and kill switch, and exit
 subtun up dev-cluster 10.50.0.0/16 -x 10.50.1.0/24 --socks 127.0.0.1:1082
 ```
 
 Flags given on the command line override the profile's (and defaults') values (`--socks`,
 `--agent`, `--agent-dir`, `--tun-addr`, `--mtu`, `--dns-capture`, `--dns-servers`, `--dns-fallback`,
-`--kill-switch`, `--kill-switch-dns`, `--block-ipv6`). CIDRs, `-x/--exclude`, `--dns-domain` and
-`--dns-pattern` given on the command line are **added** to the profile's. Without a config file,
-the same flags work on `subtun k8s` and `subtun docker`.
+`--dns-unrouted`, `--kill-switch`, `--kill-switch-dns`, `--block-ipv6`). CIDRs, `-x/--exclude`,
+`--dns-domain` and `--dns-pattern` given on the command line are **added** to the profile's. Without
+a config file, the same flags work on `subtun k8s` and `subtun docker`.
+
+## Examples
+
+A development cluster: its pod and service ranges, and its names, from the laptop.
+
+```yaml
+profiles:
+  dev:
+    target: {k8s: {context: dev, namespace: tools, pod: debug}}
+    routes: [10.96.0.0/12, 10.244.0.0/16]
+    dns: {domains: [cluster.local]}
+```
+
+Private endpoints behind a VPC: a few networks, the names of the services there, and names matched
+by pattern. Everything else resolves and travels as usual.
+
+```yaml
+profiles:
+  work:
+    target: {k8s: {context: prod-eu, namespace: ops, pod: toolbox}}
+    routes: [10.20.0.0/16, 10.30.0.0/16]
+    exclude: [10.20.5.0/24]
+    dns:
+      domains: [internal.example.com, privatelink.blob.core.windows.net]
+      patterns: ['^db-[0-9]+\.prod\.example\.org$']
+      unrouted: fallback
+```
+
+Everything through a remote pod, with a kill switch: traffic for the internet leaves from the pod's
+network, and nothing leaks if the tunnel goes away. The pod must run outside this machine (see
+[Full tunnel](#full-tunnel)).
+
+```yaml
+profiles:
+  everything:
+    target: {k8s: {context: remote, namespace: tools, pod: egress}}
+    routes: [0.0.0.0/1, 128.0.0.0/1]
+    dns: {domains: [".", cluster.local]}
+    killSwitch: {mode: on}
+```
+
+Only a SOCKS proxy, no root needed: point a browser or `curl --socks5-hostname` at it.
+
+```yaml
+profiles:
+  browse:
+    target: {docker: {container: app}}
+    socks: 127.0.0.1:1080
+```
+
+The same from the command line:
+
+```sh
+subtun k8s -n tools debug 10.96.0.0/12 10.244.0.0/16 --dns-domain cluster.local
+subtun k8s --context remote -n tools egress 0.0.0.0/1 128.0.0.0/1 --dns-domain . --dns-domain cluster.local --kill-switch on
+subtun docker app --socks 127.0.0.1:1080
+```
 
 ## Routes and excludes
 
@@ -100,12 +176,23 @@ Route `0.0.0.0/1` and `128.0.0.0/1` to send everything through the tunnel. The t
 specific than the real default route, which stays untouched, so when subtun exits or crashes the
 machine is back to normal. Your LAN, multicast and link-local stay local (see the automatic excludes
 under [Safety checks](#safety-checks)), and subtun's own connection to the API server or Docker
-daemon is excluded automatically. The target must run outside this machine: a pod in Docker Desktop,
-kind or minikube reaches the internet through this machine, so its traffic would loop back into the
-tunnel (subtun warns, and cuts such loops). UDP and ICMP don't go through the tunnel yet, so DNS needs
-`--dns-domain .`, unless your DNS server is on the LAN. Add `--dns-domain .` (or
-`dns.domains: ["."]`) to resolve every name through the tunnel as well. subtun doesn't carry IPv6
-yet, so in a full tunnel it blocks outgoing IPv6 (see [IPv6](#ipv6)); apps fall back to IPv4.
+daemon is excluded automatically.
+
+```sh
+subtun k8s --context remote -n tools egress 0.0.0.0/1 128.0.0.0/1 --dns-domain . --dns-domain cluster.local
+```
+
+- **The target must run outside this machine.** A pod in Docker Desktop, kind or minikube reaches the
+  internet through this machine, so its traffic would loop back into the tunnel. subtun warns at
+  start and cuts such loops (see [Routing loops](#routing-loops)), but those addresses won't work.
+- **DNS:** UDP and ICMP don't go through the tunnel yet, so a DNS server beyond your LAN isn't
+  reachable through it. Add `--dns-domain .` (or `dns.domains: ["."]`) to resolve every name through
+  the tunnel; list the cluster's own domain next to it when it is `cluster.local`, since `.` leaves
+  `.local` names alone ([DNS](#dns)).
+- **IPv6:** subtun doesn't carry it yet, so in a full tunnel it blocks outgoing IPv6 (see
+  [IPv6](#ipv6)); apps fall back to IPv4.
+- **Testing it:** a full tunnel also carries your remote shell or screen-sharing session. See
+  [Development](development.md#full-tunnel-and-kill-switch-safely) for a way to try it safely.
 
 ## Safety checks
 
@@ -128,6 +215,19 @@ Excluded automatically, and listed by `--dry-run`:
   choice: it stays, with the overlap warning;
 - when the tunnel is up, the address subtun itself connects to (the Kubernetes API server, a remote
   Docker daemon).
+
+### Routing loops
+
+A target on this machine (a pod in Docker Desktop, kind or minikube, a local container) reaches the
+internet through this machine. Route internet addresses through it, and its connections come back
+into the tunnel, to the target again, without end. subtun guards against that:
+- at start it warns when its own connection goes to this machine (a local socket or loopback) and
+  the routes include internet addresses (`the target seems to run on this machine ...`);
+- while running it allows at most 64 connections being opened and 256 open at once to one
+  destination (address and port). A destination that hits either is refused for 10 s, with
+  `refusing connections to this destination for a while: too many at once, likely a routing loop`
+  in the log, once a minute per destination. A loop is cut within a second; normal programs stay far
+  below both limits.
 
 ## subtun's own addresses
 
@@ -209,11 +309,11 @@ starts, so earlier answers don't bypass it, and when it ends, so answers obtaine
 - One DNS-capturing subtun at a time: a second one refuses to start, since it would take over the
   first one's rules.
 - If the fallback resolver is inside one of your routes, unmatched names fail: their UDP queries go
-  into the utun, which carries TCP only so far. `--dry-run` warns; exclude the resolver's address or
-  match every name with `.`.
+  into the utun, which carries TCP only so far. `--dry-run` warns; exclude the resolver's address, or
+  match every name with `.` (names `.` leaves local still use the fallback).
 - If the helper itself is killed (`kill -9`), its rules stay and DNS for the captured servers stops
-  working once subtun exits; subtun says so. The next subtun run takes them over by itself;
-  `subtun cleanup` removes them without starting a session.
+  working once subtun exits; subtun says so. The next subtun run with routes takes them over by
+  itself (a SOCKS-only run only warns); `subtun cleanup` removes them without starting a session.
 - macOS only for now; `override` and `supplemental` capture modes (via the system resolver
   configuration instead of the firewall) are planned.
 
@@ -244,7 +344,8 @@ seconds, that LAN (router, DHCP) is left out and the previous one guarded again.
 connection to the API server or Docker daemon is never blocked. With `--dry-run`, subtun shows how
 many prefixes it would guard.
 
-While the blocks stay, the next run of subtun takes them over: it asks for sudo before connecting,
+While the blocks stay, the next run of subtun with routes takes them over (a SOCKS-only run only
+warns about them): it asks for sudo before connecting,
 keeps blocking but allows DNS (so it can resolve the API server) and replaces them once the tunnel is
 up. If that start fails, the blocks are put back. To get back to normal without starting a session:
 
@@ -256,7 +357,8 @@ Notes:
 - In a full tunnel with a kill switch, other VPN clients' own connections (to their servers on the
   internet) are blocked too: everything outside the tunnel is.
 - After a reboot the blocks are gone (pf rules live in memory).
-- The kill switch needs routes, and keeps the root helper running for the session.
+- The kill switch needs routes (without them it's ignored, with a warning), and keeps the root
+  helper running for the session.
 
 ## IPv6
 
@@ -278,7 +380,7 @@ with them).
 ## Importing from sshuttle
 
 `subtun import sshuttle FILE` reads an sshuttle options file (the `@FILE` format: one argument per
-line, `#` comments) and makes a named profile from it:
+line, `#` comments) and makes a named profile from it (`--name`, default `imported`):
 
 ```sh
 subtun import sshuttle work.conf --name work > work.yaml                    # review it first
@@ -302,5 +404,6 @@ was dropped as redundant. The target can't come from sshuttle's SSH remote: give
 
 `--write` adds the profile to your config file (`--config`, `$SUBTUN_CONFIG` or the default) right
 below `profiles:`, with the indentation of your other profiles, keeping comments and everything else.
-It refuses if the name is taken or the result wouldn't load, and keeps the old file as `.bak`.
+It needs a target (`--k8s` or `--docker`), refuses if the name is taken or the result wouldn't load,
+and keeps the old file as `.bak`.
 

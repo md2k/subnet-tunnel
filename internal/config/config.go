@@ -83,6 +83,37 @@ func (m *Mode) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// Word is a setting with words for values (dns.capture: firewall, off).
+// Bare on/off/yes/no reach string fields as "true"/"false" (see Mode), so
+// those, and real booleans, are mapped back to on/off.
+type Word string
+
+// UnmarshalJSON accepts a string or a boolean.
+func (w *Word) UnmarshalJSON(b []byte) error {
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	switch x := v.(type) {
+	case bool:
+		*w = "off"
+		if x {
+			*w = "on"
+		}
+	case string:
+		switch x {
+		case "true":
+			x = "on"
+		case "false":
+			x = "off"
+		}
+		*w = Word(x)
+	default:
+		return errors.New("use a word")
+	}
+	return nil
+}
+
 // Toggle is auto, true or false; YAML booleans and strings both work.
 type Toggle string
 
@@ -137,7 +168,7 @@ type Tun struct {
 // DNS configures DNS capture: queries the system sends to its DNS servers
 // are answered by subtun, through the tunnel for matching names.
 type DNS struct {
-	Capture  string     `json:"capture,omitempty"`  // firewall (default) or off
+	Capture  Word       `json:"capture,omitempty"`  // firewall (default) or off
 	Servers  ServerList `json:"servers,omitempty"`  // auto (default) or IPv4 addresses
 	Domains  []string   `json:"domains,omitempty"`  // suffixes resolved through the tunnel; "." = all
 	Patterns []string   `json:"patterns,omitempty"` // regular expressions, also through the tunnel
@@ -240,7 +271,7 @@ func merge(d, p Profile) Profile {
 	if out.Tun.MTU == 0 {
 		out.Tun.MTU = d.Tun.MTU
 	}
-	out.DNS.Capture = pick(p.DNS.Capture, d.DNS.Capture)
+	out.DNS.Capture = Word(pick(string(p.DNS.Capture), string(d.DNS.Capture)))
 	out.DNS.Fallback = pick(p.DNS.Fallback, d.DNS.Fallback)
 	out.DNS.Unrouted = pick(p.DNS.Unrouted, d.DNS.Unrouted)
 	if len(out.DNS.Servers) == 0 {

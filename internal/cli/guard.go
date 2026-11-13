@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -25,22 +24,23 @@ type guardPlan struct {
 func (g *guardPlan) on() bool { return g.killSwitch == "on" || g.killSwitch == "lockdown" }
 
 // planGuard checks the kill switch and IPv6 settings before anything
-// connects or asks for sudo.
-func planGuard(s settings, rp *routePlan) (*guardPlan, error) {
+// connects or asks for sudo. Without routes they're ignored, with a note: a
+// profile without routes may inherit them from defaults.
+func planGuard(s settings, rp *routePlan) (*guardPlan, []string, error) {
 	g := &guardPlan{killSwitch: s.killSwitch}
 	switch g.killSwitch {
 	case "":
 		g.killSwitch = "off"
 	case "off", "on", "lockdown":
 	default:
-		return nil, fmt.Errorf("kill switch %q: use off, on or lockdown", s.killSwitch)
+		return nil, nil, fmt.Errorf("kill switch %q: use off, on or lockdown", s.killSwitch)
 	}
 	switch s.killSwitchDNS {
 	case "", "block":
 	case "allow":
 		g.allowDNS = true
 	default:
-		return nil, fmt.Errorf("kill switch DNS %q: use block or allow", s.killSwitchDNS)
+		return nil, nil, fmt.Errorf("kill switch DNS %q: use block or allow", s.killSwitchDNS)
 	}
 	switch s.blockIPv6 {
 	case "", "auto":
@@ -51,18 +51,19 @@ func planGuard(s settings, rp *routePlan) (*guardPlan, error) {
 		g.blockIPv6, g.ipv6Why = true, "asked for"
 	case "false":
 	default:
-		return nil, fmt.Errorf("block IPv6 %q: use auto, true or false", s.blockIPv6)
+		return nil, nil, fmt.Errorf("block IPv6 %q: use auto, true or false", s.blockIPv6)
 	}
 	if rp == nil {
+		var notes []string
 		if g.on() {
-			return nil, errors.New("the kill switch guards routed CIDRs: give routes as well")
+			notes = append(notes, "kill switch ignored: it guards routed CIDRs, and there are no routes")
 		}
 		if s.blockIPv6 == "true" {
-			return nil, errors.New("IPv6 blocking works together with utun capture: give routes as well")
+			notes = append(notes, "IPv6 blocking ignored: it works together with the utun capture, and there are no routes")
 		}
-		return nil, nil
+		return nil, notes, nil
 	}
-	return g, nil
+	return g, nil, nil
 }
 
 // fullTunnel reports whether the routes cover all of IPv4 (before

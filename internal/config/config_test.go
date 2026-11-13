@@ -161,3 +161,17 @@ func TestDefaultsRejects(t *testing.T) {
 		t.Errorf("routes from defaults: %v", err)
 	}
 }
+
+// Bare off (a YAML 1.1 boolean) works for dns.capture too; on isn't a value.
+func TestDNSCaptureWords(t *testing.T) {
+	f, err := Parse([]byte("profiles:\n  p:\n    target: {k8s: {pod: x}}\n    routes: [10.0.0.0/8]\n    dns: {domains: [a.example], capture: off}\n"), "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := f.Profile("p"); p.DNS.Capture != "off" {
+		t.Fatalf("capture %q", p.DNS.Capture)
+	}
+	if _, err := Parse([]byte("profiles:\n  p:\n    target: {k8s: {pod: x}}\n    routes: [10.0.0.0/8]\n    dns: {capture: on}\n"), "t"); err == nil || !strings.Contains(err.Error(), `"on": use firewall or off`) {
+		t.Fatalf("capture on: %v", err)
+	}
+}

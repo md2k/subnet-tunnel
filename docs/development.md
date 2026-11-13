@@ -42,21 +42,27 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/transport` | get an agent running in a target (probe, choose binary or Python, start) |
 | `internal/transport/k8s`, `.../docker` | exec into a pod / container |
 | `internal/socks` | SOCKS5 frontend |
-| `internal/capture` | utun capture setup: helper → utun + routes → netstack |
-| `internal/dns` | DNS engine: match names, tunnel or fallback, UDP/TCP listener, loop-free forwarder |
+| `internal/cli` | the commands; planning of routes (automatic excludes), DNS and the kill switch; dry-run output |
+| `internal/capture` | utun capture setup: helper → utun + routes → netstack; the DNS runtime; the kill switch guard following the local networks |
+| `internal/dns` | DNS engine: match names (`.` leaves local names alone), tunnel or fallback, answers outside the routes, UDP/TCP listener, loop-free forwarder |
 | `internal/routes` | route planning: excludes by subtraction, cleanup, safety checks |
 | `internal/config` | YAML config profiles |
 | `internal/importer` | `subtun import sshuttle`: sshuttle options file → profile, insertion into a config file |
 | `internal/netinfo` | local interface networks and default gateway (read-only) |
-| `internal/netstack` | gVisor stack on a packet device; dials each captured connection through the tunnel |
+| `internal/netstack` | gVisor stack on a packet device; dials each captured connection through the tunnel; loop guard; hands packets for the utun's own address back |
 | `internal/tundev` | utun as a netstack device (macOS) |
 | `internal/privhelper` | the root helper (`subtun helper`) and subtun's side of it |
-| `internal/platform` | OS driver interfaces used by the helper (`Tun`, `Routes`) |
-| `internal/platform/darwin`, `.../fake` | macOS drivers (utun, `/sbin/route`); recording fakes for tests |
+| `internal/platform` | OS driver interfaces used by the helper (`Tun`, `Routes`, `Firewall`, `DNSCache`) |
+| `internal/platform/darwin`, `.../fake` | macOS drivers (utun, `/sbin/route`, pf, DNS cache); recording fakes for tests |
 | `internal/relay` | bidirectional copy with half-close |
+| `internal/testutil`, `internal/version` | in-memory connection pairs for tests; the version stamped in at build time |
 | `test/dev` | local test setup for both targets |
 
-The netstack tests drive the capture stack from a second gVisor stack over an in-memory wire. The
+The netstack tests drive the capture stack from a second gVisor stack over an in-memory wire,
+including routing loops built through it (a target that dials onward before accepting, like Docker
+Desktop's proxy, and one that accepts first) and the hand-back of packets for the utun's own
+address. The CLI tests stub the machine's networks, gateway and search domains, so dry runs don't
+depend on where they run, and `internal/config` loads every full YAML example in the docs. The
 helper tests cover validation, descriptor passing and the helper's command loop (with recording fake
 drivers) over an in-process socket pair. The pf driver is tested against a fake `pfctl` that answers
 like a stock macOS. The DNS engine is tested with in-memory packet connections and upstreams; DNS
@@ -193,8 +199,9 @@ curl -m 20 -s -o /dev/null -w '%{http_code} %{time_total}\n' https://1.1.1.1/   
 The log shows the start warning (`the target seems to run on this machine ...`) and
 `refusing connections to this destination for a while: too many at once, likely a routing loop`,
 at most once a minute per destination; for 10 s, retries are refused at once. Everything not
-routed works throughout. A full tunnel through Docker Desktop does the same
-for every internet address, this Claude session's included: only ever with `--max-duration`.
+routed works throughout. A full tunnel through Docker Desktop does the same for every internet
+address, your own remote session's included: only ever with `--max-duration`, and as described in
+[Full tunnel and kill switch, safely](#full-tunnel-and-kill-switch-safely).
 
 ### A way back: `--max-duration`
 
@@ -210,3 +217,62 @@ If stopping hangs, subtun exits 20 seconds later anyway (exit code 3). macOS the
 and its routes, and the root helper removes its firewall rules, except a kill switch's blocks, which
 stay as they would after a crash (`subtun cleanup` removes them). With `--kill-switch lockdown` the
 blocks stay after `--max-duration` too, as after Ctrl-C.
+
+## Full tunnel and kill switch, safely
+
+A full tunnel carries all of the machine's traffic, including the remote shell or screen-sharing
+session you may be watching the test from, and a kill switch blocks traffic on purpose when the
+tunnel goes away. So when trying either:
+
+- **Use a target outside this machine.** A local Docker Desktop, kind or minikube pod loops a full
+  tunnel back ([Routing loops](config.md#routing-loops)). To check the loop guard, route one internet
+  address through a local pod instead ([above](#loop-guard-needs-sudo-run-by-hand)).
+- **Always set `--max-duration`,** so subtun stops by itself even when you can't reach the machine
+  any more ([below](#a-way-back---max-duration)).
+- **Script the checks.** Start subtun in the background, run the checks from the same script, stop
+  subtun and run `subtun cleanup`. Nothing then needs the network while the tunnel is up, and a
+  remote session only has to wait for the script:
+
+  ```sh
+  sudo -v                                              # the helper's sudo reuses this
+  build/subtun -v k8s --context remote -n tools egress 0.0.0.0/1 128.0.0.0/1 \
+    --dns-domain . --dns-domain cluster.local --kill-switch on --max-duration 3m > build/full.log 2>&1 &
+  pid=$!
+  until grep -q msg=capturing build/full.log || ! kill -0 $pid 2>/dev/null; do sleep 1; done
+  curl -s -m 10 https://api.ipify.org; echo            # the pod's public address, not yours
+  route -n get default | grep interface                # the default route is untouched (en0)
+  dig +short example.com                               # DNS, through the tunnel
+  sudo -n pfctl -a com.apple/subtun -s rules           # the kill switch's rules
+  kill -TERM $pid; wait $pid
+  build/subtun cleanup                                 # "nothing to clean up" after a clean stop
+  ```
+- **Go step by step:** `--dry-run`, split routes, a full tunnel without the kill switch, then
+  `--kill-switch on`, and `lockdown` last.
+- **Keep a second way in** when the machine isn't in front of you: SSH or Screen Sharing from
+  another machine on the LAN. The LAN stays outside the tunnel and isn't blocked by the kill switch.
+
+If the network is gone, in this order:
+1. Wait: every run ends within its `--max-duration` plus 20 s.
+2. Ctrl-C, or `pkill -TERM -x subtun`. `netstat -rn -f inet | grep utun` must show no `0/1` or
+   `128.0/1` rows.
+3. `subtun cleanup` removes a kill switch's blocks, and rules a killed helper left.
+4. If Wi-Fi was switched off, switch it on.
+5. Reboot: the utun, the routes and pf's rules all live in memory.
+
+What to look at while it runs:
+- routes: `netstat -rn -f inet | grep utun`; `route -n get <gateway>` stays on `en0`;
+- pf: `sudo pfctl -a com.apple/subtun -s rules` and `-s nat`; `-t subtun_guard -T show` lists the
+  guarded prefixes, and `-t subtun_guard -T test ADDR` says whether an address is blocked;
+- the log: `kill switch on mode=... guarded_prefixes=N`, `local networks changed; kill switch
+  follows`, and the helper's `DNS cache flushed`.
+
+**A network change without a second network.** Give `en0` a second address in a documentation range
+inside an unused route, during a kill switch session, and the guard follows it within about 5 s:
+
+```sh
+build/subtun -v k8s -n tools egress 198.51.0.0/16 --kill-switch on --max-duration 2m &
+sudo ifconfig en0 alias 198.51.100.1 netmask 255.255.255.0         # a "new LAN" inside the route
+sleep 8; sudo pfctl -a com.apple/subtun -t subtun_guard -T test 198.51.100.5   # 0/1 addresses match
+sudo ifconfig en0 -alias 198.51.100.1
+sleep 8; sudo pfctl -a com.apple/subtun -t subtun_guard -T test 198.51.100.5   # 1/1: blocked again
+```
