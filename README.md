@@ -27,7 +27,7 @@ build/subtun version
 | `make` | `make test` then `make build` |
 | `make build` | Linux agents (amd64, arm64) → `internal/agentbin/dist/`, then `build/subtun` for this machine |
 | `make test` | unit tests (`make test-race` adds the race detector, needs a C toolchain) |
-| `make lint` | `go vet` and a gofmt check |
+| `make lint` | `go vet` and a gofmt check (`make fmt` formats) |
 | `make release VERSION=v0.1.0 ARGS="--dry-run"` | builds archives for macOS, Linux and Windows (amd64, arm64) in `build/release/`, without tagging or publishing |
 | `make release VERSION=v0.1.0` | the same, then tags and publishes a GitHub release (from an up-to-date `main` only) |
 | `make clean` / `make clean-all` | remove the binaries / everything under `build/` |

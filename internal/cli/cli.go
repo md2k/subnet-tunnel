@@ -179,7 +179,7 @@ func (s *settings) applyProfile(p config.Profile, flags *pflag.FlagSet) {
 	s.routes = append(append([]string{}, p.Routes...), s.routes...)
 	s.excludes = append(append([]string{}, p.Exclude...), s.excludes...)
 	if !set("dns-capture") {
-		s.dnsCapture = p.DNS.Capture
+		s.dnsCapture = string(p.DNS.Capture)
 	}
 	if !set("dns-servers") {
 		s.dnsServers = p.DNS.Servers
@@ -435,7 +435,9 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		warns = append(warns, notes...)
 	}
 	if err == nil {
-		gp, err = planGuard(s, rp)
+		var notes []string
+		gp, notes, err = planGuard(s, rp)
+		warns = append(warns, notes...)
 	}
 	if s.dryRun {
 		if err != nil {
@@ -445,6 +447,9 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 			return err
 		}
 		if rp == nil {
+			for _, wn := range warns {
+				fmt.Fprintf(out, "warning: %s\n", wn)
+			}
 			fmt.Fprintln(out, "no routes: SOCKS only")
 			return nil
 		}
@@ -471,9 +476,9 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		for _, n := range rp.plan.Redundant {
 			log.Info("route rule dropped", "rule", n.String())
 		}
-		for _, wn := range warns {
-			log.Warn(wn)
-		}
+	}
+	for _, wn := range warns {
+		log.Warn(wn)
 	}
 
 	agents, err := loadAgents(s.agentFile)

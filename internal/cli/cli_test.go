@@ -258,7 +258,6 @@ func TestDNSProfileAndFlags(t *testing.T) {
 func TestDNSErrors(t *testing.T) {
 	fakeSystemDNS(t)
 	cases := map[string][]string{
-		"together with utun capture": {"k8s", "debug", "--socks", "127.0.0.1:1080", "--dns-domain", "company.com"},
 		"use firewall or off":        {"k8s", "debug", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-capture", "magic"},
 		"unicast IPv4":               {"k8s", "debug", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-servers", "127.0.0.1"},
 		"want system, IP or IP:port": {"k8s", "debug", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-fallback", "dns.google"},
@@ -330,11 +329,9 @@ func TestGuardProfileAndErrors(t *testing.T) {
 		t.Errorf("--kill-switch off overrides the profile: %v\n%s", err, out)
 	}
 	cases := map[string][]string{
-		"give routes as well":        {"k8s", "debug", "--socks", "127.0.0.1:1080", "--kill-switch", "on"},
-		"use off, on or lockdown":    {"k8s", "debug", "203.0.113.0/24", "--kill-switch", "always"},
-		"use block or allow":         {"k8s", "debug", "203.0.113.0/24", "--kill-switch-dns", "maybe"},
-		"use auto, true or false":    {"k8s", "debug", "203.0.113.0/24", "--block-ipv6", "sometimes"},
-		"together with utun capture": {"k8s", "debug", "--socks", "127.0.0.1:1080", "--block-ipv6", "true"},
+		"use off, on or lockdown": {"k8s", "debug", "203.0.113.0/24", "--kill-switch", "always"},
+		"use block or allow":      {"k8s", "debug", "203.0.113.0/24", "--kill-switch-dns", "maybe"},
+		"use auto, true or false": {"k8s", "debug", "203.0.113.0/24", "--block-ipv6", "sometimes"},
 	}
 	for want, args := range cases {
 		if _, err := runCLI(t, append(args, "--dry-run")...); err == nil || !strings.Contains(err.Error(), want) {
@@ -493,6 +490,22 @@ func TestUnreachable(t *testing.T) {
 	for s, want := range map[string]bool{"10.1.2.3": false, "100.64.1.1": true, "192.168.77.5": true, "140.82.112.3": false} {
 		if got := f(netip.MustParseAddr(s)); got != want {
 			t.Errorf("unreachable(%s) = %v", s, got)
+		}
+	}
+}
+
+// A profile without routes may inherit DNS, kill switch or IPv6 settings
+// from defaults: they're ignored with a warning, not an error.
+func TestRouteSettingsIgnoredWithoutRoutes(t *testing.T) {
+	fakeSystemDNS(t)
+	out, err := runCLI(t, "k8s", "debug", "--socks", "127.0.0.1:1080", "--dns-domain", "company.com",
+		"--kill-switch", "on", "--block-ipv6", "true", "--dry-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"warning: DNS settings ignored", "warning: kill switch ignored", "warning: IPv6 blocking ignored", "no routes: SOCKS only"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in\n%s", want, out)
 		}
 	}
 }

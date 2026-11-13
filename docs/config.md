@@ -15,7 +15,7 @@ defaults:                          # optional: any profile key except target, fo
   killSwitch: {mode: on}
 
 profiles:
-  dev-cluster:                     # lowercase letters, digits, '.', '_', '-'
+  dev-cluster:                     # a lowercase letter or digit, then also '.', '_', '-'
     target:                        # exactly one of k8s / docker
       k8s:
         kubeconfig: ~/.kube/dev    # default: $KUBECONFIG or ~/.kube/config
@@ -59,8 +59,10 @@ A profile needs `routes`, `socks` or both (its own or from `defaults`).
 
 **Defaults.** Settings under `defaults` apply to every profile. A profile's own value wins; lists
 (`routes`, `exclude`, `dns.domains`, `dns.patterns`) add up, so a home-LAN exclude in `defaults`
-applies everywhere. YAML treats bare `on`, `off`, `yes` and `no` as booleans; subtun reads them as
-the words you meant (`mode: off` works).
+applies everywhere. Settings that need routes (DNS capture, the kill switch, IPv6 blocking) are
+ignored, with a warning, in a profile without routes, so a kill switch in `defaults` doesn't break
+a SOCKS-only profile. YAML treats bare `on`, `off`, `yes` and `no` as booleans; subtun reads them as
+the words you meant (`mode: off`, `capture: off` work).
 
 ## Commands
 
@@ -310,8 +312,8 @@ starts, so earlier answers don't bypass it, and when it ends, so answers obtaine
   into the utun, which carries TCP only so far. `--dry-run` warns; exclude the resolver's address, or
   match every name with `.` (names `.` leaves local still use the fallback).
 - If the helper itself is killed (`kill -9`), its rules stay and DNS for the captured servers stops
-  working once subtun exits; subtun says so. The next subtun run takes them over by itself;
-  `subtun cleanup` removes them without starting a session.
+  working once subtun exits; subtun says so. The next subtun run with routes takes them over by
+  itself (a SOCKS-only run only warns); `subtun cleanup` removes them without starting a session.
 - macOS only for now; `override` and `supplemental` capture modes (via the system resolver
   configuration instead of the firewall) are planned.
 
@@ -342,7 +344,8 @@ seconds, that LAN (router, DHCP) is left out and the previous one guarded again.
 connection to the API server or Docker daemon is never blocked. With `--dry-run`, subtun shows how
 many prefixes it would guard.
 
-While the blocks stay, the next run of subtun takes them over: it asks for sudo before connecting,
+While the blocks stay, the next run of subtun with routes takes them over (a SOCKS-only run only
+warns about them): it asks for sudo before connecting,
 keeps blocking but allows DNS (so it can resolve the API server) and replaces them once the tunnel is
 up. If that start fails, the blocks are put back. To get back to normal without starting a session:
 
@@ -354,7 +357,8 @@ Notes:
 - In a full tunnel with a kill switch, other VPN clients' own connections (to their servers on the
   internet) are blocked too: everything outside the tunnel is.
 - After a reboot the blocks are gone (pf rules live in memory).
-- The kill switch needs routes, and keeps the root helper running for the session.
+- The kill switch needs routes (without them it's ignored, with a warning), and keeps the root
+  helper running for the session.
 
 ## IPv6
 
@@ -376,7 +380,7 @@ with them).
 ## Importing from sshuttle
 
 `subtun import sshuttle FILE` reads an sshuttle options file (the `@FILE` format: one argument per
-line, `#` comments) and makes a named profile from it:
+line, `#` comments) and makes a named profile from it (`--name`, default `imported`):
 
 ```sh
 subtun import sshuttle work.conf --name work > work.yaml                    # review it first
@@ -400,5 +404,6 @@ was dropped as redundant. The target can't come from sshuttle's SSH remote: give
 
 `--write` adds the profile to your config file (`--config`, `$SUBTUN_CONFIG` or the default) right
 below `profiles:`, with the indentation of your other profiles, keeping comments and everything else.
-It refuses if the name is taken or the result wouldn't load, and keeps the old file as `.bak`.
+It needs a target (`--k8s` or `--docker`), refuses if the name is taken or the result wouldn't load,
+and keeps the old file as `.bak`.
 

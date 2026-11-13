@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -39,7 +38,8 @@ func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
 		return nil, nil, fmt.Errorf("DNS capture %q: use firewall or off", s.dnsCapture)
 	}
 	if rp == nil && s.dnsListen == "" {
-		return nil, nil, errors.New("DNS capture works together with utun capture: give routes (CIDRs) as well")
+		// A profile without routes may inherit DNS settings from defaults.
+		return nil, []string{"DNS settings ignored: DNS capture works together with the utun capture, and there are no routes (CIDRs)"}, nil
 	}
 	m, err := dns.NewMatcher(s.dnsDomains, s.dnsPatterns)
 	if err != nil {
