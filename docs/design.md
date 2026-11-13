@@ -425,10 +425,10 @@ DNS rules come before the kill switch, so a captured DNS server inside the guard
 captured. What stays behind has no `pass` rule and blocks DNS with
 `block return out quick inet proto { udp tcp } from any to <subtun_dns> port 53`.
 
-## Several tunnels (planned)
+## Several tunnels
 
-Not built yet. One subtun process runs several profiles at once, each with its own target: split
-routing to several remotes, for example `10.0.0.0/8` and `corp.example` through a work cluster,
+One subtun process runs several profiles at once, each with its own target: split routing to
+several remotes, for example `10.0.0.0/8` and `corp.example` through a work cluster,
 `10.50.0.0/16` and `cluster.local` through a dev cluster.
 
 ```
@@ -501,8 +501,8 @@ app ──► SOCKS (one per profile) ───── its own tunnel only
 - Several profiles are configured in the config file only: the command line then takes run
   options (`--dry-run`, `-v`, `--config`) and nothing else. CIDRs and setting flags work when one
   profile starts, as today.
-- `subtun k8s` and `subtun docker` stay single-tunnel. Inside, every run is a set of tunnels, one
-  for them, so there is one code path.
+- `subtun k8s`, `subtun docker` and a single profile keep their sequence: connect, then sudo, and
+  a one-shot helper unless firewall rules need a session.
 - No new config keys. A name for a combination of profiles in the config can come later if typing
   the list turns out to be tedious.
 
@@ -513,8 +513,9 @@ app ──► SOCKS (one per profile) ───── its own tunnel only
   or the fallback.
 - A profile with a kill switch puts its routes in at start and keeps them when it gives up: its
   traffic is refused rather than leaking, and if subtun exits, the guard holds.
-- All tunnels connect in parallel. The capture starts once the first one is up (or at once, if a
-  profile has a kill switch); one that can't connect retries by its reconnect policy.
+- The capture starts first (sudo comes before connecting), with the routes of the profiles that
+  have a kill switch. Then all tunnels connect in parallel; one that can't connect retries by its
+  reconnect policy.
 - Each tunnel reconnects on its own. While one is down, only its destinations get resets and only
   its names SERVFAIL; the others carry on.
 - subtun exits on Ctrl-C, or when every profile has given up. A profile giving up is logged, and

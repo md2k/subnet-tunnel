@@ -123,6 +123,11 @@ profiles:
 build/subtun up dev-cluster            # flags still override, extra CIDRs and -x are added
 ```
 
+**Several remotes at once.** `subtun up --profile work,dev` runs several profiles in one process:
+each connection and DNS name goes to the profile whose route or domain matches most specifically,
+and each profile reconnects, or gives up, on its own. See
+[Several profiles at once](docs/config.md#several-profiles-at-once).
+
 See [Configuration](docs/config.md). Coming from sshuttle? `subtun import sshuttle FILE --name NAME`
 turns an sshuttle options file into a profile ([details](docs/config.md#importing-from-sshuttle)).
 
@@ -136,8 +141,9 @@ turns an sshuttle options file into a profile ([details](docs/config.md#importin
 
 ## Documentation
 
-- [Configuration](docs/config.md): commands, profiles and defaults, examples, routes and excludes,
-  full tunnel, split DNS, kill switch, reconnect, IPv6, safety checks, importing from sshuttle.
+- [Configuration](docs/config.md): commands, profiles and defaults, several profiles at once,
+  examples, routes and excludes, full tunnel, split DNS, kill switch, reconnect, IPv6, safety
+  checks, importing from sshuttle.
 - [Design](docs/design.md): measurements, architecture and open questions.
 - [Development](docs/development.md): tests, code layout, the local test setup, and trying a full
   tunnel or the kill switch safely.
