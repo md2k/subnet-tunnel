@@ -380,6 +380,13 @@ func (mp *multiPlan) addEndpoints(addrs []netip.Addr) (bool, error) {
 	return changed, nil
 }
 
+// endpointList returns the endpoints found so far.
+func (mp *multiPlan) endpointList() []netip.Addr {
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+	return slices.Clone(mp.endpoints)
+}
+
 // carveEndpoints takes endpoint addresses the routes cover out of them.
 func carveEndpoints(rp *routePlan, endpoints []netip.Addr) ([]netip.Prefix, error) {
 	var hit []netip.Prefix
@@ -736,7 +743,7 @@ func runTunnel(ctx context.Context, i int, live *liveTunnel, policy reconnectPol
 		cur.close()
 		cur = nil
 		if policy.attempts == 0 {
-			gaveUp(errors.New("connection to the agent was lost (reconnect attempts: 0)"))
+			gaveUp(errors.New("connection to the agent was lost"))
 			return
 		}
 		log.Warn("connection to the agent lost; reconnecting", "policy", policy.String())
@@ -952,15 +959,24 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	var helperExited <-chan struct{}
 	var retry <-chan time.Time
 	retryWait, lastErr := layoutRetry, ""
-	firstRound := time.After(firstRoundWait)
-	roundOver, anyUp, warnedRoutes, devStarted := false, false, false, false
+	// Several profiles wait at most firstRoundWait for every first
+	// attempt; one profile always connects before the capture starts.
+	var firstRound <-chan time.Time
+	if !eo.single {
+		firstRound = time.After(firstRoundWait)
+	}
+	roundOver, anyUp, devStarted := false, false, false
 	// A stop the user asked for (or --max-duration) is deliberate. Before
 	// anything was up (connecting, the sudo prompt), --max-duration also
 	// says so as an error.
 	stop := func() error {
 		deliberate = true
 		logShutdown(ctx, log)
-		if up := c != nil || !mp.hasRoutes() && anyUp; !up && maxDurationReached(ctx) {
+		up := anyUp || c != nil // several profiles: a tunnel was up
+		if eo.single && mp.hasRoutes() {
+			up = c != nil // one profile with routes: up once capturing, as always
+		}
+		if !up && maxDurationReached(ctx) {
 			return startErr(ctx, errMaxDuration)
 		}
 		return nil
@@ -1033,11 +1049,14 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 				} else {
 					tl.Info("reconnected", "via", ev.carrier.Desc, "after", time.Since(lost[ev.i]).Round(100*time.Millisecond))
 				}
-				if ev.carrier.Local && routesInternet(mp.final(ev.i)) {
+				if prev == stateConnecting && ev.carrier.Local && routesInternet(mp.final(ev.i)) {
 					tl.Warn(localLoopWarning)
 				}
 				if changed, err := mp.addEndpoints(ev.carrier.Endpoints); err != nil {
 					tl.Warn("excluding subtun's own endpoint from the routes failed", "err", err)
+				} else if changed && c != nil && !c.Session() {
+					// One-shot helper (one profile, no firewall rules): routes can't change.
+					tl.Warn("after reconnecting, subtun's own connection goes to an address the routes cover, which may cut it; restart subtun to exclude it", "addrs", ev.carrier.Endpoints)
 				} else if changed {
 					tl.Info("excluded from routes: subtun's own connection goes there", "addrs", ev.carrier.Endpoints)
 				}
@@ -1079,13 +1098,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			continue
 		}
 		if !c.Session() {
-			// One-shot helper (one profile, no firewall rules): routes can't
-			// change. Say so if they should (the endpoint moved inside them).
-			if all, _, _, err := mp.layout(mp.activeSet(states), lives); err == nil && !sameSet(all, c.Routes()) && !warnedRoutes {
-				log.Warn("after reconnecting, subtun's own connection goes to an address the routes cover, which may cut it; restart subtun to exclude it")
-				warnedRoutes = true
-			}
-			continue
+			continue // one-shot helper: routes can't change (warned above)
 		}
 		if err := applyLayout(c, mp, states, lives, rt); err != nil {
 			if err.Error() != lastErr {
@@ -1124,7 +1137,7 @@ func startMultiCapture(ctx context.Context, mp *multiPlan, active []bool, lives 
 		}
 	}
 	if opts.BlockIPv6 {
-		if a, ok := ipv6Endpoint(mp.endpoints); ok {
+		if a, ok := ipv6Endpoint(mp.endpointList()); ok {
 			log.Warn("not blocking IPv6: subtun's own connection may use it", "endpoint", a)
 			opts.BlockIPv6 = false
 		}
@@ -1178,17 +1191,4 @@ func applyLayout(c *capture.Capture, mp *multiPlan, states []tunnelState, lives 
 		}
 	}
 	return err
-}
-
-// sameSet reports whether two prefix lists hold the same prefixes.
-func sameSet(a, b []netip.Prefix) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for _, p := range a {
-		if !slices.Contains(b, p) {
-			return false
-		}
-	}
-	return true
 }
