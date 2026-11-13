@@ -195,6 +195,7 @@ password on the terminal).
   anyone else, then proves itself with the token.
 - It accepts a fixed set of commands, in lock-step: `create_tun` (MTU and address validated),
   `add_route` (IPv4, host bits zero, never the default route, loopback or multicast),
+  `delete_route` (only a route it added),
   `apply_firewall` (rules as intent, not pf text: DNS servers unicast IPv4, ports at least 1024,
   kill switch prefixes IPv4 and not the default route; plus the rules that stay when the tunnel
   goes away, which may only block), `done`, `end` (session: keep the blocking rules or not), and as
@@ -205,11 +206,11 @@ password on the terminal).
 
 ### Modes
 
-| | One-shot (routes only) | Session (DNS capture, kill switch, IPv6 block) |
+| | One-shot (routes only) | Session (DNS capture, kill switch, IPv6 block, several profiles) |
 |---|---|---|
 | sudo prompts | one, at start | one, at start |
 | Root process after setup | none: the helper exits | the helper stays up for the session |
-| Accepts after setup | nothing | firewall updates only (the DNS servers or the local networks changed) and `end` |
+| Accepts after setup | nothing | firewall updates (the DNS servers or the local networks changed), route changes (several profiles) and `end` |
 | Changing CIDRs | restart subtun | restart subtun (runtime changes through a local control API are planned) |
 | Cleanup | automatic: routes live on the utun, and macOS removes the utun and its routes when subtun exits, crashes or is killed | the same for routes; firewall rules as below |
 | Risk | smallest: root exists only for the seconds of setup | a root process stays reachable (only by subtun, over the private socket) for the whole session |
@@ -345,7 +346,7 @@ dns:
   covers (a remote cluster's resolver answered `github.com` with `100.64.0.0/10`) is kept with a
   warning (`warn`, default), replaced by the fallback's answer (`fallback`), or rewritten without
   those A records (`block`). Planned: `tunnel`, routing such addresses into the utun for the session
-  (needs runtime `add_route` in the session helper), and `auto`, which would start as `tunnel` and
+  (builds on the session helper's route changes), and `auto`, which would start as `tunnel` and
   fall back to the normal path when replies don't come.
 - **DNS cache.** The helper flushes the system's DNS cache (a `DNSCache` driver; macOS:
   `dscacheutil -flushcache` and SIGHUP to mDNSResponder) whenever the DNS redirect goes on or off,

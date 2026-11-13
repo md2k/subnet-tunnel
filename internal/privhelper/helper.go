@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -30,7 +31,8 @@ type helper struct {
 	grace   time.Duration // how long a signalled session waits for subtun's word
 
 	dev      platform.TunDevice
-	routes   []netip.Prefix
+	ifname   string          // the utun's name, kept after setup for route changes
+	routes   []netip.Prefix  // routes this helper added and hasn't removed
 	owned    bool            // the firewall anchor is ours to use (checked once)
 	firewall bool            // our rules are loaded
 	persist  *platform.Rules // what stays if the tunnel goes away; nil: nothing
@@ -153,8 +155,8 @@ func (h *helper) handle(req Request) (Response, []int) {
 		h.log.Warn("refused", "op", req.Op, "err", err)
 		return Response{Error: err.Error()}, nil
 	}
-	if h.session.Load() && req.Op != OpApplyFirewall {
-		return fail(fmt.Errorf("%s: setup is finished; only firewall updates are accepted", req.Op))
+	if h.session.Load() && req.Op != OpApplyFirewall && req.Op != OpAddRoute && req.Op != OpDeleteRoute {
+		return fail(fmt.Errorf("%s: setup is finished; only firewall and route updates are accepted", req.Op))
 	}
 	switch req.Op {
 	case OpCreateTun:
@@ -172,7 +174,7 @@ func (h *helper) handle(req Request) (Response, []int) {
 		if err != nil {
 			return fail(err)
 		}
-		h.dev = dev
+		h.dev, h.ifname = dev, dev.Name()
 		h.log.Info("utun created", "name", dev.Name(), "mtu", req.MTU, "addr", addr)
 		fd, err := rawFD(dev.File())
 		if err != nil {
@@ -182,18 +184,40 @@ func (h *helper) handle(req Request) (Response, []int) {
 		return Response{OK: true, Name: dev.Name()}, []int{fd}
 
 	case OpAddRoute:
-		if h.dev == nil {
+		if h.ifname == "" {
 			return fail(errors.New("create the utun first"))
 		}
 		p, err := ParseCIDR(req.CIDR)
 		if err != nil {
 			return fail(err)
 		}
-		if err := h.drivers.Routes.Add(p, h.dev.Name()); err != nil {
+		if slices.Contains(h.routes, p) {
+			return fail(fmt.Errorf("%s is already routed", p))
+		}
+		if len(h.routes) >= maxRoutes {
+			return fail(fmt.Errorf("more than %d routes", maxRoutes))
+		}
+		if err := h.drivers.Routes.Add(p, h.ifname); err != nil {
 			return fail(err)
 		}
 		h.routes = append(h.routes, p)
-		h.log.Info("route added", "cidr", p, "utun", h.dev.Name())
+		h.log.Info("route added", "cidr", p, "utun", h.ifname)
+		return Response{OK: true}, nil
+
+	case OpDeleteRoute:
+		p, err := ParseCIDR(req.CIDR)
+		if err != nil {
+			return fail(err)
+		}
+		i := slices.Index(h.routes, p)
+		if i < 0 {
+			return fail(fmt.Errorf("%s is not a route this helper added", p))
+		}
+		if err := h.drivers.Routes.Delete(p, h.ifname); err != nil {
+			return fail(err)
+		}
+		h.routes = slices.Delete(h.routes, i, i+1)
+		h.log.Info("route removed", "cidr", p, "utun", h.ifname)
 		return Response{OK: true}, nil
 
 	case OpApplyFirewall:
