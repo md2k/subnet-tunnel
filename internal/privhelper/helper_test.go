@@ -242,8 +242,8 @@ func firewallReq(servers ...string) Request {
 }
 
 // Session mode: after done the helper stays up, accepts firewall updates
-// (network changed) and nothing else, and removes its rules when subtun
-// goes away. Routes and the utun are subtun's by then.
+// (network changed) and route changes, and removes its rules when subtun
+// goes away. The utun is subtun's by then.
 func TestHelperSession(t *testing.T) {
 	d := &fake.Drivers{}
 	c, done := startHelper(t, context.Background(), d)
@@ -258,7 +258,7 @@ func TestHelperSession(t *testing.T) {
 	if r := call(t, c, firewallReq("10.0.0.1")); !r.OK {
 		t.Fatalf("update: %+v", r)
 	}
-	for _, req := range []Request{{Op: OpAddRoute, CIDR: "10.96.0.0/12"}, createReq, {Op: OpDone, Session: true}} {
+	for _, req := range []Request{createReq, {Op: OpDone, Session: true}, {Op: OpAdopt}} {
 		if r := call(t, c, req); r.OK || !strings.Contains(r.Error, "setup is finished") {
 			t.Errorf("%s after done: %+v", req.Op, r)
 		}
@@ -270,6 +270,47 @@ func TestHelperSession(t *testing.T) {
 	checkCalls(t, d, created, "add 10.244.0.0/16 utun0",
 		"firewall dns [192.168.1.1] 53530 53531", "release utun0",
 		"firewall dns [10.0.0.1] 53530 53531", "flush")
+}
+
+// Several tunnels: a session adds and removes routes as tunnels come and
+// go, on the utun it created, and only routes it added.
+func TestHelperSessionRouteChanges(t *testing.T) {
+	d := &fake.Drivers{}
+	c, done := startHelper(t, context.Background(), d)
+	if r := call(t, c, Request{Op: OpAddRoute, CIDR: "10.0.0.0/8"}); r.OK || !strings.Contains(r.Error, "create the utun first") {
+		t.Fatalf("add_route before create_tun: %+v", r)
+	}
+	call(t, c, createReq)
+	call(t, c, Request{Op: OpAddRoute, CIDR: "10.0.0.0/8"})
+	if r := call(t, c, Request{Op: OpDone, Session: true}); !r.OK {
+		t.Fatalf("done: %+v", r)
+	}
+	for _, req := range []Request{
+		{Op: OpAddRoute, CIDR: "10.50.0.0/16"},
+		{Op: OpAddRoute, CIDR: "172.20.0.0/16"},
+		{Op: OpDeleteRoute, CIDR: "10.50.0.0/16"},
+	} {
+		if r := call(t, c, req); !r.OK {
+			t.Fatalf("%s %s: %+v", req.Op, req.CIDR, r)
+		}
+	}
+	for req, want := range map[Request]string{
+		{Op: OpAddRoute, CIDR: "10.0.0.0/8"}:        "already routed",
+		{Op: OpDeleteRoute, CIDR: "10.50.0.0/16"}:   "not a route this helper added",
+		{Op: OpDeleteRoute, CIDR: "192.168.0.0/16"}: "not a route this helper added",
+		{Op: OpAddRoute, CIDR: "0.0.0.0/0"}:         "default route",
+		{Op: OpDeleteRoute, CIDR: "10.1.2.3/8"}:     "host bits",
+	} {
+		if r := call(t, c, req); r.OK || !strings.Contains(r.Error, want) {
+			t.Errorf("%s %s: %+v, want error with %q", req.Op, req.CIDR, r, want)
+		}
+	}
+	_ = c.Close()
+	if err := wait(t, done); err != nil {
+		t.Fatalf("session end: %v", err)
+	}
+	checkCalls(t, d, created, "add 10.0.0.0/8 utun0", "release utun0",
+		"add 10.50.0.0/16 utun0", "add 172.20.0.0/16 utun0", "delete 10.50.0.0/16 utun0")
 }
 
 func TestHelperSessionEndsOnInterrupt(t *testing.T) {
@@ -599,6 +640,28 @@ func TestHelperAdoptedLeftoversGoWithASessionWithoutFirewall(t *testing.T) {
 	if st.get() != nil {
 		t.Fatal("state left behind")
 	}
+}
+
+// The same for a session that only changes routes (several profiles, none
+// with firewall rules): the leftovers would otherwise block traffic even
+// through the new utun, and stay behind after a crash.
+func TestHelperAdoptedLeftoversGoWithASessionWithoutRules(t *testing.T) {
+	d := &fake.Drivers{Busy: true}
+	st := &memState{st: &state{Owner: 99, Token: "old", Persist: killSwitchReq("").Persist}}
+	c, done := startHelperOpts(t, context.Background(), d, helperOpts{state: st})
+	if r := call(t, c, Request{Op: OpAdopt}); !r.Kept {
+		t.Fatalf("adopt: %+v", r)
+	}
+	call(t, c, createReq)
+	if r := call(t, c, Request{Op: OpDone, Session: true}); !r.OK {
+		t.Fatalf("session done after adopting: %+v", r)
+	}
+	if st.get() != nil {
+		t.Fatal("state left behind")
+	}
+	_ = c.Close() // a crash: nothing to leave behind
+	wait(t, done)
+	checkCalls(t, d, "adopt old", "firewall guard - [10.0.0.0/8] ipv6", created, "flush", "release utun0")
 }
 
 // The DNS cache is flushed when the DNS redirect goes on and off: at the

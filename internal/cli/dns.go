@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 
 	"github.com/md2k/subnet-tunnel/internal/capture"
@@ -45,13 +46,17 @@ func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	var tunAddr netip.Addr
+	if rp != nil {
+		tunAddr = rp.opts.TunAddr
+	}
 	if m.CatchAll() {
 		search, _ := systemSearch()
-		m.SetLocal(search, localPrefixes())
+		m.SetLocal(search, dnsLocals(tunAddr)())
 	}
-	opts := &capture.DNSOptions{Match: m, Unrouted: unrouted}
+	opts := &capture.DNSOptions{Match: m, Tunnels: []capture.DNSTunnel{{Unrouted: unrouted}}}
 	if m.CatchAll() {
-		opts.Locals = localPrefixes
+		opts.Locals = dnsLocals(tunAddr)
 	}
 	var notes []string
 
@@ -64,14 +69,8 @@ func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
 			return nil, n, fmt.Errorf("no IPv4 DNS server in %s to capture; set the servers explicitly", dns.ResolvConf)
 		}
 		opts.Servers, opts.Auto, notes = servers, true, n
-	} else {
-		for _, v := range s.dnsServers {
-			a, err := netip.ParseAddr(v)
-			if err != nil || !a.Is4() || a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() {
-				return nil, nil, fmt.Errorf("DNS server %q: need a unicast IPv4 address (or auto)", v)
-			}
-			opts.Servers = append(opts.Servers, a)
-		}
+	} else if opts.Servers, err = parseServers(s.dnsServers); err != nil {
+		return nil, nil, err
 	}
 
 	switch s.dnsFallback {
@@ -102,6 +101,30 @@ func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
 		}
 	}
 	return opts, notes, nil
+}
+
+// dnsLocals reads the machine's networks for the names "." leaves local,
+// without subtun's own utun address: it appears once the utun exists, and
+// its reverse zone is no local network.
+func dnsLocals(tunAddr netip.Addr) func() []netip.Prefix {
+	return func() []netip.Prefix {
+		return slices.DeleteFunc(localPrefixes(), func(p netip.Prefix) bool {
+			return tunAddr.IsValid() && p.Bits() == 32 && p.Addr() == tunAddr
+		})
+	}
+}
+
+// parseServers checks a list of DNS servers to capture.
+func parseServers(list []string) ([]netip.Addr, error) {
+	var out []netip.Addr
+	for _, v := range list {
+		a, err := netip.ParseAddr(v)
+		if err != nil || !a.Is4() || a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() {
+			return nil, fmt.Errorf("DNS server %q: need a unicast IPv4 address (or auto)", v)
+		}
+		out = append(out, a)
+	}
+	return out, nil
 }
 
 // parseResolver accepts IP or IP:port (IPv4; port 53 by default).
@@ -137,7 +160,7 @@ func printDNSPlan(w io.Writer, d *capture.DNSOptions, domains, patterns []string
 	if d.Match.CatchAll() {
 		fmt.Fprintf(w, "  except names under %s (local network; list one to send it through the tunnel)\n", strings.Join(d.Match.Local(), ", "))
 	}
-	fmt.Fprintf(w, "  answers through the tunnel at private addresses no route covers: %s\n", d.Unrouted)
+	fmt.Fprintf(w, "  answers through the tunnel at private addresses no route covers: %s\n", d.Tunnels[0].Unrouted)
 	if d.Fallback != nil {
 		fmt.Fprintf(w, "  other names: %s\n", d.Fallback[0])
 	} else {

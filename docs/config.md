@@ -75,6 +75,7 @@ the words you meant (`mode: off`, `capture: off` work).
 | `subtun k8s POD [CIDR...]` | tunnel through a pod (`-n`, `-c`, `--context`, `--kubeconfig`) |
 | `subtun docker CONTAINER [CIDR...]` | tunnel through a container (`-H`, `--context`) |
 | `subtun up [PROFILE] [CIDR...]` | run a profile from the config file; without a name, list them |
+| `subtun up --profile A,B` | run several profiles at once ([below](#several-profiles-at-once)) |
 | `subtun cleanup` | remove firewall rules an earlier session left (a kill switch's blocks), without starting one |
 | `subtun import sshuttle FILE` | turn an sshuttle options file into a profile ([below](#importing-from-sshuttle)) |
 | `subtun version` | print the version |
@@ -98,6 +99,63 @@ Flags given on the command line override the profile's (and defaults') values (`
 `--reconnect-delay`, `--reconnect-max-delay`). CIDRs, `-x/--exclude`,
 `--dns-domain` and `--dns-pattern` given on the command line are **added** to the profile's. Without
 a config file, the same flags work on `subtun k8s` and `subtun docker`.
+
+## Several profiles at once
+
+```sh
+subtun up --profile work,dev               # or: subtun up work --profile dev
+subtun up --profile work --profile dev --dry-run
+```
+
+Each profile connects to its own target, and they share one utun: a connection goes to the profile
+whose configured route matches its destination most specifically (a profile's excludes only take
+addresses out of its own routes), a DNS name to the profile with the longest matching domain (then
+the first matching pattern, in profile order, then the profile with `.`).
+So a work cluster can carry `10.0.0.0/8` and everything else while a dev cluster carries
+`10.50.0.0/16` and `cluster.local`:
+
+```yaml
+defaults:
+  exclude: [192.168.1.0/24]
+profiles:
+  work:
+    target: {k8s: {context: prod-eu, namespace: ops, pod: toolbox}}
+    routes: [0.0.0.0/1, 128.0.0.0/1]
+    dns: {domains: ["."]}
+    killSwitch: {mode: on}
+  dev:
+    target: {k8s: {context: dev, namespace: tools, pod: debug}}
+    routes: [10.50.0.0/16]
+    dns: {domains: [cluster.local]}
+    socks: 127.0.0.1:1081
+```
+
+- **Each profile on its own.** Every profile connects and reconnects by its own `reconnect`
+  settings, and one that can't connect at start keeps trying by them. Its routes and names are in
+  use while its tunnel is up or reconnecting; when it gives up, they are removed, as if it weren't
+  running: its traffic takes the normal path or another profile's broader route (above, dev's
+  addresses would go to work). subtun ends on Ctrl-C, or when every profile has given up.
+- **Kill switch per profile.** A profile with a kill switch has its routes in place as soon as the
+  capture starts, connected or not, and keeps them when it gives up: its traffic is refused
+  rather than leaking. The kill switch
+  guards only those profiles' share of the routes, and after Ctrl-C only `lockdown` profiles'
+  blocks stay. While any kill switch holds, DNS to the captured servers is blocked unless every
+  profile with a kill switch has `killSwitch.dns: allow`.
+- **Shared settings.** The DNS servers captured are the union of the profiles'; IPv6 is blocked if
+  any profile's `blockIPv6` blocks it (`auto` in a full-tunnel profile). `tun.address`, `tun.mtu`
+  and `dns.fallback` exist once: profiles that set them must agree (set them in `defaults`).
+- **Refused:** the same CIDR, DNS domain or SOCKS address in two profiles, and `.` in more than
+  one. Two remotes that use the same addresses (two clusters with the default service range) can
+  only be reached through their SOCKS proxies.
+- **Config only.** With several profiles, the command line takes `--dry-run` (and the global
+  flags), not settings or CIDRs; those come from the config file. The dry run lists each
+  profile's routes, notes the parts another profile carries, and shows the shared DNS and kill
+  switch setup.
+- **Root.** Every profile tries to connect once before sudo asks, as with one profile (subtun
+  waits at most 30 seconds for that). The root
+  helper then stays up while subtun runs, to add and remove routes as profiles come and go. Every
+  target's API server or Docker daemon address is kept out of every route, and with DNS capture
+  their names never resolve through a tunnel.
 
 ## Examples
 

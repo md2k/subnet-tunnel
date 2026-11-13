@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -229,15 +230,24 @@ func (s *settings) transport(g *globalOpts) transport.Options {
 
 func newUpCmd(g *globalOpts) *cobra.Command {
 	var s settings
+	var profiles []string
 	cmd := &cobra.Command{
-		Use:   "up PROFILE [CIDR...]",
-		Short: "Start a profile from the config file",
+		Use:   "up [PROFILE [CIDR...]] [--profile NAME...]",
+		Short: "Start one or several profiles from the config file",
 		Long: `Start a named profile from the config file. Flags override the profile's
 values; CIDRs and --exclude given here are added to the profile's.
+
+Several profiles (--profile, repeatable or comma-separated, plus the
+argument) run at once, each through its own target: connections and DNS
+names go to the profile whose route or domain matches most specifically.
+They are configured in the config file only: the command line then takes
+--dry-run, not settings or CIDRs.
+
 Without a profile name, lists the profiles.`,
 		Example: `  subtun up dev-cluster
   subtun up dev-cluster --dry-run
-  subtun up dev-cluster 10.50.0.0/16 -x 10.50.1.0/24`,
+  subtun up dev-cluster 10.50.0.0/16 -x 10.50.1.0/24
+  subtun up --profile work,dev-cluster`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := g.config
 			if path == "" {
@@ -247,41 +257,98 @@ Without a profile name, lists the profiles.`,
 			if err != nil {
 				return err
 			}
-			if len(args) == 0 {
+			var names []string
+			if len(args) > 0 {
+				names = append(names, args[0])
+			}
+			for _, n := range profiles {
+				if !slices.Contains(names, n) {
+					names = append(names, n)
+				}
+			}
+			if len(names) == 0 {
 				fmt.Fprintf(cmd.OutOrStdout(), "profiles in %s:\n  %s\n", path, strings.Join(f.Names(), "\n  "))
 				return nil
 			}
-			p, err := f.Profile(args[0])
+			if len(names) > 1 {
+				return upSeveral(cmd, g, f, path, names, args, s)
+			}
+			p, err := f.Profile(names[0])
 			if err != nil {
 				return fmt.Errorf("%s: %w", path, err)
 			}
-			s.routes = args[1:]
-			s.applyProfile(p, cmd.Flags())
-
-			var connect connectFunc
-			switch {
-			case p.Target.K8s != nil:
-				t := k8s.Target{
-					Kubeconfig: config.ExpandHome(p.Target.K8s.Kubeconfig),
-					Context:    p.Target.K8s.Context,
-					Namespace:  p.Target.K8s.Namespace,
-					Pod:        strings.TrimPrefix(p.Target.K8s.Pod, "pod/"),
-					Container:  p.Target.K8s.Container,
-				}
-				connect = func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
-					return k8s.Connect(ctx, t, agents, s.transport(g), log)
-				}
-			case p.Target.Docker != nil:
-				t := docker.Target{Host: p.Target.Docker.Host, Context: p.Target.Docker.Context, Container: p.Target.Docker.Container}
-				connect = func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
-					return docker.Connect(ctx, t, agents, s.transport(g), log)
-				}
+			if len(args) > 0 {
+				s.routes = args[1:]
+			} else {
+				s.routes = nil
 			}
+			s.applyProfile(p, cmd.Flags())
+			connect, _ := profileTarget(p, &s, g)
 			return run(cmd.Context(), cmd.OutOrStdout(), g, s, connect)
 		},
 	}
 	s.register(cmd)
+	cmd.Flags().StringSliceVar(&profiles, "profile", nil, "start this profile; repeatable or comma-separated, several run at once")
 	return cmd
+}
+
+// upSeveral starts several profiles. Their settings come from the config
+// file only.
+func upSeveral(cmd *cobra.Command, g *globalOpts, f *config.File, path string, names, args []string, defaults settings) error {
+	if len(args) > 1 {
+		return fmt.Errorf("with several profiles, CIDRs come from the config file (got %s)", strings.Join(args[1:], " "))
+	}
+	var refused []string
+	cmd.Flags().Visit(func(fl *pflag.Flag) {
+		switch fl.Name {
+		case "profile", "dry-run", "max-duration", "verbose", "config":
+		default:
+			refused = append(refused, "--"+fl.Name)
+		}
+	})
+	if len(refused) > 0 {
+		return fmt.Errorf("with several profiles, settings come from the config file: %s only works with one profile", strings.Join(refused, ", "))
+	}
+	specs := make([]*tunnelSpec, len(names))
+	for i, name := range names {
+		p, err := f.Profile(name)
+		if err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		sp := &tunnelSpec{name: name, s: defaults, cfg: p}
+		sp.s.routes = nil
+		sp.s.applyProfile(p, cmd.Flags())
+		sp.connect, sp.endpoint = profileTarget(p, &sp.s, g)
+		specs[i] = sp
+	}
+	return runMulti(cmd.Context(), cmd.OutOrStdout(), g, specs, defaults.dryRun, defaults.maxDuration)
+}
+
+// profileTarget returns how to connect to a profile's target, and how to
+// find its endpoint (API server, Docker daemon) without connecting.
+func profileTarget(p config.Profile, s *settings, g *globalOpts) (connectFunc, func() (string, error)) {
+	switch {
+	case p.Target.K8s != nil:
+		t := k8s.Target{
+			Kubeconfig: config.ExpandHome(p.Target.K8s.Kubeconfig),
+			Context:    p.Target.K8s.Context,
+			Namespace:  p.Target.K8s.Namespace,
+			Pod:        strings.TrimPrefix(p.Target.K8s.Pod, "pod/"),
+			Container:  p.Target.K8s.Container,
+		}
+		return func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
+				return k8s.Connect(ctx, t, agents, s.transport(g), log)
+			}, func() (string, error) {
+				return k8s.Endpoint(t)
+			}
+	default: // the config makes sure there is one
+		t := docker.Target{Host: p.Target.Docker.Host, Context: p.Target.Docker.Context, Container: p.Target.Docker.Container}
+		return func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
+				return docker.Connect(ctx, t, agents, s.transport(g), log)
+			}, func() (string, error) {
+				return docker.Endpoint(t)
+			}
+	}
 }
 
 func newK8sCmd(g *globalOpts) *cobra.Command {
@@ -573,12 +640,17 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 	live.set(cur.client)
 	log.Info("tunnel up", "via", cur.carrier.Desc, "agent", cur.client.Agent().Version,
 		"took", time.Since(start).Round(time.Millisecond))
+	if dnsOpts != nil {
+		// Reconnecting must resolve the API server or Docker daemon while
+		// the tunnel is down.
+		dnsOpts.Match.SetOwn([]string{transport.HostName(cur.carrier.Host)})
+	}
 
 	errc := make(chan error, 1)
 	if s.dnsListen != "" && dnsOpts != nil {
-		dnsOpts.Tunnel = dns.UpstreamFunc(live.ExchangeDNS)
+		dnsOpts.Tunnels[0].Upstream = dns.UpstreamFunc(live.ExchangeDNS)
 		if rp != nil {
-			dnsOpts.Unreachable = unreachable(rp.plan.Routes)
+			dnsOpts.Tunnels[0].Unreachable = unreachable(rp.plan.Routes)
 		}
 		stopDNS, err := serveDNSDev(ctx, s.dnsListen, dnsOpts, log)
 		if err != nil {
@@ -606,8 +678,8 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		}
 		opts := rp.opts
 		if dnsOpts != nil {
-			dnsOpts.Tunnel = dns.UpstreamFunc(live.ExchangeDNS)
-			dnsOpts.Unreachable = unreachable(final)
+			dnsOpts.Tunnels[0].Upstream = dns.UpstreamFunc(live.ExchangeDNS)
+			dnsOpts.Tunnels[0].Unreachable = unreachable(final)
 			opts.DNS = dnsOpts
 		}
 		opts.KillSwitch, opts.AllowDNS, opts.BlockIPv6 = gp.killSwitch, gp.allowDNS, gp.blockIPv6
@@ -618,11 +690,16 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 			}
 		}
 		if gp.on() {
-			if opts.Guarded, err = guardPrefixes(final, localPrefixes()); err != nil {
+			guarded, err := guardPrefixes(final, localPrefixes())
+			if err != nil {
 				return err
 			}
-			if len(opts.Guarded) == 0 {
+			if len(guarded) == 0 {
 				log.Warn("kill switch has nothing to guard: every route is a local network")
+			}
+			opts.Guard = capture.Guard{Base: final}
+			if gp.killSwitch == "lockdown" {
+				opts.Guard.Lockdown = final
 			}
 			opts.Locals = localPrefixes
 		}
@@ -686,7 +763,7 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 			case errors.Is(err, errHelperGone):
 				return helperGone()
 			default:
-				return err
+				return fmt.Errorf("connection to the agent was lost; %w", err)
 			}
 			cur = next
 			if hit := routedEndpoints(final, cur.carrier.Endpoints); len(hit) > 0 {
@@ -695,6 +772,11 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 			live.set(cur.client)
 			log.Info("reconnected", "via", cur.carrier.Desc, "after", time.Since(lost).Round(100*time.Millisecond))
 		case err := <-errc:
+			if ctx.Err() != nil { // Ctrl-C closed the listener
+				deliberate = true
+				logShutdown(ctx, log)
+				return nil
+			}
 			return fmt.Errorf("SOCKS listener: %w", err)
 		case <-helperExited:
 			return helperGone()

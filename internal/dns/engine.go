@@ -39,10 +39,16 @@ type TCPUpstream interface {
 // Engine answers queries.
 type Engine struct {
 	Match    *Matcher
-	Tunnel   Upstream    // resolves through the agent (returns complete answers)
+	Tunnels  []Tunnel    // by the matcher's targets
 	Fallback TCPUpstream // everything else
-	Unrouted *Unrouted   // tunnel answers pointing at unrouted private addresses; nil: no check
 	Log      *slog.Logger
+}
+
+// Tunnel resolves the names the matcher gives one tunnel.
+type Tunnel struct {
+	Name     string    // the profile, for the log ("" with one tunnel)
+	Upstream Upstream  // resolves through the agent (returns complete answers)
+	Unrouted *Unrouted // answers pointing at private addresses its routes don't cover; nil: no check
 }
 
 const (
@@ -66,9 +72,13 @@ func (e *Engine) Answer(ctx context.Context, msg []byte, udp bool) []byte {
 
 	route := "fallback"
 	var answer []byte
-	if e.Match.Match(q.name) {
-		route = "tunnel"
-		answer, err = e.Tunnel.Exchange(ctx, msg)
+	var tun *Tunnel
+	if t, ok := e.Match.Pick(q.name); ok {
+		route, tun = "tunnel", &e.Tunnels[t]
+		if tun.Name != "" {
+			route = "tunnel:" + tun.Name
+		}
+		answer, err = tun.Upstream.Exchange(ctx, msg)
 	} else {
 		answer, err = e.Fallback.Exchange(ctx, msg)
 		if err == nil && !udp && truncated(answer) {
@@ -78,8 +88,8 @@ func (e *Engine) Answer(ctx context.Context, msg []byte, udp bool) []byte {
 	if err == nil && !answers(answer, q.header.ID) {
 		err = errors.New("answer does not match the query")
 	}
-	if err == nil && route == "tunnel" && e.Unrouted != nil {
-		if a, how := e.Unrouted.check(ctx, e.Fallback, q, msg, answer); how != "" {
+	if err == nil && tun != nil && tun.Unrouted != nil {
+		if a, how := tun.Unrouted.check(ctx, e.Fallback, q, msg, answer); how != "" {
 			answer, route = a, how
 		}
 	}

@@ -160,9 +160,15 @@ func (c *Client) CreateTun(mtu int, addr netip.Addr) (string, *os.File, error) {
 	return resp.Name, files[0], nil
 }
 
-// AddRoute routes p into the utun.
+// AddRoute routes p into the utun; in a session (after DoneSession) too.
 func (c *Client) AddRoute(p netip.Prefix) error {
 	_, _, err := c.call(Request{Op: OpAddRoute, CIDR: p.String()})
+	return err
+}
+
+// DeleteRoute removes a route AddRoute added; in a session too.
+func (c *Client) DeleteRoute(p netip.Prefix) error {
+	_, _, err := c.call(Request{Op: OpDeleteRoute, CIDR: p.String()})
 	return err
 }
 
@@ -218,7 +224,7 @@ func (c *Client) Done() error {
 }
 
 // DoneSession ends setup but keeps the helper running: it accepts firewall
-// updates and removes the firewall rules when this process closes the
+// updates and route changes, and removes the firewall rules when this process closes the
 // connection, exits or dies. Exited reports if the helper goes away first.
 func (c *Client) DoneSession() error {
 	_, _, err := c.call(Request{Op: OpDone, Session: true})

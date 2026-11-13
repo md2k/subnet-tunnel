@@ -54,9 +54,24 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	if err != nil {
 		return nil, err
 	}
+	c.Host = k.cfg.Host
 	c.Endpoints = transport.ResolveEndpoint(ctx, k.cfg.Host)
 	c.Local = transport.IsLocal(k.cfg.Host, c.Endpoints)
 	return c, nil
+}
+
+// Endpoint returns the API server's address from the kubeconfig, without
+// connecting (several tunnels exclude every endpoint from every route).
+func Endpoint(t Target) (string, error) {
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if t.Kubeconfig != "" {
+		rules.ExplicitPath = t.Kubeconfig
+	}
+	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{CurrentContext: t.Context}).ClientConfig()
+	if err != nil {
+		return "", fmt.Errorf("kubeconfig: %w", err)
+	}
+	return cfg.Host, nil
 }
 
 type kube struct {
@@ -208,6 +223,10 @@ func (d debugOnly) Enabled(ctx context.Context, _ slog.Level) bool {
 }
 
 func (d debugOnly) Handle(ctx context.Context, r slog.Record) error {
+	// Error records reach Handle without Enabled being asked (logr's Error).
+	if !d.Handler.Enabled(ctx, slog.LevelDebug) {
+		return nil
+	}
 	r.Level = slog.LevelDebug
 	return d.Handler.Handle(ctx, r)
 }

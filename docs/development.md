@@ -42,16 +42,16 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/transport` | get an agent running in a target (probe, choose binary or Python, start) |
 | `internal/transport/k8s`, `.../docker` | exec into a pod / container |
 | `internal/socks` | SOCKS5 frontend |
-| `internal/cli` | the commands; planning of routes (automatic excludes), DNS and the kill switch; dry-run output |
-| `internal/capture` | utun capture setup: helper → utun + routes → netstack; the DNS runtime; the kill switch guard following the local networks |
-| `internal/dns` | DNS engine: match names (`.` leaves local names alone), tunnel or fallback, answers outside the routes, UDP/TCP listener, loop-free forwarder |
+| `internal/cli` | the commands; planning of routes (automatic excludes), DNS and the kill switch; dry-run output; several profiles (`multi.go`: planning, each profile's tunnel; `router.go`: a connection's tunnel) |
+| `internal/capture` | utun capture setup: helper → utun + routes → netstack; the DNS runtime; the kill switch guard following the local networks; routes and guard changing while running |
+| `internal/dns` | DNS engine: match names (`.` leaves local names alone) and pick a tunnel among several, tunnel or fallback, answers outside the routes, UDP/TCP listener, loop-free forwarder |
 | `internal/routes` | route planning: excludes by subtraction, cleanup, safety checks |
 | `internal/config` | YAML config profiles |
 | `internal/importer` | `subtun import sshuttle`: sshuttle options file → profile, insertion into a config file |
 | `internal/netinfo` | local interface networks and default gateway (read-only) |
 | `internal/netstack` | gVisor stack on a packet device; dials each captured connection through the tunnel; loop guard; hands packets for the utun's own address back |
 | `internal/tundev` | utun as a netstack device (macOS) |
-| `internal/privhelper` | the root helper (`subtun helper`) and subtun's side of it |
+| `internal/privhelper` | the root helper (`subtun helper`) and subtun's side of it; a session also takes route changes |
 | `internal/platform` | OS driver interfaces used by the helper (`Tun`, `Routes`, `Firewall`, `DNSCache`) |
 | `internal/platform/darwin`, `.../fake` | macOS drivers (utun, `/sbin/route`, pf, DNS cache); recording fakes for tests |
 | `internal/relay` | bidirectional copy with half-close |
@@ -198,6 +198,34 @@ The log shows `connection to the agent lost; reconnecting`, `reconnecting attemp
 `reconnected ... after`. Deleting the pod and applying `test/dev` again does the same once the pod is
 back; without it, subtun gives up after the attempts. No root is needed for this with SOCKS; with
 routes, `netstat -rn -f inet | grep utun` shows the routes staying throughout.
+
+### Several profiles
+
+Without root, through SOCKS: one profile per target, plus one that can't connect.
+
+```sh
+cat > build/multi.yaml <<'EOF'
+profiles:
+  kube:
+    target: {k8s: {context: docker-desktop, namespace: subtun-dev, pod: target}}
+    socks: 127.0.0.1:17080
+  dock:
+    target: {docker: {container: subtun-dev-target-1}}
+    socks: 127.0.0.1:17081
+  ghost:
+    target: {k8s: {context: docker-desktop, namespace: subtun-dev, pod: no-such-pod}}
+    socks: 127.0.0.1:17082
+    reconnect: {attempts: 1}
+EOF
+build/subtun --config build/multi.yaml up --profile kube,dock,ghost
+curl --socks5-hostname 127.0.0.1:17080 http://web.subtun-dev.svc.cluster.local:8080/  # the pod's
+curl --socks5-hostname 127.0.0.1:17081 http://web:8080/                               # the container's
+```
+
+Log lines carry `tunnel=<profile>`. `ghost` logs `gave up` and the others carry on; with only
+profiles that can't connect, subtun exits with `every profile gave up`. With routes (sudo),
+`netstat -rn -f inet | grep utun` shows a profile's routes appear when its tunnel is up and go
+when it gives up (unless it has a kill switch); `--dry-run` shows which tunnel each route goes to.
 
 ### Loop guard (needs sudo, run by hand)
 

@@ -33,7 +33,8 @@ import (
 // Ops.
 const (
 	OpCreateTun     = "create_tun"
-	OpAddRoute      = "add_route"
+	OpAddRoute      = "add_route"    // also during a session
+	OpDeleteRoute   = "delete_route" // a route this helper added; also during a session
 	OpApplyFirewall = "apply_firewall"
 	OpDone          = "done"
 	OpEnd           = "end"     // session: end it, keeping the persist rules or not
@@ -74,6 +75,7 @@ const (
 	connTimeout = 3 * time.Minute // includes typing the sudo password
 	maxServers  = 16
 	maxGuarded  = 8192 // kill switch prefixes
+	maxRoutes   = 8192
 )
 
 // ValidateMTU checks an MTU for the utun.

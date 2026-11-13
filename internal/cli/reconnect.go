@@ -23,24 +23,35 @@ const (
 	defaultReconnectMaxDelay = time.Minute
 )
 
-// errReconnecting is what dials and DNS get while the tunnel is down.
-var errReconnecting = fmt.Errorf("the tunnel is down, reconnecting (%w)", netstack.ErrNoTunnel)
+// What dials and DNS get while the tunnel is down.
+var (
+	errReconnecting = fmt.Errorf("the tunnel is down, reconnecting (%w)", netstack.ErrNoTunnel)
+	errGaveUp       = fmt.Errorf("the tunnel gave up reconnecting (%w)", netstack.ErrNoTunnel)
+)
 
 // liveTunnel is the tunnel client in use, swapped when subtun reconnects.
 // The capture, the SOCKS proxy and DNS all go through it. While
 // reconnecting it has none, so new connections and DNS fail at once
 // instead of hanging.
 type liveTunnel struct {
-	cur atomic.Pointer[tunnel.Client]
+	cur  atomic.Pointer[tunnel.Client]
+	gone atomic.Bool // gave up (several profiles: the others go on)
 }
 
 func (l *liveTunnel) set(c *tunnel.Client) { l.cur.Store(c) }
+
+func (l *liveTunnel) down() error {
+	if l.gone.Load() {
+		return errGaveUp
+	}
+	return errReconnecting
+}
 
 // DialContext implements netstack.Dialer and socks.Dialer.
 func (l *liveTunnel) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	c := l.cur.Load()
 	if c == nil {
-		return nil, errReconnecting
+		return nil, l.down()
 	}
 	return c.DialContext(ctx, network, addr)
 }
@@ -49,7 +60,7 @@ func (l *liveTunnel) DialContext(ctx context.Context, network, addr string) (net
 func (l *liveTunnel) ExchangeDNS(ctx context.Context, query []byte) ([]byte, error) {
 	c := l.cur.Load()
 	if c == nil {
-		return nil, errReconnecting
+		return nil, l.down()
 	}
 	return c.ExchangeDNS(ctx, query)
 }
@@ -111,6 +122,7 @@ var errHelperGone = errors.New("the root helper exited while reconnecting")
 // reconnect retries connecting by p, giving up early when ctx ends or stop
 // closes (the root helper went away).
 func reconnect(ctx context.Context, p reconnectPolicy, stop <-chan struct{}, try func(context.Context) (*session, error), log *slog.Logger) (*session, error) {
+	var last error
 	for n := 1; n <= p.attempts; n++ {
 		w := p.wait(n, rand.Float64)
 		log.Info("reconnecting", "attempt", n, "of", p.attempts, "in", w.Round(10*time.Millisecond))
@@ -129,8 +141,12 @@ func reconnect(ctx context.Context, p reconnectPolicy, stop <-chan struct{}, try
 			return nil, ctx.Err()
 		}
 		log.Warn("reconnect attempt failed", "attempt", n, "err", err)
+		last = err
 	}
-	return nil, fmt.Errorf("connection to the agent was lost; gave up after %d reconnect attempts", p.attempts)
+	if last == nil {
+		return nil, fmt.Errorf("gave up after %d reconnect attempts", p.attempts)
+	}
+	return nil, fmt.Errorf("gave up after %d reconnect attempts (last: %w)", p.attempts, last)
 }
 
 // routedEndpoints are the carrier's addresses that the routes cover: after

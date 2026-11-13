@@ -34,6 +34,7 @@ func TestDocExamplesPlan(t *testing.T) {
 				t.Errorf("%s: %v", doc, err)
 				continue
 			}
+			var specs []*tunnelSpec
 			for _, name := range f.Names() {
 				p, err := f.Profile(name)
 				if err != nil {
@@ -41,8 +42,10 @@ func TestDocExamplesPlan(t *testing.T) {
 					continue
 				}
 				n++
-				s := settings{tunAddr: capture.DefaultTunAddr, mtu: capture.DefaultMTU, agent: transport.AgentAuto}
+				s := settings{tunAddr: capture.DefaultTunAddr, mtu: capture.DefaultMTU, agent: transport.AgentAuto,
+					reconnectAttempts: defaultReconnectAttempts, reconnectDelay: defaultReconnectDelay, reconnectMaxDelay: defaultReconnectMaxDelay}
 				s.applyProfile(p, pflag.NewFlagSet("none", pflag.ContinueOnError))
+				specs = append(specs, &tunnelSpec{name: name, s: s, cfg: p, endpoint: func() (string, error) { return "", nil }})
 				rp, _, err := planRoutes(s)
 				if err == nil {
 					_, _, err = planDNS(s, rp)
@@ -53,6 +56,13 @@ func TestDocExamplesPlan(t *testing.T) {
 				if err != nil {
 					t.Errorf("%s: profile %s doesn't plan: %v", doc, name, err)
 				}
+			}
+			// An example with several profiles must also run as a set.
+			if len(specs) > 1 {
+				if _, err := planMulti(specs); err != nil {
+					t.Errorf("%s: profiles %v don't plan together: %v", doc, f.Names(), err)
+				}
+				t.Logf("%s: planned %v together", doc, f.Names())
 			}
 		}
 	}

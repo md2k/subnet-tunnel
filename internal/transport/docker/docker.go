@@ -55,9 +55,21 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	if err != nil {
 		return nil, err
 	}
+	carrier.Host = cli.DaemonHost()
 	carrier.Endpoints = transport.ResolveEndpoint(ctx, cli.DaemonHost())
 	carrier.Local = transport.IsLocal(cli.DaemonHost(), carrier.Endpoints)
 	return carrier, nil
+}
+
+// Endpoint returns the Docker daemon's address, without connecting
+// (several tunnels exclude every endpoint from every route).
+func Endpoint(t Target) (string, error) {
+	cli, err := newClient(t)
+	if err != nil {
+		return "", err
+	}
+	defer cli.Close()
+	return cli.DaemonHost(), nil
 }
 
 func newClient(t Target) (*client.Client, error) {

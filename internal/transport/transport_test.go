@@ -244,3 +244,20 @@ func TestIsLocal(t *testing.T) {
 		}
 	}
 }
+
+func TestHostName(t *testing.T) {
+	for raw, want := range map[string]string{
+		"https://api.dev.example.com:6443": "api.dev.example.com",
+		"https://192.0.2.10:6443":          "192.0.2.10",
+		"tcp://198.51.100.7:2376":          "198.51.100.7",
+		"unix:///var/run/docker.sock":      "",
+		"npipe:////./pipe/docker_engine":   "",
+		"api.example.com:443":              "api.example.com",
+		"[2001:db8::1]:6443":               "2001:db8::1",
+		"kubernetes.docker.internal":       "kubernetes.docker.internal",
+	} {
+		if got := HostName(raw); got != want {
+			t.Errorf("HostName(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}

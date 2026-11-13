@@ -1,7 +1,12 @@
 package k8s
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
+	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,5 +54,25 @@ func TestPickContainer(t *testing.T) {
 				t.Fatalf("got %q, %v; want %q", got, err, tc.want)
 			}
 		})
+	}
+}
+
+// client-go's messages are debug output: an error record (which reaches
+// Handle without Enabled being asked) is dropped unless debug is on.
+func TestDebugOnly(t *testing.T) {
+	for _, verbose := range []bool{false, true} {
+		var buf bytes.Buffer
+		level := slog.LevelInfo
+		if verbose {
+			level = slog.LevelDebug
+		}
+		h := debugOnly{slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: level})}
+		r := slog.NewRecord(time.Now(), slog.LevelError, "Copying stdin failed", 0)
+		if err := h.Handle(context.Background(), r); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(buf.String(), "level=DEBUG"); got != verbose {
+			t.Errorf("verbose %v: %q", verbose, buf.String())
+		}
 	}
 }

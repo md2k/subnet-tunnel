@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,23 +19,34 @@ type DNSOptions struct {
 	Match    *dns.Matcher
 	Servers  []netip.Addr     // captured: the system's DNS servers, or a pinned list
 	Auto     bool             // follow the system's servers when the network changes
+	Pinned   []netip.Addr     // with Auto: captured as well as the system's (several profiles)
 	Fallback []netip.AddrPort // for names not matched; nil: the captured servers
-	Tunnel   dns.Upstream     // resolves matched names through the agent
-	// Tunnel answers pointing at addresses Unreachable reports (private, no
-	// route covers them) are handled by Unrouted (dns.unrouted); nil: no
-	// check.
-	Unrouted    string
-	Unreachable func(netip.Addr) bool
+	Tunnels  []DNSTunnel      // by the matcher's targets
 	// Locals reads the machine's networks: with ".", their reverse zones
 	// stay with the fallback, following network changes. nil: none.
 	Locals func() []netip.Prefix
 }
 
+// DNSTunnel is one tunnel's share of DNS.
+type DNSTunnel struct {
+	Name     string       // the profile ("" with one tunnel)
+	Upstream dns.Upstream // resolves its names through the agent
+	// Answers pointing at addresses Unreachable reports (private, none of
+	// this tunnel's routes covers them) are handled by Unrouted
+	// (dns.unrouted); nil: no check.
+	Unrouted    string
+	Unreachable func(netip.Addr) bool
+}
+
 // Engine builds the DNS engine for these options.
 func (o *DNSOptions) Engine(fallback dns.TCPUpstream, log *slog.Logger) *dns.Engine {
-	e := &dns.Engine{Match: o.Match, Tunnel: o.Tunnel, Fallback: fallback, Log: log}
-	if o.Unreachable != nil {
-		e.Unrouted = &dns.Unrouted{Mode: o.Unrouted, Unreachable: o.Unreachable, Log: log}
+	e := &dns.Engine{Match: o.Match, Fallback: fallback, Log: log}
+	for _, t := range o.Tunnels {
+		dt := dns.Tunnel{Name: t.Name, Upstream: t.Upstream}
+		if t.Unreachable != nil {
+			dt.Unrouted = &dns.Unrouted{Mode: t.Unrouted, Unreachable: t.Unreachable, Log: log}
+		}
+		e.Tunnels = append(e.Tunnels, dt)
 	}
 	return e
 }
@@ -124,6 +136,13 @@ func (r *dnsRuntime) logReady(log *slog.Logger) {
 func (r *dnsRuntime) follow(ctx context.Context, interval time.Duration, log *slog.Logger, apply func() error) {
 	read := func() ([]netip.Addr, []string, error) {
 		servers, notes, err := dns.SystemServers(dns.ResolvConf)
+		if err == nil && len(servers) > 0 {
+			for _, a := range r.opts.Pinned {
+				if !slices.Contains(servers, a) {
+					servers = append(servers, a)
+				}
+			}
+		}
 		// The search domains change with the network too; skip the moments
 		// mid-change when the file is empty.
 		if err == nil && len(servers) > 0 && r.opts.Match.CatchAll() {

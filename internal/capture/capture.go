@@ -8,8 +8,11 @@ package capture
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"sync"
 	"time"
 
@@ -44,14 +47,19 @@ type Options struct {
 	DNS     *DNSOptions
 
 	// KillSwitch: "" or off; on: blocking rules stay after a crash or a lost
-	// tunnel; lockdown: also after a deliberate stop.
+	// tunnel; lockdown: also after a deliberate stop. Guard says what is
+	// guarded, and which part is in lockdown (several tunnels can mix).
 	KillSwitch string
-	Guarded    []netip.Prefix // what the kill switch blocks outside the tunnel
-	AllowDNS   bool           // DNS stays allowed while the kill switch holds
+	Guard      Guard
+	AllowDNS   bool // DNS stays allowed while the kill switch holds
 	BlockIPv6  bool
-	// Locals reads the machine's networks. With a kill switch the guard
-	// follows them (see guardState); nil: it stays as given.
+	// Locals reads the machine's networks: they stay out of the guard, which
+	// follows them (see guardState). nil: none.
 	Locals func() []netip.Prefix
+
+	// Session keeps the root helper up even without firewall rules, so
+	// routes can change while running (Update; several tunnels).
+	Session bool
 
 	// Helper, if set, was started earlier (to take over an earlier session's
 	// rules before connecting) and is used instead of starting one.
@@ -60,15 +68,38 @@ type Options struct {
 
 func (o Options) killSwitch() bool { return o.KillSwitch == "on" || o.KillSwitch == "lockdown" }
 
+func (o Options) locals() []netip.Prefix {
+	if o.Locals == nil {
+		return nil
+	}
+	return o.Locals()
+}
+
+// sessionHelper is what a running capture asks of the root helper.
+type sessionHelper interface {
+	AddRoute(netip.Prefix) error
+	DeleteRoute(netip.Prefix) error
+	ApplyFirewall(platform.Rules, *platform.Rules) error
+	End(keep bool) error
+	Close() error
+	Exited() <-chan struct{}
+}
+
 // Capture is a running utun capture.
 type Capture struct {
-	Name     string // utunN
-	stack    *netstack.Stack
-	helper   *privhelper.Client // session mode only (firewall rules)
-	dns      *dnsRuntime
-	stop     context.CancelFunc
-	lockdown bool
-	keeps    bool // rules stay behind when the tunnel goes away
+	Name   string // utunN
+	stack  *netstack.Stack
+	helper sessionHelper // session mode only
+	dns    *dnsRuntime
+	stop   context.CancelFunc
+	opts   Options
+	guard  *guardState // with a kill switch
+	log    *slog.Logger
+
+	mu      sync.Mutex     // firewall updates and route changes, one at a time
+	routes  []netip.Prefix // on the utun
+	dirty   bool           // the guard changed but applying it failed: retry
+	stopped bool           // stopping: no more firewall updates
 }
 
 // HelperExited is closed if the root helper of a session goes away; nil
@@ -83,22 +114,138 @@ func (c *Capture) HelperExited() <-chan struct{} {
 // Stop undoes the capture in order: firewall rules first, then the DNS
 // engine, then the stack and utun (macOS removes the interface and its
 // routes). deliberate is a stop the user asked for (Ctrl-C): the kill
-// switch's rules go, unless in lockdown. Any other end (lost tunnel,
-// errors) leaves them in place. It reports whether rules were left behind.
+// switch's rules go, except the lockdown part. Any other end (lost tunnel,
+// errors) leaves them all in place. It reports whether rules were left
+// behind.
 func (c *Capture) Stop(deliberate bool) (leftBehind bool) {
-	c.stop() // stops following DNS server changes
-	if c.helper != nil {
-		leftBehind = c.keeps && (!deliberate || c.lockdown)
-		if deliberate {
-			_ = c.helper.End(c.lockdown)
-		}
-		_ = c.helper.Close() // without End: the helper applies the crash policy
-	}
+	c.stop() // stops following DNS server and network changes
+	leftBehind = c.stopHelper(deliberate)
 	if c.dns != nil {
 		c.dns.close()
 	}
 	_ = c.stack.Close()
 	return leftBehind
+}
+
+// stopHelper ends the session helper, if any, and reports whether rules
+// stay behind. Firewall updates still queued (network or DNS server
+// changes) are dropped from here on, so they can't undo the narrowing.
+func (c *Capture) stopHelper(deliberate bool) (leftBehind bool) {
+	if c.helper == nil {
+		return false
+	}
+	c.mu.Lock()
+	c.stopped = true
+	if deliberate {
+		leftBehind = c.narrowForStop()
+	} else {
+		leftBehind = c.guard != nil && len(c.guard.get()) > 0
+	}
+	c.mu.Unlock()
+	if deliberate {
+		_ = c.helper.End(leftBehind)
+	}
+	_ = c.helper.Close() // without End: the helper applies the crash policy
+	return leftBehind
+}
+
+// narrowForStop makes the rules that stay after a deliberate stop the
+// lockdown part of the guard, and reports whether any stay. c.mu is held.
+func (c *Capture) narrowForStop() bool {
+	if c.guard == nil {
+		return false
+	}
+	guarded, lockdown := c.guard.get(), c.guard.getLockdown()
+	if len(lockdown) == 0 || slices.Equal(lockdown, guarded) && !c.dirty {
+		return len(lockdown) > 0
+	}
+	running, persist := rules(c.opts, guarded, lockdown, c.Name, c.dns)
+	if err := c.helper.ApplyFirewall(running, persist); err != nil {
+		c.log.Warn("kill switch: keeping the whole guard after the stop, narrowing it to the lockdown profiles failed", "err", err)
+	}
+	return true
+}
+
+// Update replaces the utun's routes and the kill switch's guard (several
+// tunnels: profiles come and go). Routes are added first, then the
+// firewall rules follow the guard, then routes go, so no address leaves the
+// tunnel in between. A route that can't be added or removed doesn't hold
+// up the others; if the guard can't be applied, nothing is removed. The
+// next Update tries again. It needs a session (Options.Session).
+func (c *Capture) Update(prefixes []netip.Prefix, g Guard) error {
+	if c.helper == nil {
+		return errors.New("route changes need the session helper")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopped {
+		return errors.New("stopping")
+	}
+	var errs []error
+	for _, p := range prefixes {
+		if slices.Contains(c.routes, p) {
+			continue
+		}
+		if err := c.helper.AddRoute(p); err != nil {
+			errs = append(errs, err) // the others still go in; tried again next time
+			continue
+		}
+		c.routes = append(c.routes, p)
+	}
+	if c.guard != nil {
+		changed, err := c.guard.setBase(g)
+		if err != nil {
+			return errors.Join(append(errs, err)...)
+		}
+		if changed || c.dirty {
+			if err := c.applyLocked(); err != nil {
+				c.dirty = true
+				return errors.Join(append(errs, fmt.Errorf("updating the kill switch: %w", err))...)
+			}
+			c.dirty = false
+		}
+	}
+	for _, p := range slices.Clone(c.routes) {
+		if slices.Contains(prefixes, p) {
+			continue
+		}
+		if err := c.helper.DeleteRoute(p); err != nil {
+			errs = append(errs, err) // kept, tried again next time
+			continue
+		}
+		c.routes = slices.DeleteFunc(c.routes, func(q netip.Prefix) bool { return q == p })
+	}
+	return errors.Join(errs...)
+}
+
+// Routes returns the routes on the utun.
+func (c *Capture) Routes() []netip.Prefix {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.routes)
+}
+
+// apply re-sends the whole firewall rule set (DNS servers, local networks
+// or the guard changed).
+func (c *Capture) apply() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopped {
+		return nil
+	}
+	return c.applyLocked()
+}
+
+func (c *Capture) applyLocked() error {
+	var guarded []netip.Prefix
+	if c.guard != nil {
+		guarded = c.guard.get()
+	}
+	running, persist := rules(c.opts, guarded, guarded, c.Name, c.dns)
+	if running.Empty() {
+		return errors.New("no firewall rules left to apply")
+	}
+	return c.helper.ApplyFirewall(running, persist)
 }
 
 // Start creates the utun with the given routes (already planned and
@@ -147,11 +294,23 @@ func Start(ctx context.Context, prefixes []netip.Prefix, opts Options, dialer ne
 			return fail(err)
 		}
 	}
-	running, persist := rules(opts, name, dr)
-	session := !running.Empty()
-	if session {
-		if err := h.ApplyFirewall(running, persist); err != nil {
+	var guard *guardState
+	if opts.killSwitch() {
+		if guard, err = newGuardState(opts.Guard, opts.locals()); err != nil {
 			return fail(err)
+		}
+	}
+	var guarded []netip.Prefix
+	if guard != nil {
+		guarded = guard.get()
+	}
+	running, persist := rules(opts, guarded, guarded, name, dr)
+	session := !running.Empty() || opts.Session
+	if session {
+		if !running.Empty() {
+			if err := h.ApplyFirewall(running, persist); err != nil {
+				return fail(err)
+			}
 		}
 		if err := h.DoneSession(); err != nil {
 			return fail(err)
@@ -179,58 +338,55 @@ func Start(ctx context.Context, prefixes []netip.Prefix, opts Options, dialer ne
 	}
 	log.Info("capturing", "utun", name, "routes", len(prefixes), "mtu", dev.MTU(), "addr", opts.TunAddr)
 
-	c := &Capture{Name: name, stack: st, dns: dr, stop: stop, lockdown: opts.KillSwitch == "lockdown", keeps: persist != nil}
-	if session {
-		c.helper = h
-		if opts.killSwitch() {
-			hold := "allowed"
-			if dr != nil && !opts.AllowDNS {
-				hold = "blocked"
-			}
-			log.Info("kill switch on", "mode", opts.KillSwitch, "guarded_prefixes", len(opts.Guarded), "dns_while_holding", hold)
+	c := &Capture{Name: name, stack: st, dns: dr, stop: stop, opts: opts, guard: guard, log: log,
+		routes: slices.Clone(prefixes)}
+	if !session {
+		return c, nil
+	}
+	c.helper = h
+	if guard != nil {
+		hold := "allowed"
+		if dr != nil && !opts.AllowDNS {
+			hold = "blocked"
 		}
-		if opts.BlockIPv6 {
-			log.Info("outgoing IPv6 blocked (link-local, multicast and loopback still allowed)")
+		log.Info("kill switch on", "mode", opts.KillSwitch, "guarded_prefixes", len(guarded),
+			"lockdown_prefixes", len(guard.getLockdown()), "dns_while_holding", hold)
+		if opts.Locals != nil {
+			go followLocals(ctx, followEvery, opts.Locals, guard, c.apply, log)
 		}
-		// The DNS servers and the local networks are followed separately;
-		// both re-send the whole rule set, one at a time.
-		guard := &guardState{prefixes: opts.Guarded}
-		var applyMu sync.Mutex
-		apply := func() error {
-			applyMu.Lock()
-			defer applyMu.Unlock()
-			o := opts
-			o.Guarded = guard.get()
-			running, persist := rules(o, name, dr)
-			return h.ApplyFirewall(running, persist)
-		}
-		if dr != nil {
-			dr.logReady(log)
-			if opts.DNS.Auto {
-				go dr.follow(ctx, followEvery, log, apply)
-			}
-		}
-		if opts.killSwitch() && len(opts.Guarded) > 0 && opts.Locals != nil {
-			go followLocals(ctx, followEvery, prefixes, opts.Locals, guard, apply, log)
+	}
+	if opts.BlockIPv6 {
+		log.Info("outgoing IPv6 blocked (link-local, multicast and loopback still allowed)")
+	}
+	// The DNS servers and the local networks are followed separately;
+	// both re-send the whole rule set, one at a time.
+	if dr != nil {
+		dr.logReady(log)
+		if opts.DNS.Auto {
+			go dr.follow(ctx, followEvery, log, c.apply)
 		}
 	}
 	return c, nil
 }
 
 // rules builds the firewall rules for the session, and the ones that stay
-// when the tunnel goes away (nil without a kill switch).
-func rules(opts Options, iface string, dr *dnsRuntime) (running platform.Rules, persist *platform.Rules) {
+// when the tunnel goes away (nil without a kill switch): guarded is
+// guarded while running, kept stays blocked.
+func rules(opts Options, guarded, kept []netip.Prefix, iface string, dr *dnsRuntime) (running platform.Rules, persist *platform.Rules) {
 	var servers []netip.Addr
 	if dr != nil {
 		running.DNS = dr.redirect()
 		servers = running.DNS.Servers
 	}
 	running.BlockIPv6 = opts.BlockIPv6
-	if !opts.killSwitch() || len(opts.Guarded) == 0 {
+	if !opts.killSwitch() || len(guarded) == 0 {
 		return running, nil
 	}
-	running.KillSwitch = &platform.KillSwitch{TunIface: iface, Prefixes: opts.Guarded}
-	persist = &platform.Rules{KillSwitch: &platform.KillSwitch{Prefixes: opts.Guarded}, BlockIPv6: opts.BlockIPv6}
+	running.KillSwitch = &platform.KillSwitch{TunIface: iface, Prefixes: guarded}
+	if len(kept) == 0 {
+		return running, nil
+	}
+	persist = &platform.Rules{KillSwitch: &platform.KillSwitch{Prefixes: kept}, BlockIPv6: opts.BlockIPv6}
 	if dr != nil && !opts.AllowDNS {
 		persist.DNSBlock = servers
 	}
