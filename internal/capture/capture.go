@@ -10,6 +10,7 @@ import (
 	"context"
 	"log/slog"
 	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/md2k/subnet-tunnel/internal/netstack"
@@ -29,6 +30,10 @@ const (
 	// 198.18.0.0/15 is reserved for benchmarking (RFC 2544): real networks,
 	// VPN clients and corporate address plans don't use it.
 	DefaultTunAddr = "198.18.249.1"
+
+	// followEvery is how often the DNS servers and local networks are
+	// checked for changes.
+	followEvery = 5 * time.Second
 )
 
 // Options configures the utun and, optionally, DNS capture and the
@@ -44,6 +49,9 @@ type Options struct {
 	Guarded    []netip.Prefix // what the kill switch blocks outside the tunnel
 	AllowDNS   bool           // DNS stays allowed while the kill switch holds
 	BlockIPv6  bool
+	// Locals reads the machine's networks. With a kill switch the guard
+	// follows them (see guardState); nil: it stays as given.
+	Locals func() []netip.Prefix
 
 	// Helper, if set, was started earlier (to take over an earlier session's
 	// rules before connecting) and is used instead of starting one.
@@ -184,14 +192,26 @@ func Start(ctx context.Context, prefixes []netip.Prefix, opts Options, dialer ne
 		if opts.BlockIPv6 {
 			log.Info("outgoing IPv6 blocked (link-local, multicast and loopback still allowed)")
 		}
+		// The DNS servers and the local networks are followed separately;
+		// both re-send the whole rule set, one at a time.
+		guard := &guardState{prefixes: opts.Guarded}
+		var applyMu sync.Mutex
+		apply := func() error {
+			applyMu.Lock()
+			defer applyMu.Unlock()
+			o := opts
+			o.Guarded = guard.get()
+			running, persist := rules(o, name, dr)
+			return h.ApplyFirewall(running, persist)
+		}
 		if dr != nil {
 			dr.logReady(log)
 			if opts.DNS.Auto {
-				go dr.follow(ctx, 5*time.Second, log, func() error {
-					running, persist := rules(opts, name, dr)
-					return h.ApplyFirewall(running, persist)
-				})
+				go dr.follow(ctx, followEvery, log, apply)
 			}
+		}
+		if opts.killSwitch() && len(opts.Guarded) > 0 && opts.Locals != nil {
+			go followLocals(ctx, followEvery, prefixes, opts.Locals, guard, apply, log)
 		}
 	}
 	return c, nil

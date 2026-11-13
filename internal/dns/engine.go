@@ -41,6 +41,7 @@ type Engine struct {
 	Match    *Matcher
 	Tunnel   Upstream    // resolves through the agent (returns complete answers)
 	Fallback TCPUpstream // everything else
+	Unrouted *Unrouted   // tunnel answers pointing at unrouted private addresses; nil: no check
 	Log      *slog.Logger
 }
 
@@ -76,6 +77,11 @@ func (e *Engine) Answer(ctx context.Context, msg []byte, udp bool) []byte {
 	}
 	if err == nil && !answers(answer, q.header.ID) {
 		err = errors.New("answer does not match the query")
+	}
+	if err == nil && route == "tunnel" && e.Unrouted != nil {
+		if a, how := e.Unrouted.check(ctx, e.Fallback, q, msg, answer); how != "" {
+			answer, route = a, how
+		}
 	}
 	if err != nil {
 		e.Log.Debug("dns: failed", "name", q.name, "type", q.question.Type, "via", route, "err", err)

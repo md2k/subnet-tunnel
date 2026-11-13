@@ -120,6 +120,7 @@ type settings struct {
 	dnsDomains  []string
 	dnsPatterns []string
 	dnsFallback string
+	dnsUnrouted string
 
 	killSwitch    string
 	killSwitchDNS string
@@ -146,6 +147,7 @@ func (s *settings) register(cmd *cobra.Command) {
 	f.StringSliceVar(&s.dnsServers, "dns-servers", nil, "DNS servers whose queries are captured (default auto: the system's, followed when the network changes)")
 	f.StringVar(&s.dnsFallback, "dns-fallback", "", "resolver for all other names: system (default) or IP[:port]")
 	f.StringVar(&s.dnsCapture, "dns-capture", "", "how DNS is captured: firewall (default, pf on macOS) or off")
+	f.StringVar(&s.dnsUnrouted, "dns-unrouted", "", "a name resolved through the tunnel to a private address no route covers: warn (default), fallback (answer from the normal resolver) or block (drop those addresses)")
 	f.StringVar(&s.dnsListen, "dns-listen", "", "answer DNS on this address instead of capturing it, no root needed (development)")
 	_ = f.MarkHidden("dns-listen")
 	f.StringVar(&s.killSwitch, "kill-switch", "", "keep routed traffic from leaving outside the tunnel: off (default), on (blocks stay after a crash or a lost tunnel), lockdown (also after Ctrl-C)")
@@ -184,6 +186,9 @@ func (s *settings) applyProfile(p config.Profile, flags *pflag.FlagSet) {
 	}
 	if !set("dns-fallback") {
 		s.dnsFallback = p.DNS.Fallback
+	}
+	if !set("dns-unrouted") {
+		s.dnsUnrouted = p.DNS.Unrouted
 	}
 	s.dnsDomains = append(append([]string{}, p.DNS.Domains...), s.dnsDomains...)
 	s.dnsPatterns = append(append([]string{}, p.DNS.Patterns...), s.dnsPatterns...)
@@ -539,6 +544,9 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 	errc := make(chan error, 1)
 	if s.dnsListen != "" && dnsOpts != nil {
 		dnsOpts.Tunnel = dns.UpstreamFunc(client.ExchangeDNS)
+		if rp != nil {
+			dnsOpts.Unreachable = unreachable(rp.plan.Routes)
+		}
 		stopDNS, err := serveDNSDev(ctx, s.dnsListen, dnsOpts, log)
 		if err != nil {
 			return err
@@ -565,6 +573,7 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		opts := rp.opts
 		if dnsOpts != nil {
 			dnsOpts.Tunnel = dns.UpstreamFunc(client.ExchangeDNS)
+			dnsOpts.Unreachable = unreachable(final)
 			opts.DNS = dnsOpts
 		}
 		opts.KillSwitch, opts.AllowDNS, opts.BlockIPv6 = gp.killSwitch, gp.allowDNS, gp.blockIPv6
@@ -581,6 +590,7 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 			if len(opts.Guarded) == 0 {
 				log.Warn("kill switch has nothing to guard: every route is a local network")
 			}
+			opts.Locals = localPrefixes
 		}
 		opts.Helper, early = early, nil
 		if opts.DNS != nil || gp.on() || gp.blockIPv6 {

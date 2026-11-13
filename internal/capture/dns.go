@@ -20,6 +20,20 @@ type DNSOptions struct {
 	Auto     bool             // follow the system's servers when the network changes
 	Fallback []netip.AddrPort // for names not matched; nil: the captured servers
 	Tunnel   dns.Upstream     // resolves matched names through the agent
+	// Tunnel answers pointing at addresses Unreachable reports (private, no
+	// route covers them) are handled by Unrouted (dns.unrouted); nil: no
+	// check.
+	Unrouted    string
+	Unreachable func(netip.Addr) bool
+}
+
+// Engine builds the DNS engine for these options.
+func (o *DNSOptions) Engine(fallback dns.TCPUpstream, log *slog.Logger) *dns.Engine {
+	e := &dns.Engine{Match: o.Match, Tunnel: o.Tunnel, Fallback: fallback, Log: log}
+	if o.Unreachable != nil {
+		e.Unrouted = &dns.Unrouted{Mode: o.Unrouted, Unreachable: o.Unreachable, Log: log}
+	}
+	return e
 }
 
 // dnsRuntime is the running DNS engine: listener, fallback forwarder and the
@@ -55,7 +69,7 @@ func startDNS(ctx context.Context, opts *DNSOptions, log *slog.Logger) (*dnsRunt
 	servers := opts.Servers
 	r.servers.Store(&servers)
 	r.fwd = dns.NewForwarder(bpc, dial, r.fallback)
-	eng := &dns.Engine{Match: opts.Match, Tunnel: opts.Tunnel, Fallback: r.fwd, Log: log}
+	eng := opts.Engine(r.fwd, log)
 	r.wg.Add(2)
 	go func() {
 		defer r.wg.Done()

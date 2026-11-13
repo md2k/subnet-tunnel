@@ -156,6 +156,7 @@ curl http://web.team-a.svc.cluster.local:8080/      # any program, no proxy sett
 | `servers` | `--dns-servers` | `auto` | DNS servers whose queries are captured: `auto` (the system's) or IPv4 addresses |
 | `fallback` | `--dns-fallback` | `system` | resolver for everything else: `system` (the servers the query was meant for) or `IP[:port]` |
 | `capture` | `--dns-capture` | `firewall` | `firewall` (pf on macOS) or `off` |
+| `unrouted` | `--dns-unrouted` | `warn` | a name resolved through the tunnel to a private address no route covers: `warn`, `fallback` or `block` (below) |
 
 DNS capture is on as soon as `domains` or `patterns` are set, and it needs routes: it runs with the
 utun capture, and the addresses it returns are reached through your routes.
@@ -174,6 +175,20 @@ answer them. List one to send it through the tunnel anyway: `--dns-domain . --dn
 cluster.local`. Patterns win the same way. The search domains follow the system when the network
 changes (with `servers: auto`); `--dry-run` and the log list them.
 
+**Answers outside the routes** (`unrouted`). The target's resolver can answer with private addresses
+your routes don't cover: an address in its own network, or one from a VPN on that side (one answered
+`github.com` with `100.64.0.0/10` addresses). With split routes such an address goes out through your
+own network, where it means nothing, or something else entirely. Private here means 10/8, 172.16/12,
+192.168/16, 100.64/10, 169.254/16 and 198.18/15; public addresses outside the routes are reachable
+anyway, and 0.0.0.0 or 127.0.0.1 (resolvers blocking a name) are left alone. What subtun does:
+- `warn` (default): keeps the answer and logs the name and addresses, at most every 10 minutes per name;
+- `fallback`: answers from the fallback resolver instead (github's public addresses, through your
+  network);
+- `block`: drops those addresses from the answer, so programs fail at once instead of timing out.
+
+Like every setting, it works in `defaults:` and per profile. Routing such addresses into the tunnel
+automatically is planned.
+
 **Servers.** With `auto`, subtun reads the system's IPv4 DNS servers from `/etc/resolv.conf` and
 follows them when the network changes (Wi-Fi switch, VPN up or down). IPv6 DNS servers and local
 ones (`127.0.0.1`) are reported and not captured. Resolvers that only a VPN client uses for its own
@@ -186,7 +201,9 @@ DNS listener on 127.0.0.1. Your traffic itself never goes through pf. Because th
 removed again, the helper stays up for the session (one sudo prompt, as before). It removes them
 when subtun exits, crashes or is killed, on Ctrl-C, and when the terminal closes. subtun's own
 fallback queries leave from a port the rules let through, so they can't loop back into subtun even
-when the fallback is one of the captured servers.
+when the fallback is one of the captured servers. The helper flushes macOS's DNS cache when the capture
+starts, so earlier answers don't bypass it, and when it ends, so answers obtained through the tunnel
+(addresses only reachable through it) don't linger.
 
 **Limits.**
 - One DNS-capturing subtun at a time: a second one refuses to start, since it would take over the
@@ -215,13 +232,15 @@ way. The kill switch blocks it with firewall rules.
 
 | `killSwitch.dns` / `--kill-switch-dns` | While the blocks stay, with DNS capture |
 |---|---|
-| `block` (default) | DNS to the captured servers is blocked too: no name leaks to your normal resolver, and a private-link name can't resolve to a public endpoint. All DNS through those servers fails until subtun runs again or you clean up |
+| `block` (default) | DNS to the captured servers is blocked too: no name leaks to your normal resolver, and a private-link name can't resolve to a public endpoint. All DNS through those servers fails until subtun runs again or you clean up. Lookups don't fail at once but wait for the program's DNS timeout (`dig`: 5 s), since resolvers ignore the firewall's refusal of UDP |
 | `allow` | DNS works normally (names may leak); only the routed traffic stays blocked |
 
 What is guarded: your routes minus local networks more specific than them. Your LAN inside a full
 tunnel stays reachable, as it does through the routing table, and a VPN client's own network stays
 with that client. A route more specific than such a network (a CGNAT /24 inside a VPN client's
-/16) stays guarded, since without subtun it would fall back to that network. subtun's own
+/16) stays guarded, since without subtun it would fall back to that network. The guard follows the
+machine's networks while subtun runs: join another Wi-Fi with another subnet and, within about 5
+seconds, that LAN (router, DHCP) is left out and the previous one guarded again. subtun's own
 connection to the API server or Docker daemon is never blocked. With `--dry-run`, subtun shows how
 many prefixes it would guard.
 

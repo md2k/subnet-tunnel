@@ -36,6 +36,7 @@ type helper struct {
 	persist  *platform.Rules // what stays if the tunnel goes away; nil: nothing
 	adopted  bool            // rules taken over from an earlier session
 	applied  bool            // this session applied rules of its own
+	dnsOn    bool            // the rules in place redirect DNS to subtun
 	session  atomic.Bool     // setup done, staying up for the session
 	until    atomic.Int64    // read deadline after a signal (unix nanos), 0: none
 }
@@ -220,6 +221,7 @@ func (h *helper) handle(req Request) (Response, []int) {
 		h.saveState()
 		h.log.Info("firewall rules applied", "dns", req.Rules.DNS != nil, "kill_switch", req.Rules.KillSwitch != nil,
 			"block_ipv6", req.Rules.BlockIPv6, "kept_if_tunnel_lost", req.Persist != nil)
+		h.dnsRedirect(req.Rules.DNS != nil)
 		return Response{OK: true}, nil
 
 	case OpAdopt:
@@ -305,6 +307,9 @@ func (h *helper) adoptLeftovers() (msg string, running bool, err error) {
 		relaxed = *h.persist
 		relaxed.DNSBlock = nil
 	}
+	// The earlier session may have left answers obtained through its tunnel
+	// in the cache.
+	defer h.flushDNSCache()
 	if relaxed.Empty() {
 		h.flushFirewall()
 		h.adopted = false
@@ -338,6 +343,7 @@ func (h *helper) cleanup() (string, error) {
 		return "", err
 	}
 	_ = h.state.remove()
+	h.flushDNSCache()
 	if released {
 		return "removed subtun's firewall rules and released pf", nil
 	}
@@ -358,6 +364,8 @@ func (h *helper) leave(why string) {
 	}
 	if err := h.drivers.Firewall.Apply(*h.persist); err != nil {
 		h.log.Warn("applying the kill switch's blocking rules; the session's rules stay instead", "err", err)
+	} else {
+		h.dnsRedirect(false) // what stays never redirects DNS
 	}
 	h.saveState()
 	h.log.Info("kill switch: blocking rules stay until the next session or subtun cleanup", "reason", why)
@@ -377,6 +385,28 @@ func (h *helper) flushFirewall() {
 		h.log.Warn("removing the helper state", "err", err)
 	}
 	h.log.Info("firewall rules removed")
+	h.dnsRedirect(false)
+}
+
+// dnsRedirect records whether the rules now in place redirect DNS, and
+// flushes the DNS cache when that changes.
+func (h *helper) dnsRedirect(on bool) {
+	if on == h.dnsOn {
+		return
+	}
+	h.dnsOn = on
+	h.flushDNSCache()
+}
+
+func (h *helper) flushDNSCache() {
+	if h.drivers.DNSCache == nil {
+		return
+	}
+	if err := h.drivers.DNSCache.Flush(); err != nil {
+		h.log.Warn("flushing the DNS cache", "err", err)
+		return
+	}
+	h.log.Info("DNS cache flushed")
 }
 
 func (h *helper) saveState() {

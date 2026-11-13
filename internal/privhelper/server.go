@@ -69,6 +69,7 @@ func Serve(ctx context.Context, socketPath string, stdin io.Reader, log *slog.Lo
 			Tun:      darwin.Utun{},
 			Routes:   darwin.Route{},
 			Firewall: &darwin.PF{Log: log},
+			DNSCache: darwin.DNSCache{},
 		},
 		state: fileState{dir: "/var/run/subtun"},
 		alive: processAlive,

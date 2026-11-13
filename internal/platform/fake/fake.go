@@ -18,6 +18,9 @@ type Drivers struct {
 	AddErr    map[netip.Prefix]error
 	ApplyErr  error
 	Busy      bool // firewall rules already loaded (left by an earlier session)
+	// DNSCache adds a DNS cache driver, recorded as "flush dns cache". Off
+	// by default, so call sequences of tests that don't care stay short.
+	DNSCache bool
 
 	mu    sync.Mutex
 	calls []string
@@ -27,7 +30,18 @@ type Drivers struct {
 
 // Platform returns d as a platform.Drivers.
 func (d *Drivers) Platform() platform.Drivers {
-	return platform.Drivers{Tun: d, Routes: d, Firewall: firewall{d}}
+	p := platform.Drivers{Tun: d, Routes: d, Firewall: firewall{d}}
+	if d.DNSCache {
+		p.DNSCache = dnsCache{d}
+	}
+	return p
+}
+
+type dnsCache struct{ d *Drivers }
+
+func (c dnsCache) Flush() error {
+	c.d.record("flush dns cache")
+	return nil
 }
 
 // Calls returns the calls so far, e.g. "create utun0 9000 198.18.249.1",

@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -26,6 +27,7 @@ const sudoPrompt = "[subtun] root is needed to create the utun interface and rou
 
 // Client is subtun's side of a running helper.
 type Client struct {
+	mu      sync.Mutex // the protocol is lock-step: one request at a time
 	conn    *net.UnixConn
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
@@ -127,6 +129,8 @@ func Start(ctx context.Context, helperLog io.Writer, log *slog.Logger) (*Client,
 }
 
 func (c *Client) call(req Request) (Response, []*os.File, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if err := writeMsg(c.conn, req); err != nil {
 		return Response{}, nil, err
 	}
