@@ -211,7 +211,7 @@ password on the terminal).
 | sudo prompts | one, at start | one, at start |
 | Root process after setup | none: the helper exits | the helper stays up for the session |
 | Accepts after setup | nothing | firewall updates (the DNS servers or the local networks changed), route changes (several profiles) and `end` |
-| Changing CIDRs | restart subtun | restart subtun (runtime changes through a local control API are planned) |
+| Changing CIDRs | restart subtun | restart subtun (runtime changes with `control: full` are planned) |
 | Cleanup | automatic: routes live on the utun, and macOS removes the utun and its routes when subtun exits, crashes or is killed | the same for routes; firewall rules as below |
 | Risk | smallest: root exists only for the seconds of setup | a root process stays reachable (only by subtun, over the private socket) for the whole session |
 
@@ -546,13 +546,8 @@ be routed: the same CIDR twice is an error. Their SOCKS proxies still work, each
 tunnel. Possible later: DNS answers from one tunnel get addresses from a private pool, which
 subtun maps back to the real ones (fake-IP style).
 
-**Status and control** (after several tunnels):
-- `subtun status`, over a control socket in the private run directory, lists the tunnels (one in
-  a single-profile run): target, state (up, reconnecting since when, gave up), routes, domains,
-  connections, bytes and recent errors. A terminal UI can use the same socket later.
-- Runtime changes: add or remove a tunnel's routes and domains, attach or detach a profile,
-  reconnect a profile that gave up. They build on the route changes above, as do
-  `dns.unrouted: tunnel` and routes that follow network changes.
+**Status and control:** see [Status and control](#status-and-control-planned). Runtime changes
+build on the route changes above.
 
 **Rejected:**
 - One process per profile: see "Why one process" above.
@@ -561,6 +556,101 @@ subtun maps back to the real ones (fake-IP style).
   for a choice the process can make itself.
 - `subtun up work dev` with several profile names as arguments: they can't be told apart from
   CIDRs reliably (see Command line).
+
+## Status and control (planned)
+
+Not built yet. A running subtun answers questions about itself (`subtun status`, `subtun logs`),
+and on request accepts changes (routes, DNS names, profiles) without a restart. Everything is
+shaped as a list of tunnels: one in a single-profile run, several with `--profile a,b`.
+
+**Where it lives.** In the subtun process, which runs as the user; never in the root helper.
+
+- One Unix socket per running subtun, `control-<pid>.sock` in the private run directory
+  (`~/Library/Caches/subtun/run`, 0700; socket 0600). The peer's uid is checked as well (macOS
+  `LOCAL_PEERCRED`). `subtun status` finds every running subtun by its socket and removes sockets
+  whose process is gone.
+- JSON over HTTP on that socket, under `/v1/`, so `curl --unix-socket` works too. Live updates
+  (state changes, counters, log lines) come as newline-delimited JSON on one long response
+  (`/v1/events`); a WebSocket comes with the web UI.
+- Later, for a browser UI: an optional localhost TCP listener with a random token (Jupyter style).
+
+**What it reports:**
+
+- **The run:** pid, version, start time, the utun and its address, the root helper (one-shot or
+  session), the control mode.
+- **Each tunnel (profile):**
+  - target, agent (binary or Python, version), state and since when (connecting, up,
+    reconnecting with attempt n of m and the next try, gave up) and the last error;
+  - its routes on the utun, and the parts another profile carries; its DNS domains and patterns;
+    its SOCKS address; its kill switch mode;
+  - counters: connections open, total and failed (through the utun and through SOCKS), bytes up and
+    down, rates (1 s samples, the last 5 minutes kept), DNS queries answered through it and failed,
+    loop-guard refusals.
+- **Shared:** the captured DNS servers and the fallback, the names that stay local, subtun's own
+  endpoint names; queries answered by the fallback; the kill switch (guarded and lockdown prefix
+  counts) and the IPv6 block.
+- **Connections** (on request): one row per open connection: destination, profile, utun or SOCKS,
+  bytes each way, age.
+- **Logs:** an in-memory ring buffer (5000 lines and 4 MB at most), fed by an extra log handler;
+  never written to disk. Slow readers lose lines; the tunnel never waits for them.
+
+**Commands:**
+
+```
+subtun status [--json] [--pid N]       # every running subtun, or one
+subtun status --watch                  # refreshed every second (a terminal UI comes later)
+subtun status --connections            # with the open connections
+subtun logs [-f] [--pid N]             # the ring buffer, then follow
+```
+
+With `control: full` also (each change planned and checked as at start: conflicts, safety checks,
+the endpoints; `--dry-run` shows the effect):
+
+```
+subtun route add|del [--profile P] CIDR...     # a profile's routes
+subtun dns add|del [--profile P] DOMAIN...     # a profile's DNS domains
+subtun profile reconnect|stop|start NAME       # start: from the config file, next to the others
+```
+
+Changes are temporary: they last until subtun stops, and nothing is written back to the config
+file (saving them is a possible later feature).
+
+**Setting:** global for the run, never per profile: `--control`, or a top-level `control:` key in
+the config file (next to `defaults:` and `profiles:`).
+
+| Mode | What | Root |
+|---|---|---|
+| `status` (default) | status, connections and logs, read only | nothing changes: a routes-only run keeps its one-shot helper |
+| `full` | also the changes above | the root helper stays up for the session, as with several profiles |
+| `off` | no socket | |
+
+`full` is opt-in. With it, any process of the same user can change routes during the session
+without a sudo prompt. The routes can only point into subtun's utun, and the helper validates each
+one, but the user should choose that.
+
+**One engine first.** A single profile and several profiles run through two different loops
+today, so status, counters and control would have to be built twice. Single-profile runs (`subtun
+up NAME`, `subtun k8s`, `subtun docker`) move onto the several-profile engine with one profile and
+keep their behaviour:
+- connect, then sudo;
+- a first connection that fails exits at once;
+- a one-shot helper unless firewall rules or `control: full` need a session;
+- giving up exits.
+
+This is a refactor without behaviour changes, root-tested again on the test machine before
+anything builds on it.
+
+**Built on it later** (not part of this):
+- `dns.unrouted: tunnel` and `auto`;
+- routes that follow network changes (the automatic local excludes recomputed);
+- reconnecting to a recreated pod by label or owner;
+- a terminal UI and an embedded web UI;
+- saving runtime changes back to the config file.
+
+**Order:**
+1. One engine (refactor) and its root test.
+2. Status: the socket, counters, connections, logs, `subtun status` and `subtun logs`.
+3. Control: `control: full` and the changes.
 
 ## Decisions
 
