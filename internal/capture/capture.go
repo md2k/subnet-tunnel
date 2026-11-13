@@ -250,6 +250,10 @@ func (c *Capture) FlushDNSCache() error {
 // when subtun's own connection may use IPv6).
 func (c *Capture) BlockingIPv6() bool { return c.helper != nil && c.opts.BlockIPv6 }
 
+// Guarding reports whether the capture has a kill switch guard (a profile
+// had a kill switch when it started): only then can profiles with one join.
+func (c *Capture) Guarding() bool { return c.guard != nil }
+
 // HoldsDNS reports whether DNS to the captured servers stays blocked while
 // the kill switch holds.
 func (c *Capture) HoldsDNS() bool { return c.dns != nil && c.opts.killSwitch() && !c.opts.AllowDNS }

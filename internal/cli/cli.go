@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -350,6 +349,31 @@ func profileSpec(f *config.File, path, name string, base settings, extra []strin
 	return sp, nil
 }
 
+// configPath is the config file a run reads (--config, $SUBTUN_CONFIG or
+// the default).
+func configPath(g *globalOpts) string {
+	if g.config != "" {
+		return g.config
+	}
+	return config.DefaultPath()
+}
+
+// configSpecs builds profiles of the config file at path with the config's
+// settings only (as several profiles take them): for profiles added to a
+// running subtun.
+func configSpecs(path string, g *globalOpts) func(name string) (*tunnelSpec, error) {
+	var base settings
+	cmd := &cobra.Command{}
+	base.register(cmd) // the flags' defaults; none given
+	return func(name string) (*tunnelSpec, error) {
+		f, err := config.Load(path)
+		if err != nil {
+			return nil, err
+		}
+		return profileSpec(f, path, name, base, nil, cmd.Flags(), g)
+	}
+}
+
 // profileTarget returns how to connect to a profile's target, and how to
 // find its endpoint (API server, Docker daemon) without connecting.
 func profileTarget(p config.Profile, s *settings, g *globalOpts) (connectFunc, func() (string, error)) {
@@ -632,7 +656,7 @@ func singlePlan(sp *tunnelSpec, policy reconnectPolicy, rp *routePlan, dnsOpts *
 		ks:       []string{"off"},
 		rps:      []*routePlan{rp},
 		hosts:    []string{""}, // known once connected: excluded then, as always
-		finals:   make([]atomic.Pointer[[]netip.Prefix], 1),
+		finals:   newFinals(1),
 		dnsNames: []dns.Names{{Domains: s.dnsDomains, Patterns: s.dnsPatterns}},
 		unrouted: []string{""},
 		dns:      dnsOpts,

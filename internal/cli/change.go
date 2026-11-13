@@ -719,3 +719,169 @@ func plural(word string, n int) string {
 	}
 	return word + "s"
 }
+
+// hasProfile reports whether the run has a profile of that name.
+func (mp *multiPlan) hasProfile(name string) bool {
+	return slices.ContainsFunc(mp.specs, func(sp *tunnelSpec) bool { return sp.name == name })
+}
+
+// captureState is what a running capture can still take.
+type captureState struct {
+	started      bool // the capture runs (else it starts later with the plan as it is then)
+	guarding     bool // it has a kill switch guard
+	holdsDNS     bool // DNS to the captured servers is blocked while the kill switch holds
+	blockingIPv6 bool
+}
+
+// addChange is a profile from the config file, checked to join the run.
+type addChange struct {
+	spec     *tunnelSpec
+	policy   reconnectPolicy
+	rp       *routePlan
+	final    []netip.Prefix
+	ks       string
+	unrouted string
+	names    []dns.Names // every profile's, the new one last
+	host     string
+	addrs    []netip.Addr
+	// Shared values a capture not started yet takes.
+	allowDNS  bool
+	blockIPv6 bool
+	ipv6Why   string
+	summary   string
+	warns     []string
+}
+
+// planAdd checks a profile from the config file (ns) to join the run, as if
+// it had been started with the others: the settings every profile shares
+// must agree with the run's, its routes, DNS names and SOCKS address must
+// not clash, and what the running capture set up at start must fit it.
+// host and addrs are its target's endpoint.
+func (mp *multiPlan) planAdd(ns *tunnelSpec, host string, addrs []netip.Addr, m *dns.Matcher, cs captureState) (*addChange, error) {
+	label := "profile " + ns.name
+	run := mp.specs[0].s
+	if a := ns.cfg.Tun.Address; a != "" && a != run.tunAddr {
+		return nil, fmt.Errorf("%s: tun.address %s differs from the run's (%s): it is shared by every profile of a run", label, a, run.tunAddr)
+	}
+	if v := ns.cfg.Tun.MTU; v != 0 && v != run.mtu {
+		return nil, fmt.Errorf("%s: tun.mtu %d differs from the run's (%d): it is shared by every profile of a run", label, v, run.mtu)
+	}
+	if f, rf := fixedDefaults(ns.s).dnsFallback, fixedDefaults(run).dnsFallback; ns.cfg.DNS.Fallback != "" && f != rf {
+		return nil, fmt.Errorf("%s: dns.fallback %s differs from the run's (%s): it is shared by every profile of a run", label, f, rf)
+	}
+	ns.s.tunAddr, ns.s.mtu, ns.s.dnsFallback = run.tunAddr, run.mtu, run.dnsFallback
+	ns.base = ns.s
+	ac := &addChange{spec: ns, host: host, addrs: addrs, allowDNS: mp.allowDNS, blockIPv6: mp.blockIPv6, ipv6Why: mp.ipv6Why}
+	ac.policy = reconnectPolicy{attempts: ns.s.reconnectAttempts, delay: ns.s.reconnectDelay, maxDelay: ns.s.reconnectMaxDelay}
+	if err := ac.policy.validate(); err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
+	if a := ns.s.socks; a != "" {
+		for _, sp := range mp.specs {
+			if sp.s.socks == a {
+				return nil, fmt.Errorf("profiles %s and %s both want the SOCKS address %s", profileName(sp.name), ns.name, a)
+			}
+		}
+	}
+	var err error
+	var warns []string
+	if ac.unrouted, err = dns.ParseUnrouted(ns.s.dnsUnrouted); err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
+	switch ns.s.dnsCapture {
+	case "", "firewall", "off":
+	default:
+		return nil, fmt.Errorf("%s: DNS capture %q: use firewall or off", label, ns.s.dnsCapture)
+	}
+	if ac.rp, warns, err = planRoutes(ns.s); err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
+	if ac.rp != nil && !mp.hasRoutes() {
+		return nil, fmt.Errorf("%s has routes, and this run has no utun capture (no profile had routes when it started); restart subtun with it", label)
+	}
+	gp, notes, err := planGuard(ns.s, ac.rp)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
+	warns = append(warns, notes...)
+	ac.ks = "off"
+	if gp != nil {
+		ac.ks = gp.killSwitch
+	}
+	specs := append(slices.Clone(mp.specs), ns)
+	if ac.rp != nil {
+		if ac.final, err = carveEndpoints(ac.rp, append(mp.endpointList(), addrs...)); err != nil {
+			return nil, fmt.Errorf("%s: %w", label, err)
+		}
+		if err := checkOverlapsOf(specs, append(slices.Clone(mp.rps), ac.rp)); err != nil {
+			return nil, err
+		}
+	}
+	if ac.ks != "off" {
+		if cs.started && !cs.guarding {
+			return nil, fmt.Errorf("%s has a kill switch, and this run's capture has none (no profile had one when it started); restart subtun with it", label)
+		}
+		wantsAllow := ns.s.killSwitchDNS == "allow"
+		switch {
+		case !cs.started:
+			// The capture starts with the stricter hold of every profile with a kill switch.
+			anyKS := slices.ContainsFunc(mp.ks, func(k string) bool { return k != "off" })
+			ac.allowDNS = wantsAllow && (!anyKS || mp.allowDNS)
+		case mp.dns != nil && !wantsAllow && !cs.holdsDNS:
+			warns = append(warns, "DNS stays allowed while its kill switch holds: this run's setting since it started (killSwitch.dns: allow)")
+		case mp.dns != nil && wantsAllow && cs.holdsDNS:
+			warns = append(warns, "DNS to the captured servers stays blocked while its kill switch holds: another profile's setting")
+		}
+	}
+	if gp != nil && gp.blockIPv6 && !mp.blockIPv6 {
+		if cs.started {
+			warns = append(warns, "outgoing IPv6 isn't blocked: this run started without it (a full tunnel blocks it); restart subtun to block it")
+		} else {
+			ac.blockIPv6, ac.ipv6Why = true, fmt.Sprintf("%s, profile %s", gp.ipv6Why, ns.name)
+		}
+	}
+	if a, ok := ipv6Endpoint(addrs); ok && cs.blockingIPv6 {
+		return nil, fmt.Errorf("%s: its endpoint %s is an IPv6 address, and this run blocks outgoing IPv6, which would cut its connection; restart subtun instead", label, a)
+	}
+	ac.names = append(slices.Clone(mp.dnsNames), dns.Names{})
+	if len(ns.s.dnsDomains)+len(ns.s.dnsPatterns) > 0 && ns.s.dnsCapture != "off" {
+		switch {
+		case ac.rp == nil:
+			warns = append(warns, "DNS settings ignored: DNS capture works together with the utun capture, and this profile has no routes (CIDRs)")
+		case m == nil:
+			warns = append(warns, "DNS names ignored: this run doesn't capture DNS; restart subtun to capture them")
+		default:
+			if err := mp.dnsServersCaptured(ns.s); err != nil {
+				return nil, fmt.Errorf("%s: %w", label, err)
+			}
+			ac.names[len(ac.names)-1] = dns.Names{Domains: ns.s.dnsDomains, Patterns: ns.s.dnsPatterns}
+			if _, err := dns.NewMultiMatcher(ac.names); err != nil {
+				return nil, fmt.Errorf("%s: %w", label, err)
+			}
+		}
+	}
+	ac.warns = warns
+	var what []string
+	if ac.rp != nil {
+		what = append(what, "routes "+summary(prefixStrings(ac.final), 6))
+	}
+	if n := ac.names[len(ac.names)-1]; len(n.Domains)+len(n.Patterns) > 0 {
+		what = append(what, "DNS "+strings.Join(namesText(n), ", "))
+	}
+	if ns.s.socks != "" {
+		what = append(what, "SOCKS "+ns.s.socks)
+	}
+	if ac.ks != "off" {
+		what = append(what, "kill switch "+ac.ks)
+	}
+	ac.summary = strings.Join(what, "; ")
+	return ac, nil
+}
+
+// profileName names a profile in a message ("the tunnel" without a name).
+func profileName(name string) string {
+	if name == "" {
+		return "the tunnel"
+	}
+	return name
+}

@@ -32,6 +32,7 @@ var (
 	lookupEndpoint  = transport.LookupEndpoint
 	leftoversMarked = privhelper.LeftoversMarked
 	startCapture    = startMultiCapture
+	newSpecs        = configSpecs // profiles added while running
 )
 
 const (
@@ -64,14 +65,15 @@ type multiPlan struct {
 	ks       []string     // kill switch per profile: off, on, lockdown
 	rps      []*routePlan // nil: SOCKS only
 	hosts    []string     // each target's endpoint as configured
-	finals   []atomic.Pointer[[]netip.Prefix]
+	finals   []*atomic.Pointer[[]netip.Prefix]
 
 	mu        sync.Mutex
 	endpoints []netip.Addr // every target's: excluded from every route
 
 	// smu guards what status reads while the engine's loop changes it
-	// (control: full): specs (the slice's elements) and dnsNames. The loop
-	// writes under it, and reads without.
+	// (control: full): the per-profile slices (they grow when a profile is
+	// added), the specs' settings and dnsNames, and the engine status's
+	// per-profile slices. The loop writes under it, and reads without.
 	smu sync.RWMutex
 
 	tunAddr   netip.Addr
@@ -83,6 +85,15 @@ type multiPlan struct {
 	blockIPv6 bool
 	ipv6Why   string
 	warns     []string
+}
+
+// newFinals returns n empty final route lists.
+func newFinals(n int) []*atomic.Pointer[[]netip.Prefix] {
+	out := make([]*atomic.Pointer[[]netip.Prefix], n)
+	for i := range out {
+		out[i] = &atomic.Pointer[[]netip.Prefix]{}
+	}
+	return out
 }
 
 func (mp *multiPlan) final(i int) []netip.Prefix {
@@ -104,7 +115,7 @@ func (mp *multiPlan) hasRoutes() bool {
 func planMulti(specs []*tunnelSpec) (*multiPlan, error) {
 	n := len(specs)
 	mp := &multiPlan{specs: specs, policies: make([]reconnectPolicy, n), ks: make([]string, n),
-		rps: make([]*routePlan, n), hosts: make([]string, n), finals: make([]atomic.Pointer[[]netip.Prefix], n),
+		rps: make([]*routePlan, n), hosts: make([]string, n), finals: newFinals(n),
 		dnsNames: make([]dns.Names, n), unrouted: make([]string, n)}
 	note := func(name, msg string) { mp.warns = append(mp.warns, name+": "+msg) }
 
@@ -928,16 +939,16 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			l.close()
 		}
 	}()
-	listenSOCKS := func(i int, addr string) (*socksListener, error) {
+	listenSOCKS := func(addr string, tl *slog.Logger, d socks.Dialer) (*socksListener, error) {
 		ln, err := net.Listen("tcp", addr)
 		if err != nil {
 			return nil, err
 		}
 		if host, _, _ := net.SplitHostPort(addr); !isLoopback(host) {
-			logs[i].Warn("SOCKS proxy is reachable from other hosts and has no authentication", "addr", ln.Addr())
+			tl.Warn("SOCKS proxy is reachable from other hosts and has no authentication", "addr", ln.Addr())
 		}
 		lctx, lcancel := context.WithCancel(ctx)
-		srv := &socks.Server{Dialer: es.meters[i].Dialer(meter.ViaSOCKS, lives[i]), Logger: logs[i]}
+		srv := &socks.Server{Dialer: d, Logger: tl}
 		go func() {
 			if err := srv.Serve(lctx, ln); err != nil { // nil: Ctrl-C, or replaced
 				select {
@@ -946,14 +957,14 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 				}
 			}
 		}()
-		logs[i].Info("SOCKS5 proxy ready", "addr", ln.Addr().String())
+		tl.Info("SOCKS5 proxy ready", "addr", ln.Addr().String())
 		return &socksListener{ln: ln, cancel: lcancel}, nil
 	}
 	for i, sp := range mp.specs {
 		if sp.s.socks == "" {
 			continue
 		}
-		l, err := listenSOCKS(i, sp.s.socks)
+		l, err := listenSOCKS(sp.s.socks, logs[i], es.meters[i].Dialer(meter.ViaSOCKS, lives[i]))
 		if err != nil {
 			if eo.single {
 				return fmt.Errorf("SOCKS listener: %w", err)
@@ -1047,7 +1058,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		done := make(chan struct{})
 		r.cancel, r.done = rcancel, done
 		started[i] = time.Now()
-		sp, policy, live, tl := mp.specs[i], mp.policies[i], lives[i], logs[i]
+		sp, policy, live, tl, info := mp.specs[i], mp.policies[i], lives[i], logs[i], es.infos[i]
 		try := func(ctx context.Context) (*session, error) {
 			carrier, err := sp.connect(ctx, agents, tl)
 			if err != nil {
@@ -1074,7 +1085,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			if rctx.Err() != nil {
 				return
 			}
-			es.infos[i].update(func(t *tunnelInfo) {
+			info.update(func(t *tunnelInfo) {
 				t.attempt, t.attempts, t.nextTry = attempt, policy.attempts, next
 				if err != nil {
 					t.lastErr = err.Error()
@@ -1099,8 +1110,11 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		}
 		r.gen++
 	}
+	// single: one profile, as subtun has always run one; a profile added
+	// while running makes it a run of several.
+	single := eo.single
 	first := startRetry
-	if eo.single {
+	if single {
 		first = startOnce
 	}
 	for i := range n {
@@ -1128,7 +1142,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		deliberate = true
 		logShutdown(ctx, log)
 		up := anyUp || c != nil // several profiles: a tunnel was up
-		if eo.single && mp.hasRoutes() {
+		if single && mp.hasRoutes() {
 			up = c != nil // one profile with routes: up once capturing, as always
 		}
 		if !up && maxDurationReached(ctx) {
@@ -1186,6 +1200,33 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			}
 		})
 	}
+	// lookupNew finds a new target's endpoint addresses (with lookup), so
+	// they stay out of the routes before it connects. Its name never goes
+	// through a tunnel from here on; undo takes that back if the change
+	// doesn't happen.
+	lookupNew := func(host string, lookup bool) (addrs []netip.Addr, warns []string, undo func(), err error) {
+		undo = func() {}
+		if m, h := es.matcher(), transport.HostName(host); m != nil && h != "" && !slices.Contains(m.Own(), h) {
+			prev := m.Own()
+			m.SetOwn(append(slices.Clone(prev), h))
+			undo = func() { m.SetOwn(prev) }
+		}
+		if !lookup {
+			return nil, nil, undo, nil
+		}
+		// Through the system's resolver, as at start (up to 3 s).
+		lctx, lcancel := context.WithTimeout(ctx, 3*time.Second)
+		addrs, lerr := lookupEndpoint(lctx, host)
+		lcancel()
+		if lerr != nil {
+			warns = append(warns, fmt.Sprintf("looking up %s failed (%v); if its address lies inside the routes, its connection goes into a tunnel and can't connect", transport.HostName(host), lerr))
+		}
+		if a, ok := ipv6Endpoint(addrs); ok && c != nil && c.BlockingIPv6() {
+			undo()
+			return nil, nil, nil, fmt.Errorf("its endpoint %s is an IPv6 address, and this run blocks outgoing IPv6, which would cut its connection; restart subtun instead", a)
+		}
+		return addrs, warns, undo, nil
+	}
 	reloadPlan := func(i int) (*reloadChange, error) {
 		sp := mp.specs[i]
 		if sp.reload == nil {
@@ -1199,28 +1240,9 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		if err != nil {
 			return nil, err
 		}
-		// The new endpoint's name never goes through a tunnel, from the
-		// lookup below on; undone if the reload doesn't happen.
-		undo := func() {}
-		if m, h := es.matcher(), transport.HostName(host); m != nil && h != "" && !slices.Contains(m.Own(), h) {
-			prev := m.Own()
-			m.SetOwn(append(slices.Clone(prev), h))
-			undo = func() { m.SetOwn(prev) }
-		}
-		var addrs []netip.Addr
-		var warns []string
-		if host != mp.hosts[i] { // a new target: keep its endpoint out of the routes before it connects
-			// A lookup through the system's resolver, as at start (up to 3 s).
-			lctx, lcancel := context.WithTimeout(ctx, 3*time.Second)
-			addrs, err = lookupEndpoint(lctx, host)
-			lcancel()
-			if err != nil {
-				warns = append(warns, fmt.Sprintf("looking up %s failed (%v); if its address lies inside the routes, its connection goes into a tunnel and can't connect", transport.HostName(host), err))
-			}
-			if a, ok := ipv6Endpoint(addrs); ok && c != nil && c.BlockingIPv6() {
-				undo()
-				return nil, fmt.Errorf("its new endpoint %s is an IPv6 address, and this run blocks outgoing IPv6, which would cut its connection; restart subtun instead", a)
-			}
+		addrs, warns, undo, err := lookupNew(host, host != mp.hosts[i])
+		if err != nil {
+			return nil, err
 		}
 		rl, err := mp.planReload(i, ns, host, addrs, es.matcher())
 		if err != nil {
@@ -1236,7 +1258,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			var l *socksListener
 			if now != "" {
 				var err error
-				if l, err = listenSOCKS(i, now); err != nil {
+				if l, err = listenSOCKS(now, logs[i], es.meters[i].Dialer(meter.ViaSOCKS, lives[i])); err != nil {
 					return fmt.Errorf("SOCKS listener: %w", err)
 				}
 			}
@@ -1245,7 +1267,117 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		}
 		return mp.applyReload(rl, es.matcher())
 	}
+	// Profiles added while running: from the config file the run reads.
+	specFor := newSpecs(configPath(g), g)
+	addProfile := func(ac *addChange) error {
+		sp := ac.spec
+		i := len(mp.specs)
+		live, tl := &liveTunnel{}, log.With("tunnel", sp.name)
+		info, m, dc := &tunnelInfo{since: time.Now(), state: stateConnecting}, meter.New(), &dns.Counts{}
+		var l *socksListener
+		if sp.s.socks != "" { // the one step that can fail: first
+			var err error
+			if l, err = listenSOCKS(sp.s.socks, tl, m.Dialer(meter.ViaSOCKS, live)); err != nil {
+				return fmt.Errorf("SOCKS listener: %w", err)
+			}
+		}
+		fp := &atomic.Pointer[[]netip.Prefix]{}
+		if ac.rp != nil {
+			final := ac.final
+			fp.Store(&final)
+		}
+		mp.smu.Lock()
+		mp.specs = append(mp.specs, sp)
+		mp.policies = append(mp.policies, ac.policy)
+		mp.ks = append(mp.ks, ac.ks)
+		mp.rps = append(mp.rps, ac.rp)
+		mp.hosts = append(mp.hosts, ac.host)
+		mp.finals = append(mp.finals, fp)
+		mp.dnsNames = append(mp.dnsNames, dns.Names{})
+		mp.unrouted = append(mp.unrouted, ac.unrouted)
+		es.grow(info, m, dc)
+		mp.smu.Unlock()
+		lives, logs, utun = append(lives, live), append(logs, tl), append(utun, m.Dialer(meter.ViaUtun, live))
+		runners, socksLns = append(runners, runner{}), append(socksLns, l)
+		states, tried = append(states, stateConnecting), append(tried, false)
+		lost, started = append(lost, time.Time{}), append(started, time.Time{})
+		if mp.dns != nil {
+			// The engine gets the tunnel before the matcher's names point at it.
+			dt := capture.DNSTunnel{Name: sp.name, Unrouted: ac.unrouted, Counts: dc, Upstream: dns.UpstreamFunc(live.ExchangeDNS),
+				Unreachable: func(a netip.Addr) bool { return dns.Private(a) && rt.pickIndex(a) != i }}
+			mp.dns.Tunnels = append(mp.dns.Tunnels, dt)
+			if c != nil {
+				c.AddDNSTunnel(dt)
+			}
+			if err := mp.setNames(ac.names, mp.dns.Match); err != nil {
+				tl.Warn("its DNS names couldn't be added", "err", err) // checked when planned
+			}
+			flushDNS = true
+		} else {
+			mp.smu.Lock()
+			mp.dnsNames = ac.names
+			mp.smu.Unlock()
+		}
+		if c == nil { // the capture starts with them
+			mp.allowDNS, mp.blockIPv6, mp.ipv6Why = ac.allowDNS, ac.blockIPv6, ac.ipv6Why
+		}
+		single = false
+		if _, err := mp.addEndpoints(ac.addrs); err != nil {
+			tl.Warn("excluding its endpoint from the routes failed", "err", err)
+		}
+		startRunner(i, startRetry)
+		return nil
+	}
+	addNew := func(req control.Change) (control.Result, error) {
+		res := control.Result{Profile: req.Profile, DryRun: req.DryRun}
+		switch {
+		case starting != nil && !req.DryRun:
+			return res, errors.New("the capture is starting (sudo may be asking for a password in subtun's terminal); try again once it runs")
+		case devDNS != nil:
+			return res, errors.New("profiles can't be added to a run with the development DNS listener")
+		}
+		ns, err := specFor(req.Profile)
+		if err != nil {
+			return res, err
+		}
+		host, err := ns.endpoint()
+		if err != nil {
+			return res, err
+		}
+		addrs, warns, undo, err := lookupNew(host, true)
+		if err != nil {
+			return res, fmt.Errorf("profile %s: %w", req.Profile, err)
+		}
+		cs := captureState{started: c != nil}
+		if c != nil {
+			cs.guarding, cs.holdsDNS, cs.blockingIPv6 = c.Guarding(), c.HoldsDNS(), c.BlockingIPv6()
+		}
+		ac, err := mp.planAdd(ns, host, addrs, es.matcher(), cs)
+		if err != nil {
+			undo()
+			return res, err
+		}
+		res.Changed, res.Warnings = true, append(warns, ac.warns...)
+		if req.DryRun {
+			undo()
+			res.Message = "would add it to the run and start it: " + ac.summary
+			return res, nil
+		}
+		if err := addProfile(ac); err != nil {
+			undo()
+			return res, err
+		}
+		res.Message = "added to the run and starting: " + ac.summary
+		logs[len(logs)-1].Info("control: added", "profile", ns.name)
+		if err := relayout(); err != nil {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("applying it failed, subtun tries again: %v", err))
+		}
+		return res, nil
+	}
 	handleChange := func(req control.Change) (control.Result, error) {
+		if req.Kind == control.KindProfile && req.Op == "start" && req.Profile != "" && !mp.hasProfile(req.Profile) {
+			return addNew(req)
+		}
 		i, err := mp.profileIndex(req.Profile)
 		if err != nil {
 			return control.Result{}, err
@@ -1481,7 +1613,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			case stateReconnecting:
 				lost[ev.i] = time.Now()
 			case stateGaveUp:
-				if eo.single {
+				if single {
 					return ev.err // as subtun has always ended (a kill switch holds)
 				}
 				what, until := "its routes and names are removed", "subtun restarts"
@@ -1513,11 +1645,11 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			onRefuse := func(dst string) {
 				if ap, err := netip.ParseAddrPort(dst); err == nil {
 					if i := rt.pickIndex(ap.Addr()); i >= 0 {
-						es.meters[i].Refused()
+						es.meter(i).Refused()
 					}
 				}
 			}
-			session := !eo.single || eo.control == controlFull // routes can change while running
+			session := !single || eo.control == controlFull // routes can change while running
 			go func() {
 				c, err := startCapture(ctx, mp, active, lives, utun, rt, e, marker, session, onRefuse, log)
 				starting <- startResult{c, err}

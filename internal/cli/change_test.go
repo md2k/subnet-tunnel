@@ -555,3 +555,149 @@ func TestEngineStopEndsFirstRound(t *testing.T) {
 		cancel()
 	}
 }
+
+// A profile from the config file joins the run only if it fits what the
+// run shares and what its capture set up at start.
+func TestPlanAdd(t *testing.T) {
+	spec := func(name string) *tunnelSpec {
+		t.Helper()
+		ns, err := configSpecs("testdata/multi.yaml", &globalOpts{})(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ns
+	}
+	mp := multiPlanFor(t, "dev") // no kill switch, DNS cluster.local
+	m := mp.dns.Match
+	ac, err := mp.planAdd(spec("vault"), "tcp://198.51.100.201:2376", nil, m, captureState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ac.ks != "lockdown" || !covers(ac.final, "10.60.0.1") || len(ac.names) != 2 || ac.allowDNS || ac.summary != "routes 10.60.0.0/16; kill switch lockdown" {
+		t.Errorf("vault: %+v", ac)
+	}
+	// A kill switch can't join a running capture that has no guard.
+	if _, err := mp.planAdd(spec("vault"), "", nil, m, captureState{started: true}); err == nil || !strings.Contains(err.Error(), "this run's capture has none") {
+		t.Errorf("kill switch, no guard: %v", err)
+	}
+	// A full tunnel blocks IPv6 if the capture hasn't started; else a warning.
+	if ac, err := mp.planAdd(spec("full"), "", nil, m, captureState{}); err != nil || !ac.blockIPv6 {
+		t.Errorf("full, before the capture: %+v %v", ac, err)
+	}
+	if ac, err := mp.planAdd(spec("full"), "", nil, m, captureState{started: true, guarding: true}); err != nil || ac.blockIPv6 ||
+		!slices.ContainsFunc(ac.warns, func(w string) bool { return strings.Contains(w, "IPv6 isn't blocked") }) {
+		t.Errorf("full, capturing: %+v %v", ac, err)
+	}
+	if _, err := mp.planAdd(spec("work"), "", []netip.Addr{netip.MustParseAddr("2001:db8::1")}, m, captureState{started: true, guarding: true, blockingIPv6: true}); err == nil ||
+		!strings.Contains(err.Error(), "IPv6 address") {
+		t.Errorf("IPv6 endpoint while blocked: %v", err)
+	}
+	for name, want := range map[string]string{
+		"dup":       "10.50.0.0/16 is routed by both profiles dev and dup",
+		"other-tun": "tun.address 198.18.250.1 differs from the run's (198.18.249.1)",
+	} {
+		if _, err := mp.planAdd(spec(name), "", nil, m, captureState{}); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", name, err, want)
+		}
+	}
+	mp = multiPlanFor(t, "work", "dev")
+	if _, err := mp.planAdd(spec("all-names"), "", nil, mp.dns.Match, captureState{}); err == nil || !strings.Contains(err.Error(), "only one tunnel can resolve all names") {
+		t.Errorf("a second catch-all: %v", err)
+	}
+	if _, err := mp.planAdd(spec("socks-dev"), "", nil, mp.dns.Match, captureState{}); err == nil || !strings.Contains(err.Error(), "both want the SOCKS address 127.0.0.1:1081") {
+		t.Errorf("SOCKS address: %v", err)
+	}
+}
+
+// Profiles added while running: they show up, take their part of DNS, and
+// count for the run's end. Nothing connects, no capture starts.
+func TestEngineAddProfile(t *testing.T) {
+	origCtl, origCap, origLeft, origSpecs := startControl, startCapture, leftoversMarked, newSpecs
+	t.Cleanup(func() { startControl, startCapture, leftoversMarked, newSpecs = origCtl, origCap, origLeft, origSpecs })
+	ready := make(chan *engineStatus, 1)
+	startControl = func(_ context.Context, es *engineStatus, _ *logring.Ring, _ *slog.Logger) { ready <- es }
+	leftoversMarked = func() bool { return false }
+	startCapture = func(context.Context, *multiPlan, []bool, []*liveTunnel, []meter.Dialer, *router, *privhelper.Client, *leftovers, bool, func(string), *slog.Logger) (*capture.Capture, error) {
+		t.Error("the capture started")
+		return nil, errors.New("no capture in tests")
+	}
+	connects := make(chan string, 16)
+	block := func(name string) connectFunc {
+		return func(ctx context.Context, _ []agentbin.Binary, _ *slog.Logger) (*transport.Carrier, error) {
+			connects <- name
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+	}
+	newSpecs = func(path string, g *globalOpts) func(string) (*tunnelSpec, error) {
+		build := configSpecs(path, g)
+		return func(name string) (*tunnelSpec, error) {
+			sp, err := build(name)
+			if err == nil {
+				sp.connect = block(name) // never the network
+			}
+			return sp, err
+		}
+	}
+	mp := multiPlanFor(t, "work", "dev")
+	for _, sp := range mp.specs {
+		sp.s.socks = ""
+		sp.connect = block(sp.name)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runEngine(ctx, &globalOpts{config: "testdata/multi.yaml"}, mp, engineOpts{control: controlFull})
+	}()
+	es := <-ready
+	<-connects
+	<-connects
+	start := func(name string, dry bool) (control.Result, error) {
+		return es.change(context.Background(), control.Change{Kind: control.KindProfile, Op: "start", Profile: name, DryRun: dry})
+	}
+
+	if res, err := start("vault", true); err != nil || !strings.HasPrefix(res.Message, "would add it to the run and start it: routes 10.60.0.0/16; kill switch lockdown") {
+		t.Fatalf("dry run: %+v %v", res, err)
+	}
+	if len(es.status().Tunnels) != 2 {
+		t.Fatal("a dry run added the profile")
+	}
+	res, err := start("vault", false)
+	if err != nil || res.Profile != "vault" || !strings.HasPrefix(res.Message, "added to the run and starting: routes 10.60.0.0/16") {
+		t.Fatalf("add: %+v %v", res, err)
+	}
+	if name := <-connects; name != "vault" {
+		t.Errorf("connecting %s", name)
+	}
+	st := es.status()
+	if len(st.Tunnels) != 3 || st.Tunnels[2].Name != "vault" || st.Tunnels[2].State != "connecting" || st.Tunnels[2].KillSwitch != "lockdown" ||
+		!slices.Contains(st.Tunnels[2].Routes, "10.60.0.0/16") || st.KillSwitch == nil {
+		t.Errorf("status after the add: %+v", st.Tunnels)
+	}
+	if len(mp.dns.Tunnels) != 3 || mp.dns.Tunnels[2].Name != "vault" {
+		t.Errorf("DNS tunnels: %d", len(mp.dns.Tunnels))
+	}
+	// The added profile takes changes like the others.
+	if _, err := es.change(context.Background(), control.Change{Kind: control.KindDNS, Op: "add", Profile: "vault", Domains: []string{"vault.example"}}); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := start("vault", false); err == nil || !strings.Contains(err.Error(), "profile vault is connecting") {
+		t.Errorf("start again: %+v %v", res, err)
+	}
+	for name, want := range map[string]string{
+		"dup":       "10.50.0.0/16 is routed by both profiles dev and dup",
+		"all-names": "only one tunnel can resolve all names",
+		"nope":      `no profile "nope"`,
+	} {
+		if _, err := start(name, false); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", name, err, want)
+		}
+	}
+	if n := len(es.status().Tunnels); n != 3 {
+		t.Errorf("refused adds changed the run: %d profiles", n)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("runEngine: %v", err)
+	}
+}
