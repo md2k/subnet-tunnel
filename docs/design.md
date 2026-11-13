@@ -424,6 +424,108 @@ DNS rules come before the kill switch, so a captured DNS server inside the guard
 captured. What stays behind has no `pass` rule and blocks DNS with
 `block return out quick inet proto { udp tcp } from any to <subtun_dns> port 53`.
 
+## Several tunnels (planned)
+
+Not built yet. One subtun process runs several profiles at once, each with its own target: split
+routing to several remotes, for example `10.0.0.0/8` and `corp.example` through a work cluster,
+`10.50.0.0/16` and `cluster.local` through a dev cluster.
+
+```
+subtun up work                            # one profile, as today
+subtun up --profile work,dev              # several
+subtun up --profile work --profile dev    # the same
+```
+
+**Why one process.** Running `subtun up work` and `subtun up dev` side by side only works for
+routes. Both want the same utun address. Only one session can own the firewall anchor, so the
+second one's DNS capture or kill switch is refused. Only one DNS engine can answer the captured
+servers. And two kill switches can't be combined.
+
+```
+app ──► utun + gVisor ──► router ──┬─► tunnel work ══► agent in the work pod
+        (every profile's routes)   └─► tunnel dev  ══► agent in the dev pod
+system DNS ──► DNS engine ─────────── per name: work, dev or the fallback
+app ──► SOCKS (one per profile) ───── its own tunnel only
+```
+
+- **Shared, as today:** one utun, one root helper, one firewall rule set. The utun carries the
+  union of all profiles' routes, so the root side doesn't change. One DNS engine, one kill switch
+  guard (all routes minus the local networks), one IPv6 block.
+- **Connections:** each goes to the tunnel whose route matches its destination most specifically,
+  the rule routes and excludes already follow. The stack's dialer becomes a router over the
+  tunnels; the stack, the loop guard and the hand-back stay as they are.
+- **DNS:** a name goes to the tunnel with the most specific matching domain (`db.corp.example`
+  goes to the profile listing `corp.example`, not to one listing `example`); then to the first
+  matching pattern, in profile order; then to the profile with `.`, if any (local names still
+  stay local); else to the fallback. `dns.unrouted` checks a tunnel's answers against that
+  tunnel's own routes, since a connection to an address another tunnel routes would go there.
+- **Per tunnel:** target, agent, agent directory, SOCKS proxy (it dials only its own tunnel, and
+  hostnames resolve on that agent), reconnect, `dns.unrouted`, the warning about a target on this
+  machine, its state, and later its counters. Log lines carry `tunnel=<profile>`.
+- **Run-wide:** `tun.*`, `dns.capture`, `dns.servers`, `dns.fallback`, `killSwitch.*`,
+  `blockIPv6`.
+
+**Combining profiles:**
+- The same CIDR in the routes of two profiles is an error, and so are the same DNS domain, `.` in
+  more than one profile, and the same SOCKS address.
+- Overlapping routes follow most specific wins: dev's `10.50.0.0/16` takes those addresses from
+  work's `10.0.0.0/8`. The dry run lists each route with its tunnel and shows which routes take
+  over part of another.
+- A full tunnel in one profile carries whatever the others don't route.
+- A profile's excludes apply to its own routes: work's `10.50.0.0/16` exclude doesn't stop dev
+  from routing it. Excludes in `defaults:` apply to every profile.
+- The automatic excludes apply to each profile as today. Every tunnel's own endpoints (API
+  servers, Docker daemons) are excluded from every route, so no tunnel's connection runs inside
+  another tunnel.
+- Run-wide settings: the values the profiles set must agree; a profile that doesn't set one has no
+  say. Different values are an error naming the profiles, unless the setting is given on the
+  command line, which sets it for the run.
+
+**Command line:**
+- The profiles are `up`'s argument plus every `--profile` (repeatable or comma-separated); with
+  `--profile`, no argument is needed. Profile names and CIDRs never mix as arguments: a bare IP
+  like `10.1.2.3` is also a valid profile name.
+- With several profiles, CIDRs given on the command line, `--dns-domain`, `--dns-pattern` and
+  `--socks` are refused (which tunnel would they belong to?). `-x` excludes from every profile;
+  `--agent`, `--agent-dir`, `--reconnect-*` and `--dns-unrouted` apply to every profile.
+- `subtun k8s` and `subtun docker` stay single-tunnel. Inside, every run is a set of tunnels, one
+  for them, so there is one code path.
+- No new config keys. A name for a combination of profiles in the config can come later if typing
+  the list turns out to be tedious.
+
+**Starting and failing:**
+- All tunnels connect in parallel, before the root helper starts (connecting comes before sudo,
+  as today). If one can't connect, the run stops: all or nothing at start.
+- Each tunnel reconnects on its own, with its own policy. While one is down, only its destinations
+  get resets and only its names SERVFAIL; the others carry on. Its routes stay on the utun, so its
+  traffic doesn't leak meanwhile.
+- When one tunnel gives up, subtun exits, as it does today, and a kill switch then holds for all
+  routes. Keeping the others running would leave the given-up tunnel's routes on the utun,
+  unreachable even without a kill switch, until they can be removed at runtime (below).
+
+**Overlapping address spaces.** Connections are split by destination address, so two remotes
+using the same addresses (two clusters with the default `10.96.0.0/12` service range) can't both
+be routed: the same CIDR twice is an error. Their SOCKS proxies still work, each through its own
+tunnel. Possible later: DNS answers from one tunnel get addresses from a private pool, which
+subtun maps back to the real ones (fake-IP style).
+
+**Status and control** (after several tunnels):
+- `subtun status`, over a control socket in the private run directory, lists the tunnels (one in
+  a single-profile run): target, state (up, reconnecting since when, gave up), routes, domains,
+  connections, bytes and recent errors. A terminal UI can use the same socket later.
+- Runtime changes: add or remove a tunnel's routes and domains, attach or detach a profile. That
+  needs `add_route` and route removal in the session helper after setup (today it only accepts
+  firewall updates and `end`). It also enables `dns.unrouted: tunnel`, routes that follow network
+  changes, and keeping the other tunnels running when one gives up (its routes are removed).
+
+**Rejected:**
+- One process per profile: see "Why one process" above.
+- One utun per tunnel, chosen by the system's routes: the routing table would show which tunnel
+  carries what, but the helper would need several utuns, and the kill switch rules per interface,
+  for a choice the process can make itself.
+- `subtun up work dev` with several profile names as arguments: they can't be told apart from
+  CIDRs reliably (see Command line).
+
 ## Decisions
 
 - **Capture:** utun / TUN interface plus the gVisor network stack, with utun MTU 9000. Data never
