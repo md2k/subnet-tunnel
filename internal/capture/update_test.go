@@ -1,6 +1,7 @@
 package capture
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -11,17 +12,32 @@ import (
 )
 
 // fakeHelper records what a running capture asks of the root helper.
-type fakeHelper struct{ calls []string }
+type fakeHelper struct {
+	calls      []string
+	failApply  int // fail this many firewall updates
+	failDelete netip.Prefix
+}
 
-func (f *fakeHelper) AddRoute(p netip.Prefix) error    { return f.rec("add %s", p) }
-func (f *fakeHelper) DeleteRoute(p netip.Prefix) error { return f.rec("delete %s", p) }
-func (f *fakeHelper) End(keep bool) error              { return f.rec("end keep=%v", keep) }
-func (f *fakeHelper) Close() error                     { return f.rec("close") }
-func (f *fakeHelper) Exited() <-chan struct{}          { return nil }
+func (f *fakeHelper) AddRoute(p netip.Prefix) error { return f.rec("add %s", p) }
+func (f *fakeHelper) DeleteRoute(p netip.Prefix) error {
+	if p == f.failDelete {
+		f.rec("delete %s failed", p)
+		return errors.New("route delete failed")
+	}
+	return f.rec("delete %s", p)
+}
+func (f *fakeHelper) End(keep bool) error     { return f.rec("end keep=%v", keep) }
+func (f *fakeHelper) Close() error            { return f.rec("close") }
+func (f *fakeHelper) Exited() <-chan struct{} { return nil }
 func (f *fakeHelper) ApplyFirewall(r platform.Rules, persist *platform.Rules) error {
 	kept := "-"
 	if persist != nil {
 		kept = fmt.Sprint(persist.KillSwitch.Prefixes)
+	}
+	if f.failApply > 0 {
+		f.failApply--
+		f.rec("firewall guard=%v failed", r.KillSwitch.Prefixes)
+		return errors.New("pfctl failed")
 	}
 	return f.rec("firewall guard=%v kept=%s", r.KillSwitch.Prefixes, kept)
 }
@@ -111,4 +127,51 @@ func TestStopKeepsLockdownPart(t *testing.T) {
 		t.Error("a crash left nothing behind")
 	}
 	checkHelperCalls(t, h, "close")
+}
+
+// A guard that fails to apply is tried again by the next Update, and no
+// route is removed until it is in place.
+func TestUpdateRetriesTheGuard(t *testing.T) {
+	work := mps("10.0.0.0/8")
+	c, h := testCapture(t, mps("10.0.0.0/8", "10.50.0.0/16"), Guard{Base: mps("10.0.0.0/9")})
+	h.failApply = 1
+	if err := c.Update(work, Guard{Base: work}); err == nil {
+		t.Fatal("a failed firewall update was not reported")
+	}
+	checkHelperCalls(t, h, "firewall guard=[10.0.0.0/8] failed")
+	if err := c.Update(work, Guard{Base: work}); err != nil {
+		t.Fatal(err)
+	}
+	checkHelperCalls(t, h, "firewall guard=[10.0.0.0/8] kept=[10.0.0.0/8]", "delete 10.50.0.0/16")
+}
+
+// One route that can't be removed doesn't keep the others on the utun; it
+// is tried again next time.
+func TestUpdateRemovesPastAFailure(t *testing.T) {
+	c, h := testCapture(t, mps("10.1.0.0/16", "10.2.0.0/16", "10.3.0.0/16"), Guard{})
+	c.guard = nil
+	h.failDelete = netip.MustParsePrefix("10.1.0.0/16")
+	if err := c.Update(mps("10.3.0.0/16"), Guard{}); err == nil {
+		t.Fatal("the failed delete was not reported")
+	}
+	checkHelperCalls(t, h, "delete 10.1.0.0/16 failed", "delete 10.2.0.0/16")
+	if !slices.Equal(c.Routes(), mps("10.1.0.0/16", "10.3.0.0/16")) {
+		t.Fatalf("routes: %v", c.Routes())
+	}
+}
+
+// Once stopping, a firewall update still queued (network change) is
+// dropped: it would re-send the whole guard as what stays.
+func TestNoFirewallUpdatesAfterStop(t *testing.T) {
+	base := mps("10.0.0.0/8", "172.16.0.0/12")
+	c, h := testCapture(t, base, Guard{Base: base, Lockdown: mps("172.16.0.0/12")})
+	c.stopHelper(true)
+	h.calls = nil
+	if err := c.apply(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Update(base, Guard{Base: base}); err == nil {
+		t.Error("Update after the stop worked")
+	}
+	checkHelperCalls(t, h)
 }

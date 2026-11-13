@@ -9,6 +9,7 @@ package capture
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"slices"
@@ -95,8 +96,10 @@ type Capture struct {
 	guard  *guardState // with a kill switch
 	log    *slog.Logger
 
-	mu     sync.Mutex     // firewall updates and route changes, one at a time
-	routes []netip.Prefix // on the utun
+	mu      sync.Mutex     // firewall updates and route changes, one at a time
+	routes  []netip.Prefix // on the utun
+	dirty   bool           // the guard changed but applying it failed: retry
+	stopped bool           // stopping: no more firewall updates
 }
 
 // HelperExited is closed if the root helper of a session goes away; nil
@@ -125,31 +128,35 @@ func (c *Capture) Stop(deliberate bool) (leftBehind bool) {
 }
 
 // stopHelper ends the session helper, if any, and reports whether rules
-// stay behind.
+// stay behind. Firewall updates still queued (network or DNS server
+// changes) are dropped from here on, so they can't undo the narrowing.
 func (c *Capture) stopHelper(deliberate bool) (leftBehind bool) {
 	if c.helper == nil {
 		return false
 	}
+	c.mu.Lock()
+	c.stopped = true
 	if deliberate {
 		leftBehind = c.narrowForStop()
-		_ = c.helper.End(leftBehind)
 	} else {
 		leftBehind = c.guard != nil && len(c.guard.get()) > 0
+	}
+	c.mu.Unlock()
+	if deliberate {
+		_ = c.helper.End(leftBehind)
 	}
 	_ = c.helper.Close() // without End: the helper applies the crash policy
 	return leftBehind
 }
 
 // narrowForStop makes the rules that stay after a deliberate stop the
-// lockdown part of the guard, and reports whether any stay.
+// lockdown part of the guard, and reports whether any stay. c.mu is held.
 func (c *Capture) narrowForStop() bool {
 	if c.guard == nil {
 		return false
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	guarded, lockdown := c.guard.get(), c.guard.getLockdown()
-	if len(lockdown) == 0 || slices.Equal(lockdown, guarded) {
+	if len(lockdown) == 0 || slices.Equal(lockdown, guarded) && !c.dirty {
 		return len(lockdown) > 0
 	}
 	running, persist := rules(c.opts, guarded, lockdown, c.Name, c.dns)
@@ -162,13 +169,17 @@ func (c *Capture) narrowForStop() bool {
 // Update replaces the utun's routes and the kill switch's guard (several
 // tunnels: profiles come and go). Routes are added first, then the
 // firewall rules follow the guard, then routes go, so no address leaves the
-// tunnel in between. It needs a session (Options.Session).
+// tunnel in between. If the guard can't be applied, nothing is removed and
+// the next Update tries again. It needs a session (Options.Session).
 func (c *Capture) Update(prefixes []netip.Prefix, g Guard) error {
 	if c.helper == nil {
 		return errors.New("route changes need the session helper")
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.stopped {
+		return errors.New("stopping")
+	}
 	for _, p := range prefixes {
 		if slices.Contains(c.routes, p) {
 			continue
@@ -183,22 +194,26 @@ func (c *Capture) Update(prefixes []netip.Prefix, g Guard) error {
 		if err != nil {
 			return err
 		}
-		if changed {
+		if changed || c.dirty {
 			if err := c.applyLocked(); err != nil {
-				return err
+				c.dirty = true
+				return fmt.Errorf("updating the kill switch: %w", err)
 			}
+			c.dirty = false
 		}
 	}
+	var errs []error
 	for _, p := range slices.Clone(c.routes) {
 		if slices.Contains(prefixes, p) {
 			continue
 		}
 		if err := c.helper.DeleteRoute(p); err != nil {
-			return err
+			errs = append(errs, err) // kept, tried again next time
+			continue
 		}
 		c.routes = slices.DeleteFunc(c.routes, func(q netip.Prefix) bool { return q == p })
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // Routes returns the routes on the utun.
@@ -213,6 +228,9 @@ func (c *Capture) Routes() []netip.Prefix {
 func (c *Capture) apply() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.stopped {
+		return nil
+	}
 	return c.applyLocked()
 }
 
