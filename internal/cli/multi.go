@@ -1033,7 +1033,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	// gets a new runner, which waits for the old one to finish; events of a
 	// runner since stopped or replaced are ignored.
 	events := make(chan tunnelEvent)
-	started := time.Now()
+	started := make([]time.Time, n) // when each runner started
 	runners := make([]runner, n)
 	startRunner := func(i int, mode startMode) {
 		r := &runners[i]
@@ -1046,6 +1046,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		rctx, rcancel := context.WithCancel(tctx)
 		done := make(chan struct{})
 		r.cancel, r.done = rcancel, done
+		started[i] = time.Now()
 		sp, policy, live, tl := mp.specs[i], mp.policies[i], lives[i], logs[i]
 		try := func(ctx context.Context) (*session, error) {
 			carrier, err := sp.connect(ctx, agents, tl)
@@ -1198,21 +1199,35 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		if err != nil {
 			return nil, err
 		}
+		// The new endpoint's name never goes through a tunnel, from the
+		// lookup below on; undone if the reload doesn't happen.
+		undo := func() {}
+		if m, h := es.matcher(), transport.HostName(host); m != nil && h != "" && !slices.Contains(m.Own(), h) {
+			prev := m.Own()
+			m.SetOwn(append(slices.Clone(prev), h))
+			undo = func() { m.SetOwn(prev) }
+		}
 		var addrs []netip.Addr
 		var warns []string
 		if host != mp.hosts[i] { // a new target: keep its endpoint out of the routes before it connects
+			// A lookup through the system's resolver, as at start (up to 3 s).
 			lctx, lcancel := context.WithTimeout(ctx, 3*time.Second)
 			addrs, err = lookupEndpoint(lctx, host)
 			lcancel()
 			if err != nil {
 				warns = append(warns, fmt.Sprintf("looking up %s failed (%v); if its address lies inside the routes, its connection goes into a tunnel and can't connect", transport.HostName(host), err))
 			}
+			if a, ok := ipv6Endpoint(addrs); ok && c != nil && c.BlockingIPv6() {
+				undo()
+				return nil, fmt.Errorf("its new endpoint %s is an IPv6 address, and this run blocks outgoing IPv6, which would cut its connection; restart subtun instead", a)
+			}
 		}
 		rl, err := mp.planReload(i, ns, host, addrs, es.matcher())
 		if err != nil {
+			undo()
 			return nil, err
 		}
-		rl.warns = append(warns, rl.warns...)
+		rl.warns, rl.undo = append(warns, rl.warns...), undo
 		return rl, nil
 	}
 	applyReload := func(rl *reloadChange) error {
@@ -1306,12 +1321,14 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 				if req.DryRun {
 					res.Message = "would start it"
 					if rl != nil {
+						rl.undo()
 						res.Message = "would reload it from the config file and start it: " + rl.summary
 					}
 					return res, nil
 				}
 				if rl != nil {
 					if err := applyReload(rl); err != nil {
+						rl.undo()
 						return res, err
 					}
 					flushDNS = true // its names may have changed
@@ -1348,7 +1365,14 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			res.Warnings = append(res.Warnings, fmt.Sprintf("applying it failed, subtun tries again: %v", err))
 		}
 		if req.Kind != control.KindProfile && !mp.activeSet(states)[i] {
-			res.Warnings = append(res.Warnings, fmt.Sprintf("it is %s: its routes and names are used once its tunnel is up", states[i]))
+			_, arg := profileWords(sp.name)
+			switch states[i] {
+			case stateStopped, stateGaveUp:
+				res.Warnings = append(res.Warnings, fmt.Sprintf("it %s: its routes and names are used once it starts again (subtun profile start%s)",
+					map[tunnelState]string{stateStopped: "is stopped", stateGaveUp: "gave up"}[states[i]], arg))
+			default:
+				res.Warnings = append(res.Warnings, fmt.Sprintf("it is %s: its routes and names are used once its tunnel is up", states[i]))
+			}
 		}
 		if plan && c == nil && mp.hasRoutes() {
 			res.Warnings = append(res.Warnings, "the capture hasn't started yet (connecting, or sudo is asking): it starts with this")
@@ -1375,7 +1399,10 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		case req := <-changes:
 			res, err := handleChange(req.ch)
 			req.reply <- changeReply{res, err}
-			continue
+			if c != nil {
+				continue // handleChange brought the capture in line
+			}
+			// Below: a stop may have ended the first round.
 		case <-retry:
 			retry = nil
 		case <-firstRound:
@@ -1421,7 +1448,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 					m.SetOwn(append(m.Own(), transport.HostName(ev.carrier.Host)))
 				}
 				if prev == stateConnecting {
-					tl.Info("tunnel up", "via", ev.carrier.Desc, "agent", ev.agent, "took", time.Since(started).Round(time.Millisecond))
+					tl.Info("tunnel up", "via", ev.carrier.Desc, "agent", ev.agent, "took", time.Since(started[ev.i]).Round(time.Millisecond))
 					if devDNS != nil && !devStarted {
 						devStarted = true
 						devDNS.Tunnels[0].Upstream = dns.UpstreamFunc(lives[0].ExchangeDNS)
@@ -1454,12 +1481,16 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 				if eo.single {
 					return ev.err // as subtun has always ended (a kill switch holds)
 				}
-				what := "its routes and names are removed"
+				what, until := "its routes and names are removed", "subtun restarts"
+				if eo.control == controlFull {
+					_, arg := profileWords(mp.specs[ev.i].name)
+					until = "it starts again (subtun profile start" + arg + ")"
+				}
 				switch {
 				case mp.rps[ev.i] == nil:
-					what = "its SOCKS proxy fails until subtun restarts"
+					what = "its SOCKS proxy fails until " + until
 				case mp.ks[ev.i] != "off":
-					what = "kill switch: its routes stay, and its traffic is refused until subtun restarts"
+					what = "kill switch: its routes stay, and its traffic is refused until " + until
 				}
 				tl.Warn("gave up: "+what, "err", ev.err)
 			}
@@ -1468,8 +1499,8 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			}
 		}
 		if c == nil {
-			if !mp.hasRoutes() || starting != nil || !roundOver && slices.Contains(tried, false) {
-				continue // nothing to capture, starting, or the first round isn't over
+			if !mp.hasRoutes() || starting != nil || !roundOver && slices.Contains(tried, false) || allStopped(mp, states) {
+				continue // nothing to capture, starting, the first round isn't over, or everything stopped
 			}
 			// Off this loop: sudo may ask for a while, and tunnels must
 			// keep reporting (and reconnecting) meanwhile.
@@ -1492,6 +1523,17 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		}
 		_ = relayout()
 	}
+}
+
+// allStopped reports whether every profile with routes is stopped, none in
+// lockdown: the capture would have nothing to do.
+func allStopped(mp *multiPlan, states []tunnelState) bool {
+	for i, rp := range mp.rps {
+		if rp != nil && (states[i] != stateStopped || mp.ks[i] == "lockdown") {
+			return false
+		}
+	}
+	return true
 }
 
 // startMultiCapture starts the capture for the profiles in use. With

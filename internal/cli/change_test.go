@@ -149,6 +149,22 @@ func TestPlanDNSChange(t *testing.T) {
 			t.Errorf("%s: %v, want %q", name, err, tc.want)
 		}
 	}
+	// Names asked of servers the run doesn't capture would never reach the
+	// tunnel: every profile pins 192.0.2.53 here, so the system's aren't
+	// captured.
+	mp.specs[2].s.dnsServers = nil // auto
+	if _, err := mp.planDNSChange(2, control.Change{Op: "add", Domains: []string{"v2.example"}}, m); err == nil || !strings.Contains(err.Error(), "dns.servers: auto") {
+		t.Errorf("auto servers, not captured: %v", err)
+	}
+	mp.specs[2].s.dnsServers = []string{"192.0.2.99"}
+	if _, err := mp.planDNSChange(2, control.Change{Op: "add", Domains: []string{"v2.example"}}, m); err == nil || !strings.Contains(err.Error(), "192.0.2.99 isn't captured") {
+		t.Errorf("another server: %v", err)
+	}
+	if _, err := mp.planDNSChange(2, control.Change{Op: "del", Domains: []string{"vault.example"}}, m); err != nil {
+		t.Errorf("removing names needs no captured server: %v", err)
+	}
+	mp.specs[2].s.dnsServers = []string{"192.0.2.53"}
+
 	// Moving "." from work to dev: off work first, then onto dev.
 	dc, err = mp.planDNSChange(0, control.Change{Op: "del", Domains: []string{"."}}, m)
 	if err != nil {
@@ -234,6 +250,21 @@ func TestPlanReload(t *testing.T) {
 		addrs, _ := lookupEndpoint(context.Background(), host)
 		return mp.planReload(i, ns, host, addrs, mp.dns.Match)
 	}
+	// The file as it was: only the change made while running goes. Writing
+	// out a default is no change either.
+	writeConfig(t, path, strings.Replace(reloadBase, `    killSwitch: {mode: "on"}`, "    killSwitch: {mode: \"on\", dns: block}\n    blockIPv6: auto\n    dns: {capture: firewall}", 1))
+	rl0, err := reload(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rl0.summary != "new routes; the changes made while running are dropped" {
+		t.Errorf("unchanged file: %q", rl0.summary)
+	}
+	writeConfig(t, path, reloadBase)
+	if rl0, err = reload(0); err != nil || rl0.summary != "the config file changes nothing" {
+		t.Errorf("profile a, unchanged: %+v %v", rl0, err)
+	}
+
 	writeConfig(t, path, strings.Replace(strings.Replace(reloadBase,
 		"routes: [10.50.0.0/16]", "routes: [10.50.0.0/16, 10.52.0.0/16]\n    dns: {domains: [b.example]}", 1),
 		"203.0.113.20", "203.0.113.21", 1))
@@ -289,6 +320,10 @@ func TestStoppedProfile(t *testing.T) {
 	active := mp.activeSet([]tunnelState{stateStopped, stateStopped, stateStopped})
 	if !slices.Equal(active, []bool{false, false, true}) {
 		t.Errorf("active: %v", active)
+	}
+	if allStopped(mp, []tunnelState{stateStopped, stateStopped, stateStopped}) || !allStopped(multiPlanFor(t, "work", "dev"), []tunnelState{stateStopped, stateStopped}) ||
+		allStopped(mp, []tunnelState{stateStopped, stateUp, stateStopped}) {
+		t.Error("allStopped: the capture has something to do while a profile runs or holds lockdown")
 	}
 	if !mp.dnsFlushNeeded(1, stateUp, stateStopped, true) || !mp.dnsFlushNeeded(0, stateUp, stateStopped, true) {
 		t.Error("a stopped profile's names go elsewhere: the cache must be flushed")
@@ -445,5 +480,76 @@ func TestEngineChanges(t *testing.T) {
 	}
 	if _, err := es.change(context.Background(), routeReq("add", "dev", "10.80.0.0/16")); err == nil || err.Error() != "subtun is stopping" {
 		t.Errorf("after the run: %v", err)
+	}
+}
+
+// A stop that ends the first round starts the capture at once, unless
+// every profile is stopped (nothing to capture). The capture is a stub.
+func TestEngineStopEndsFirstRound(t *testing.T) {
+	origCtl, origCap, origLeft := startControl, startCapture, leftoversMarked
+	t.Cleanup(func() { startControl, startCapture, leftoversMarked = origCtl, origCap, origLeft })
+	leftoversMarked = func() bool { return false }
+	for _, stopBoth := range []bool{false, true} {
+		ready := make(chan *engineStatus, 1)
+		startControl = func(_ context.Context, es *engineStatus, _ *logring.Ring, _ *slog.Logger) { ready <- es }
+		started := make(chan struct{}, 1)
+		startCapture = func(context.Context, *multiPlan, []bool, []*liveTunnel, []meter.Dialer, *router, *privhelper.Client, *leftovers, bool, func(string), *slog.Logger) (*capture.Capture, error) {
+			started <- struct{}{}
+			return nil, errors.New("capture stub")
+		}
+		mp := multiPlanFor(t, "work", "dev")
+		blocked := make(chan struct{}, 8)
+		for i, sp := range mp.specs {
+			sp.s.socks = ""
+			tries := 0
+			sp.connect = func(ctx context.Context, _ []agentbin.Binary, _ *slog.Logger) (*transport.Carrier, error) {
+				tries++
+				blocked <- struct{}{}
+				if i == 0 && !stopBoth && tries == 1 {
+					// work's first attempt fails: it is tried, and retries by its policy.
+					return nil, errors.New("refused (test)")
+				}
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- runEngine(ctx, &globalOpts{}, mp, engineOpts{control: controlFull}) }()
+		es := <-ready
+		<-blocked
+		<-blocked
+		stop := func(name string) {
+			if _, err := es.change(context.Background(), control.Change{Kind: control.KindProfile, Op: "stop", Profile: name}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if stopBoth {
+			stop("work")
+			stop("dev")
+			select {
+			case <-started:
+				t.Error("every profile stopped, and the capture started")
+			case <-time.After(300 * time.Millisecond):
+			}
+			cancel()
+			if err := <-done; err != nil {
+				t.Errorf("runEngine: %v", err)
+			}
+			continue
+		}
+		for i := 0; es.status().Tunnels[0].LastError == "" && i < 300; i++ {
+			time.Sleep(10 * time.Millisecond) // until work's failure reached the loop
+		}
+		stop("dev")
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("the capture didn't start once the first round was over")
+		}
+		if err := <-done; err == nil || err.Error() != "capture stub" {
+			t.Errorf("runEngine: %v", err)
+		}
+		cancel()
 	}
 }

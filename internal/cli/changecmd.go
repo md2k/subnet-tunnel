@@ -60,6 +60,9 @@ func sendChange(cmd *cobra.Command, pid int, endpoint string, ch control.Change)
 	defer cancel()
 	var res control.Result
 	if err := control.NewClient(in.Path).Post(ctx, endpoint, ch, &res); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("no answer from subtun pid %d within %s; the change may still have been made: see subtun status", in.PID, changeTimeout)
+		}
 		return err
 	}
 	writeResult(cmd.OutOrStdout(), cmd.ErrOrStderr(), res)

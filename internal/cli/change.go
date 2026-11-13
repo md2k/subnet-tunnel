@@ -331,6 +331,11 @@ func (mp *multiPlan) planDNSChange(i int, req control.Change, m *dns.Matcher) (*
 	if _, err := dns.NewMultiMatcher(dc.names); err != nil {
 		return nil, err
 	}
+	if req.Op == "add" {
+		if err := mp.dnsServersCaptured(sp.s); err != nil {
+			return nil, fmt.Errorf("%s: %w", label, err)
+		}
+	}
 	if len(already) > 0 {
 		dc.warns = append(dc.warns, fmt.Sprintf("it already had %s", strings.Join(already, ", ")))
 	}
@@ -350,6 +355,34 @@ func (mp *multiPlan) planDNSChange(i int, req control.Change, m *dns.Matcher) (*
 		map[bool]string{false: "now", true: "would be"}[req.DryRun], now)
 	dc.logMsg = "DNS names " + logVerb
 	return dc, nil
+}
+
+// dnsServersCaptured checks that the DNS servers a profile's names are
+// asked of are among those the run captures: which servers are captured,
+// and whether the system's are followed, was decided at start by the
+// profiles that had names then.
+func (mp *multiPlan) dnsServersCaptured(s settings) error {
+	d := mp.dns
+	if d == nil {
+		return nil // the development listener: nothing is captured
+	}
+	list := s.dnsServers
+	if len(list) == 0 || len(list) == 1 && list[0] == "auto" {
+		if !d.Auto {
+			return errors.New("its names would be asked of the system's DNS servers (dns.servers: auto), and this run captures only the servers set in the config; restart subtun to capture the system's too")
+		}
+		return nil
+	}
+	servers, err := parseServers(list)
+	if err != nil {
+		return err
+	}
+	for _, a := range servers {
+		if !slices.Contains(d.Servers, a) && !slices.Contains(d.Pinned, a) {
+			return fmt.Errorf("its DNS server %s isn't captured by this run (it captures the servers of the profiles that had DNS names at start); restart subtun to capture it", a)
+		}
+	}
+	return nil
 }
 
 // applyDNSChange makes a planned DNS change part of the plan and the
@@ -394,11 +427,13 @@ type reloadChange struct {
 	addrs   []netip.Addr
 	summary string
 	warns   []string
+	undo    func() // undoes what planning it changed (the new endpoint's own name)
 }
 
 // fixedChanges lists the settings a reload can't change: the run shares
 // them, or set them up at start.
 func fixedChanges(was, now settings) []string {
+	was, now = fixedDefaults(was), fixedDefaults(now)
 	var out []string
 	add := func(changed bool, key string) {
 		if changed {
@@ -415,6 +450,26 @@ func fixedChanges(was, now settings) []string {
 	add(was.killSwitchDNS != now.killSwitchDNS, "killSwitch.dns")
 	add(was.blockIPv6 != now.blockIPv6, "blockIPv6")
 	return out
+}
+
+// fixedDefaults spells out the defaults of the settings fixedChanges
+// compares, so leaving one out and writing its default are the same.
+func fixedDefaults(s settings) settings {
+	def := func(v *string, d string) {
+		if *v == "" {
+			*v = d
+		}
+	}
+	def(&s.dnsCapture, "firewall")
+	def(&s.dnsFallback, "system")
+	def(&s.dnsUnrouted, "warn")
+	def(&s.killSwitch, "off")
+	def(&s.killSwitchDNS, "block")
+	def(&s.blockIPv6, "auto")
+	if len(s.dnsServers) == 0 {
+		s.dnsServers = []string{"auto"}
+	}
+	return s
 }
 
 // planReload checks profile i as read from the config file again (ns),
@@ -459,7 +514,7 @@ func (mp *multiPlan) planReload(i int, ns *tunnelSpec, host string, addrs []neti
 	case rp != nil && mp.rps[i] == nil:
 		return nil, fmt.Errorf("%s has routes in the config file now and started without, which needs a subtun restart", label)
 	}
-	rl := &reloadChange{i: i, spec: ns, policy: policy, rp: rp, host: host, addrs: addrs}
+	rl := &reloadChange{i: i, spec: ns, policy: policy, rp: rp, host: host, addrs: addrs, undo: func() {}}
 	if rp != nil {
 		if rl.final, err = carveEndpoints(rp, append(mp.endpointList(), addrs...)); err != nil {
 			return nil, fmt.Errorf("%s: %w", label, err)
@@ -482,6 +537,9 @@ func (mp *multiPlan) planReload(i int, ns *tunnelSpec, host string, addrs []neti
 		case m == nil:
 			warns = append(warns, "DNS names ignored: this run doesn't capture DNS; restart subtun to capture them")
 		default:
+			if err := mp.dnsServersCaptured(ns.s); err != nil {
+				return nil, fmt.Errorf("%s: %w", label, err)
+			}
 			rl.names[i] = dns.Names{Domains: ns.s.dnsDomains, Patterns: ns.s.dnsPatterns}
 		}
 	}
@@ -505,7 +563,7 @@ func reloadSummary(old, ns *tunnelSpec, wasFinal, nowFinal []netip.Prefix, wasNa
 	}
 	oldHost, _ := old.endpoint()
 	newHost, _ := ns.endpoint()
-	add(oldHost != newHost || old.cfg.Target != ns.cfg.Target, "target")
+	add(oldHost != newHost || targetKey(old.cfg.Target) != targetKey(ns.cfg.Target), "target")
 	add(old.s.agent != ns.s.agent || old.s.agentDir != ns.s.agentDir, "agent")
 	add(!slices.Equal(wasFinal, nowFinal), "routes")
 	add(!slices.Equal(namesText(wasNames), namesText(nowNames)), "DNS names")
@@ -519,6 +577,17 @@ func reloadSummary(old, ns *tunnelSpec, wasFinal, nowFinal []netip.Prefix, wasNa
 		out += "; the changes made while running are dropped"
 	}
 	return out
+}
+
+// targetKey is a target's settings, comparable.
+func targetKey(t config.Target) string {
+	switch {
+	case t.K8s != nil:
+		return fmt.Sprintf("k8s %+v", *t.K8s)
+	case t.Docker != nil:
+		return fmt.Sprintf("docker %+v", *t.Docker)
+	}
+	return ""
 }
 
 // applyReload makes a reloaded profile part of the plan; the caller has

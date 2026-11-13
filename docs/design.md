@@ -644,8 +644,10 @@ be asking).
 - `dns add` takes domains and, with `--pattern`, regular expressions, as `dns.domains` and
   `dns.patterns`.
 - Limits for now: routes only for a profile that started with routes, at least one left; DNS names
-  only when the run captures DNS already (starting DNS capture or the firewall later in a run isn't
-  done).
+  only when the run captures DNS already, and only for a profile whose DNS servers it captures
+  (starting DNS capture, the firewall, or capturing other servers later in a run isn't done).
+- Exit as before: subtun ends when every profile has given up (one profile: when it gives up), also
+  right after a start or reconnect that failed; stopped profiles keep it running.
 
 **Setting:** global for the run, never per profile: `--control`, or a top-level `control:` key in
 the config file (next to `defaults:` and `profiles:`).

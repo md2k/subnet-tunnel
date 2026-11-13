@@ -544,19 +544,25 @@ subtun route add --profile dev 10.80.0.0/16 --dry-run   # only show what would c
   traffic goes the normal way again. With `killSwitch.mode: on` its blocks are lifted too; with
   `lockdown` its routes stay and its traffic is refused until it starts again. Its SOCKS proxy
   refuses connections meanwhile. subtun goes on even with every profile stopped (Ctrl-C ends it).
-- **`profile start`** connects a stopped profile, or one that gave up, again, with the settings it
-  had: the ones it started with and the changes made since. With `--reload` it reads the profile
+- **`profile start`** connects a stopped profile, or one that gave up while others run, again, with
+  the settings it had: the ones it started with and the changes made since. As without changes,
+  subtun ends when every profile has given up (one profile: when it gives up), also when that
+  follows a start or reconnect that failed; a kill switch then keeps its blocks. With `--reload` it reads the profile
   from the config file the run started with instead (command-line flags of `subtun up NAME` still
   apply), dropping the changes made while running. A reload takes the target, agent, routes,
   excludes, DNS domains and patterns, SOCKS address and reconnect settings; the settings the run
   shares or set up at start (`tun.*`, `dns.capture`, `dns.servers`, `dns.fallback`, `dns.unrouted`,
-  `killSwitch.*`, `blockIPv6`) need a restart, and a reload that changes them is refused.
+  `killSwitch.*`, `blockIPv6`) need a restart, and a reload that changes them is refused, as is
+  one that adds DNS names asked of servers the run doesn't capture, or moves the target to an
+  IPv6 address while IPv6 is blocked.
 - **`profile reconnect`** drops the profile's connection and connects again at once, then by its
   reconnect settings; its routes stay meanwhile, as when a connection is lost.
 - **Limits for now.** Routes can be added to a profile that started with routes (not to a
   SOCKS-only one), and a profile keeps at least one route (stop it instead). DNS names can be added
-  when the run captures DNS already (a profile had DNS names when it started). Starting a profile
-  that isn't part of the run is planned.
+  when the run captures DNS already (a profile had DNS names when it started), and only for a
+  profile whose DNS servers it captures: which servers are captured, and whether the system's are
+  followed, was decided at start by the profiles that had names then. Starting a profile that isn't
+  part of the run is planned.
 
 With `control: full` the root helper stays up for the whole run, also for one profile with routes
 only (otherwise it exits after setup), so routes can change without a sudo prompt: any program
