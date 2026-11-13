@@ -282,7 +282,7 @@ func TestDNSLocalsSkipTheUtun(t *testing.T) {
 	localNetworks = func() []routes.Local {
 		return []routes.Local{
 			{Iface: "en0", Network: netip.MustParsePrefix("192.168.77.0/24")},
-			{Iface: "utun9", Network: netip.MustParsePrefix("198.18.249.1/32")},
+			{Iface: "utun9", Network: netip.MustParsePrefix("198.18.249.0/24")}, // a network around the address
 		}
 	}
 	got := dnsLocals(netip.MustParseAddr("198.18.249.1"))()
