@@ -7,7 +7,8 @@ with `subtun up NAME`.
 
 Location: `--config FILE`, else `$SUBTUN_CONFIG`, else `$XDG_CONFIG_HOME/subtun/config.yaml`, else
 `~/.config/subtun/config.yaml`. Parsing is strict: an unknown key is an error, so a typo can't
-silently drop a setting.
+silently drop a setting. Besides `defaults:` and `profiles:`, the top level takes `control:` (see
+[Status and logs](#status-and-logs)).
 
 ```yaml
 defaults:                          # optional: any profile key except target, for every profile
@@ -76,6 +77,8 @@ the words you meant (`mode: off`, `capture: off` work).
 | `subtun docker CONTAINER [CIDR...]` | tunnel through a container (`-H`, `--context`) |
 | `subtun up [PROFILE] [CIDR...]` | run a profile from the config file; without a name, list them |
 | `subtun up --profile A,B` | run several profiles at once ([below](#several-profiles-at-once)) |
+| `subtun status` | what every running subtun is doing ([below](#status-and-logs)) |
+| `subtun logs [-f]` | a running subtun's recent log lines |
 | `subtun cleanup` | remove firewall rules an earlier session left (a kill switch's blocks), without starting one |
 | `subtun import sshuttle FILE` | turn an sshuttle options file into a profile ([below](#importing-from-sshuttle)) |
 | `subtun version` | print the version |
@@ -471,6 +474,37 @@ keeps working; blocked connections are refused at once, so apps fall back to IPv
 subtun's own connection to the API server uses IPv6, IPv6 is left alone, with a warning. The block
 is removed when subtun stops, unless a kill switch keeps its blocks in place (then IPv6 stays blocked
 with them).
+
+## Status and logs
+
+Every running subtun answers `subtun status` and `subtun logs` through a control socket that only
+your user can use (in `~/Library/Caches/subtun/run`; no root, no network port).
+
+```sh
+subtun status                    # every running subtun
+subtun status --watch            # refreshed every second, until Ctrl-C
+subtun status --connections      # with the open connections
+subtun status --json             # for scripts
+subtun logs                      # the recent log lines it keeps in memory
+subtun logs -f                   # then follow new ones (--pid N when several run)
+```
+
+For each tunnel (one per profile): its state (connecting, up, reconnecting with the attempt and
+the next try, gave up) and the last error, the target and agent, its routes and whether they are in
+use, its DNS names, kill switch and SOCKS address, and counters: connections (open, total, failed,
+through SOCKS), bytes each way with the rate of the last second, the names it answered, and
+connections the loop guard refused. Then the shared DNS capture (the servers captured now, the
+fallback, the names that stay local) and the kill switch (guarded prefixes).
+
+The log lines are the ones subtun prints, kept in memory only (at most 5000 lines or 4 MB), never
+written to disk.
+
+| Setting | Flag | Values |
+|---|---|---|
+| `control` (top level of the config file, next to `defaults:`) | `--control` | `status` (default), `off` (no socket) |
+
+`control` is set once for the whole run, never per profile. Changing routes and DNS names while
+subtun runs (`control: full`) is planned.
 
 ## Importing from sshuttle
 
