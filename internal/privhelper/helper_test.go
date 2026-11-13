@@ -600,3 +600,55 @@ func TestHelperAdoptedLeftoversGoWithASessionWithoutFirewall(t *testing.T) {
 		t.Fatal("state left behind")
 	}
 }
+
+// The DNS cache is flushed when the DNS redirect goes on and off: at the
+// start, so earlier answers don't bypass the capture, and at the end, so
+// answers obtained through the tunnel don't outlive it. Updates that keep
+// the redirect (DNS servers followed) don't flush.
+func TestHelperFlushesDNSCache(t *testing.T) {
+	d := &fake.Drivers{DNSCache: true}
+	c, done := startHelper(t, context.Background(), d)
+	call(t, c, firewallReq("192.168.1.1"))
+	call(t, c, Request{Op: OpDone, Session: true})
+	call(t, c, firewallReq("10.0.0.1"))
+	_ = c.Close()
+	if err := wait(t, done); err != nil {
+		t.Fatal(err)
+	}
+	checkCalls(t, d, "firewall dns [192.168.1.1] 53530 53531", "flush dns cache",
+		"firewall dns [10.0.0.1] 53530 53531", "flush", "flush dns cache")
+
+	// Kill switch: the rules that stay block DNS instead of redirecting it,
+	// so the cache is flushed then too.
+	d = &fake.Drivers{DNSCache: true}
+	c, done = startKillSwitchSession(t, context.Background(), d, &memState{})
+	_ = c.Close()
+	if err := wait(t, done); err != nil {
+		t.Fatal(err)
+	}
+	checkCalls(t, d, created, "add 10.0.0.0/8 utun0", runningRules, "flush dns cache", "release utun0",
+		keptRules, "flush dns cache")
+
+	// Rules without a DNS redirect never flush.
+	d = &fake.Drivers{DNSCache: true}
+	c, done = startHelper(t, context.Background(), d)
+	r := Request{Op: OpApplyFirewall, Rules: &platform.Rules{BlockIPv6: true}}
+	if resp := call(t, c, r); !resp.OK {
+		t.Fatalf("apply: %+v", resp)
+	}
+	call(t, c, Request{Op: OpDone, Session: true})
+	_ = c.Close()
+	wait(t, done)
+	checkCalls(t, d, "firewall ipv6", "flush")
+
+	// Leftovers taken over or cleaned up may come with answers from the
+	// earlier session's tunnel.
+	d = &fake.Drivers{Busy: true, DNSCache: true}
+	c, done = startHelperOpts(t, context.Background(), d, helperOpts{state: &memState{st: &state{Owner: 99, Token: "old"}}})
+	if resp := call(t, c, Request{Op: OpCleanup}); !resp.OK {
+		t.Fatalf("cleanup: %+v", resp)
+	}
+	call(t, c, Request{Op: OpDone})
+	wait(t, done)
+	checkCalls(t, d, "adopt old", "flush", "flush dns cache")
+}

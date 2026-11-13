@@ -331,6 +331,11 @@ dns:
   stack hands packets for the utun's own address straight back to the system, so the answer
   reaches the app. Fallback queries to such a server still fail: they are UDP into the utun, which
   carries TCP only so far.
+- **DNS cache.** The helper flushes the system's DNS cache (a `DNSCache` driver; macOS:
+  `dscacheutil -flushcache` and SIGHUP to mDNSResponder) whenever the DNS redirect goes on or off,
+  and when it takes over or cleans up an earlier session's rules. Otherwise answers from before the
+  capture bypass it for their TTL, and, after it, answers obtained through the tunnel point at
+  addresses only reachable through it (request 006: a name kept failing after subtun stopped).
 - **How queries reach it** is a driver choice:
 
 | `capture` | Mechanism | Notes |

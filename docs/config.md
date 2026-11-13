@@ -186,7 +186,9 @@ DNS listener on 127.0.0.1. Your traffic itself never goes through pf. Because th
 removed again, the helper stays up for the session (one sudo prompt, as before). It removes them
 when subtun exits, crashes or is killed, on Ctrl-C, and when the terminal closes. subtun's own
 fallback queries leave from a port the rules let through, so they can't loop back into subtun even
-when the fallback is one of the captured servers.
+when the fallback is one of the captured servers. The helper flushes macOS's DNS cache when the capture
+starts, so earlier answers don't bypass it, and when it ends, so answers obtained through the tunnel
+(addresses only reachable through it) don't linger.
 
 **Limits.**
 - One DNS-capturing subtun at a time: a second one refuses to start, since it would take over the

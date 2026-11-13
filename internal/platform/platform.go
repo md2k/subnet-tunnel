@@ -21,6 +21,15 @@ type Drivers struct {
 	Tun      Tun
 	Routes   Routes
 	Firewall Firewall
+	DNSCache DNSCache // may be nil
+}
+
+// DNSCache flushes the system's DNS cache. The helper flushes it when DNS
+// capture starts, so earlier answers don't bypass it, and when it ends, so
+// answers obtained through the tunnel (addresses only reachable through it)
+// don't outlive it.
+type DNSCache interface {
+	Flush() error
 }
 
 // Tun creates the capture interface (macOS utun; later Linux TUN, Windows
