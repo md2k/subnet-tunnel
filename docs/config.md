@@ -232,7 +232,7 @@ way. The kill switch blocks it with firewall rules.
 
 | `killSwitch.dns` / `--kill-switch-dns` | While the blocks stay, with DNS capture |
 |---|---|
-| `block` (default) | DNS to the captured servers is blocked too: no name leaks to your normal resolver, and a private-link name can't resolve to a public endpoint. All DNS through those servers fails until subtun runs again or you clean up |
+| `block` (default) | DNS to the captured servers is blocked too: no name leaks to your normal resolver, and a private-link name can't resolve to a public endpoint. All DNS through those servers fails until subtun runs again or you clean up. Lookups don't fail at once but wait for the program's DNS timeout (`dig`: 5 s), since resolvers ignore the firewall's refusal of UDP |
 | `allow` | DNS works normally (names may leak); only the routed traffic stays blocked |
 
 What is guarded: your routes minus local networks more specific than them. Your LAN inside a full

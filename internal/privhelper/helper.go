@@ -219,9 +219,9 @@ func (h *helper) handle(req Request) (Response, []int) {
 		h.firewall, h.applied = true, true
 		h.persist = req.Persist
 		h.saveState()
-		h.dnsRedirect(req.Rules.DNS != nil)
 		h.log.Info("firewall rules applied", "dns", req.Rules.DNS != nil, "kill_switch", req.Rules.KillSwitch != nil,
 			"block_ipv6", req.Rules.BlockIPv6, "kept_if_tunnel_lost", req.Persist != nil)
+		h.dnsRedirect(req.Rules.DNS != nil)
 		return Response{OK: true}, nil
 
 	case OpAdopt:
