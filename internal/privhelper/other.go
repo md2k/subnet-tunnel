@@ -27,6 +27,9 @@ func (*Client) CreateTun(int, netip.Addr) (string, *os.File, error) { return "",
 // AddRoute is not implemented on this platform yet.
 func (*Client) AddRoute(netip.Prefix) error { return errUnsupported }
 
+// FlushDNSCache is not implemented on this platform yet.
+func (*Client) FlushDNSCache() error { return errUnsupported }
+
 // DeleteRoute is not implemented on this platform yet.
 func (*Client) DeleteRoute(netip.Prefix) error { return errUnsupported }
 

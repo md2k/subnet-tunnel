@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
-	"net/netip"
 	"sync/atomic"
 	"time"
 
@@ -147,21 +146,4 @@ func reconnect(ctx context.Context, p reconnectPolicy, stop <-chan struct{}, try
 		return nil, fmt.Errorf("gave up after %d reconnect attempts", p.attempts)
 	}
 	return nil, fmt.Errorf("gave up after %d reconnect attempts (last: %w)", p.attempts, last)
-}
-
-// routedEndpoints are the carrier's addresses that the routes cover: after
-// a reconnect the API server or Docker daemon may resolve to an address
-// that wasn't excluded at the start, and subtun's own connection would go
-// into the tunnel (routes don't change while running).
-func routedEndpoints(final []netip.Prefix, endpoints []netip.Addr) []netip.Addr {
-	var out []netip.Addr
-	for _, a := range endpoints {
-		for _, p := range final {
-			if p.Contains(a) {
-				out = append(out, a)
-				break
-			}
-		}
-	}
-	return out
 }

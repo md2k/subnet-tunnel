@@ -374,7 +374,9 @@ when subtun exits, crashes or is killed, on Ctrl-C, and when the terminal closes
 fallback queries leave from a port the rules let through, so they can't loop back into subtun even
 when the fallback is one of the captured servers. The helper flushes macOS's DNS cache when the capture
 starts, so earlier answers don't bypass it, and when it ends, so answers obtained through the tunnel
-(addresses only reachable through it) don't linger.
+(addresses only reachable through it) don't linger. It flushes it again when a tunnel comes back
+after an outage, so lookups that failed meanwhile are tried afresh, and with several profiles when
+one's names start or stop going through its tunnel.
 
 **Limits.**
 - One DNS-capturing subtun at a time: a second one refuses to start, since it would take over the

@@ -80,6 +80,7 @@ type sessionHelper interface {
 	AddRoute(netip.Prefix) error
 	DeleteRoute(netip.Prefix) error
 	ApplyFirewall(platform.Rules, *platform.Rules) error
+	FlushDNSCache() error
 	End(keep bool) error
 	Close() error
 	Exited() <-chan struct{}
@@ -217,6 +218,25 @@ func (c *Capture) Update(prefixes []netip.Prefix, g Guard) error {
 	}
 	return errors.Join(errs...)
 }
+
+// FlushDNSCache has the system forget cached DNS answers: some came from a
+// tunnel that is gone, or are failures from while it was down. Only with
+// DNS capture (a session); a no-op once stopping.
+func (c *Capture) FlushDNSCache() error {
+	if c.helper == nil || c.dns == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopped {
+		return nil
+	}
+	return c.helper.FlushDNSCache()
+}
+
+// Session reports whether the root helper stays up, so routes can change
+// (Update).
+func (c *Capture) Session() bool { return c.helper != nil }
 
 // Routes returns the routes on the utun.
 func (c *Capture) Routes() []netip.Prefix {

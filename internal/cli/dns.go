@@ -104,12 +104,13 @@ func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
 }
 
 // dnsLocals reads the machine's networks for the names "." leaves local,
-// without subtun's own utun address: it appears once the utun exists, and
-// its reverse zone is no local network.
+// without subtun's own utun: it appears once the utun exists (with a
+// network around the address, not just the address, as the root test
+// showed), and its reverse zone is no local network.
 func dnsLocals(tunAddr netip.Addr) func() []netip.Prefix {
 	return func() []netip.Prefix {
 		return slices.DeleteFunc(localPrefixes(), func(p netip.Prefix) bool {
-			return tunAddr.IsValid() && p.Bits() == 32 && p.Addr() == tunAddr
+			return tunAddr.IsValid() && p.Contains(tunAddr)
 		})
 	}
 }

@@ -105,16 +105,14 @@ func TestExcludeEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	log := newLogger(false)
-
 	// API server outside the routes: nothing changes.
-	got, err := excludeEndpoints(rp, []netip.Addr{netip.MustParseAddr("192.0.2.10")}, log)
+	got, err := carveEndpoints(rp, []netip.Addr{netip.MustParseAddr("192.0.2.10")})
 	if err != nil || len(got) != 1 || got[0].String() != "203.0.113.0/24" {
 		t.Fatalf("outside: %v %v", got, err)
 	}
 	// API server inside: carved out, everything else still routed.
 	api := netip.MustParseAddr("203.0.113.10")
-	got, err = excludeEndpoints(rp, []netip.Addr{api}, log)
+	got, err = carveEndpoints(rp, []netip.Addr{api})
 	if err != nil {
 		t.Fatal(err)
 	}

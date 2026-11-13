@@ -186,7 +186,7 @@ func TestRunTunnelGivesUp(t *testing.T) {
 	var got []tunnelEvent
 	send := func(ev tunnelEvent) bool { got = append(got, ev); return true }
 	p := reconnectPolicy{attempts: 2, delay: time.Millisecond, maxDelay: time.Millisecond}
-	runTunnel(context.Background(), 3, &liveTunnel{}, p, try, send, discardLogger())
+	runTunnel(context.Background(), 3, &liveTunnel{}, p, true, try, send, discardLogger())
 	// The first failure is reported (the first round is over), then the give-up.
 	if tries != 3 || len(got) != 2 || got[0].state != stateConnecting || got[0].err == nil ||
 		got[1].i != 3 || got[1].state != stateGaveUp || got[1].err == nil {
@@ -282,7 +282,7 @@ func TestDNSLocalsSkipTheUtun(t *testing.T) {
 	localNetworks = func() []routes.Local {
 		return []routes.Local{
 			{Iface: "en0", Network: netip.MustParsePrefix("192.168.77.0/24")},
-			{Iface: "utun9", Network: netip.MustParsePrefix("198.18.249.1/32")},
+			{Iface: "utun9", Network: netip.MustParsePrefix("198.18.249.0/24")}, // a network around the address
 		}
 	}
 	got := dnsLocals(netip.MustParseAddr("198.18.249.1"))()
@@ -291,5 +291,28 @@ func TestDNSLocalsSkipTheUtun(t *testing.T) {
 	}
 	if got := dnsLocals(netip.Addr{})(); len(got) != 2 {
 		t.Fatalf("without a utun address: %v", got)
+	}
+}
+
+// When the system's cached DNS answers no longer hold.
+func TestDNSFlushNeeded(t *testing.T) {
+	mp := multiPlanFor(t, "work", "dev", "vault") // work: ".", kill switch; dev: cluster.local; vault: no DNS
+	for _, tc := range []struct {
+		i         int
+		prev, now tunnelState
+		capturing bool
+		want      bool
+	}{
+		{1, stateReconnecting, stateUp, true, true},      // dev came back: its failures go
+		{1, stateConnecting, stateUp, true, true},        // dev came up after the capture started
+		{1, stateConnecting, stateUp, false, false},      // before the capture: starting it flushes anyway
+		{1, stateUp, stateReconnecting, true, false},     // lost: its names fail at once, nothing cached to fix
+		{1, stateReconnecting, stateGaveUp, true, true},  // gave up: its names go to the fallback now
+		{0, stateReconnecting, stateGaveUp, true, false}, // kill switch: its names stay (and fail)
+		{2, stateReconnecting, stateUp, true, false},     // no DNS names
+	} {
+		if got := mp.dnsFlushNeeded(tc.i, tc.prev, tc.now, tc.capturing); got != tc.want {
+			t.Errorf("profile %d %v→%v capturing=%v: %v, want %v", tc.i, tc.prev, tc.now, tc.capturing, got, tc.want)
+		}
 	}
 }
