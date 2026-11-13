@@ -28,8 +28,14 @@ import (
 // lookupEndpoint looks up a target's endpoint addresses; replaced in tests.
 var lookupEndpoint = transport.LookupEndpoint
 
-// layoutRetry is how soon a failed route update is tried again.
-const layoutRetry = 5 * time.Second
+const (
+	// layoutRetry is how soon a failed route update is tried again; the
+	// wait doubles while the same error repeats, up to a minute.
+	layoutRetry = 5 * time.Second
+	// firstRoundWait bounds the wait for every profile's first attempt
+	// before the capture starts; one still connecting carries on.
+	firstRoundWait = 30 * time.Second
+)
 
 // tunnelSpec is one profile of a run with several.
 type tunnelSpec struct {
@@ -847,8 +853,19 @@ func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnel
 		wg.Wait()
 	}()
 	var c *capture.Capture
-	deliberate := false // the user stopped subtun (signal), as opposed to a failure
+	type startResult struct {
+		c   *capture.Capture
+		err error
+	}
+	var starting chan startResult // the capture is starting (sudo may be asking)
+	deliberate := false           // the user stopped subtun (signal), as opposed to a failure
 	defer func() {
+		if c == nil && starting != nil {
+			// A start still under way is waited for, so it is undone too.
+			if r := <-starting; r.err == nil {
+				c = r.c
+			}
+		}
 		if c == nil {
 			return
 		}
@@ -895,6 +912,9 @@ func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnel
 	rt := &router{}
 	var helperExited <-chan struct{}
 	var retry <-chan time.Time
+	retryWait, lastErr := layoutRetry, ""
+	firstRound := time.After(firstRoundWait)
+	roundOver := false
 	stop := func() error {
 		deliberate = true
 		logShutdown(ctx, log)
@@ -918,6 +938,18 @@ func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnel
 			return errors.New("the root helper exited unexpectedly; its firewall rules may still be in place: the next subtun run takes them over, or remove them with: subtun cleanup")
 		case <-retry:
 			retry = nil
+		case <-firstRound:
+			firstRound, roundOver = nil, true
+			if c == nil && starting == nil && slices.Contains(tried, false) && mp.hasRoutes() {
+				log.Info("starting the capture while some profiles are still connecting", "waited", firstRoundWait)
+			}
+		case r := <-starting:
+			starting = nil
+			if r.err != nil {
+				return r.err
+			}
+			c, helperExited = r.c, r.c.HelperExited()
+			// Below: catch up with what changed while it started.
 		case ev := <-events:
 			tl := logs[ev.i]
 			prev := states[ev.i]
@@ -955,19 +987,32 @@ func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnel
 			continue
 		}
 		if c == nil {
-			if slices.Contains(tried, false) {
-				continue // the first round isn't over
+			if starting != nil || !roundOver && slices.Contains(tried, false) {
+				continue // starting, or the first round isn't over
 			}
-			if c, err = startMultiCapture(ctx, mp, mp.activeSet(states), lives, rt, early, marker, log); err != nil {
-				return err
-			}
+			// Off this loop: sudo may ask for a while, and tunnels must
+			// keep reporting (and reconnecting) meanwhile.
+			active, e := mp.activeSet(states), early
 			early = nil
-			helperExited = c.HelperExited()
+			starting = make(chan startResult, 1)
+			go func() {
+				c, err := startMultiCapture(ctx, mp, active, lives, rt, e, marker, log)
+				starting <- startResult{c, err}
+			}()
 			continue
 		}
 		if err := applyLayout(c, mp, states, lives, rt); err != nil {
-			log.Warn("updating the routes failed; trying again shortly", "err", err)
-			retry = time.After(layoutRetry)
+			if err.Error() != lastErr {
+				log.Warn("updating the routes failed; trying again", "err", err, "in", retryWait)
+			} else {
+				log.Debug("updating the routes failed again", "err", err, "in", retryWait)
+			}
+			lastErr = err.Error()
+			retry = time.After(retryWait)
+			retryWait = min(2*retryWait, time.Minute)
+		} else if lastErr != "" {
+			log.Info("routes updated")
+			lastErr, retryWait, retry = "", layoutRetry, nil
 		}
 	}
 }
@@ -1015,7 +1060,8 @@ func startMultiCapture(ctx context.Context, mp *multiPlan, active []bool, lives 
 
 // applyLayout brings the router, the DNS matcher and the capture's routes
 // and guard in line with the profiles in use. A profile's names stop
-// before its routes go, and start after its routes are in.
+// before its routes go, and start once all its routes are in (even if
+// another profile's route failed).
 func applyLayout(c *capture.Capture, mp *multiPlan, states []tunnelState, lives []*liveTunnel, rt *router) error {
 	active := mp.activeSet(states)
 	all, entries, guard, err := mp.layout(active, lives)
@@ -1030,15 +1076,14 @@ func applyLayout(c *capture.Capture, mp *multiPlan, states []tunnelState, lives 
 			}
 		}
 	}
-	if err := c.Update(all, guard); err != nil {
-		return err
-	}
+	err = c.Update(all, guard)
 	if mp.dns != nil {
+		in := c.Routes()
 		for i, on := range active {
-			if on {
+			if on && !slices.ContainsFunc(mp.final(i), func(p netip.Prefix) bool { return !slices.Contains(in, p) }) {
 				mp.dns.Match.SetOn(i, true)
 			}
 		}
 	}
-	return nil
+	return err
 }

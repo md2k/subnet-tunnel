@@ -135,8 +135,9 @@ profiles:
   use while its tunnel is up or reconnecting; when it gives up, they are removed, as if it weren't
   running: its traffic takes the normal path or another profile's broader route (above, dev's
   addresses would go to work). subtun ends on Ctrl-C, or when every profile has given up.
-- **Kill switch per profile.** A profile with a kill switch has its routes in place from the start
-  and keeps them when it gives up: its traffic is refused rather than leaking. The kill switch
+- **Kill switch per profile.** A profile with a kill switch has its routes in place as soon as the
+  capture starts, connected or not, and keeps them when it gives up: its traffic is refused
+  rather than leaking. The kill switch
   guards only those profiles' share of the routes, and after Ctrl-C only `lockdown` profiles'
   blocks stay. While any kill switch holds, DNS to the captured servers is blocked unless every
   profile with a kill switch has `killSwitch.dns: allow`.
@@ -150,7 +151,8 @@ profiles:
   flags), not settings or CIDRs; those come from the config file. The dry run lists each
   profile's routes, notes the parts another profile carries, and shows the shared DNS and kill
   switch setup.
-- **Root.** Every profile tries to connect once before sudo asks, as with one profile. The root
+- **Root.** Every profile tries to connect once before sudo asks, as with one profile (subtun
+  waits at most 30 seconds for that). The root
   helper then stays up while subtun runs, to add and remove routes as profiles come and go. Every
   target's API server or Docker daemon address is kept out of every route, and with DNS capture
   their names never resolve through a tunnel.

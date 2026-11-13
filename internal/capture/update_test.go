@@ -16,9 +16,16 @@ type fakeHelper struct {
 	calls      []string
 	failApply  int // fail this many firewall updates
 	failDelete netip.Prefix
+	failAdd    netip.Prefix
 }
 
-func (f *fakeHelper) AddRoute(p netip.Prefix) error { return f.rec("add %s", p) }
+func (f *fakeHelper) AddRoute(p netip.Prefix) error {
+	if p == f.failAdd {
+		f.rec("add %s failed", p)
+		return errors.New("route add failed: File exists")
+	}
+	return f.rec("add %s", p)
+}
 func (f *fakeHelper) DeleteRoute(p netip.Prefix) error {
 	if p == f.failDelete {
 		f.rec("delete %s failed", p)
@@ -174,4 +181,19 @@ func TestNoFirewallUpdatesAfterStop(t *testing.T) {
 		t.Error("Update after the stop worked")
 	}
 	checkHelperCalls(t, h)
+}
+
+// A route that can't be added (another VPN client holds it) doesn't hold up
+// the other additions, the guard or the removals.
+func TestUpdateAddsPastAFailure(t *testing.T) {
+	c, h := testCapture(t, mps("10.9.0.0/16"), Guard{})
+	c.guard = nil
+	h.failAdd = netip.MustParsePrefix("10.1.0.0/16")
+	if err := c.Update(mps("10.1.0.0/16", "10.2.0.0/16"), Guard{}); err == nil {
+		t.Fatal("the failed add was not reported")
+	}
+	checkHelperCalls(t, h, "add 10.1.0.0/16 failed", "add 10.2.0.0/16", "delete 10.9.0.0/16")
+	if !slices.Equal(c.Routes(), mps("10.2.0.0/16")) {
+		t.Fatalf("routes: %v", c.Routes())
+	}
 }

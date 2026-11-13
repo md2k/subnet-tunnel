@@ -169,8 +169,9 @@ func (c *Capture) narrowForStop() bool {
 // Update replaces the utun's routes and the kill switch's guard (several
 // tunnels: profiles come and go). Routes are added first, then the
 // firewall rules follow the guard, then routes go, so no address leaves the
-// tunnel in between. If the guard can't be applied, nothing is removed and
-// the next Update tries again. It needs a session (Options.Session).
+// tunnel in between. A route that can't be added or removed doesn't hold
+// up the others; if the guard can't be applied, nothing is removed. The
+// next Update tries again. It needs a session (Options.Session).
 func (c *Capture) Update(prefixes []netip.Prefix, g Guard) error {
 	if c.helper == nil {
 		return errors.New("route changes need the session helper")
@@ -180,29 +181,30 @@ func (c *Capture) Update(prefixes []netip.Prefix, g Guard) error {
 	if c.stopped {
 		return errors.New("stopping")
 	}
+	var errs []error
 	for _, p := range prefixes {
 		if slices.Contains(c.routes, p) {
 			continue
 		}
 		if err := c.helper.AddRoute(p); err != nil {
-			return err
+			errs = append(errs, err) // the others still go in; tried again next time
+			continue
 		}
 		c.routes = append(c.routes, p)
 	}
 	if c.guard != nil {
 		changed, err := c.guard.setBase(g)
 		if err != nil {
-			return err
+			return errors.Join(append(errs, err)...)
 		}
 		if changed || c.dirty {
 			if err := c.applyLocked(); err != nil {
 				c.dirty = true
-				return fmt.Errorf("updating the kill switch: %w", err)
+				return errors.Join(append(errs, fmt.Errorf("updating the kill switch: %w", err))...)
 			}
 			c.dirty = false
 		}
 	}
-	var errs []error
 	for _, p := range slices.Clone(c.routes) {
 		if slices.Contains(prefixes, p) {
 			continue

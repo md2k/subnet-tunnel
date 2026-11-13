@@ -522,12 +522,17 @@ app ──► SOCKS (one per profile) ───── its own tunnel only
   traffic is refused rather than leaking, and if subtun exits, the guard holds.
 - All tunnels try to connect once, in parallel, before the capture starts, as a single profile
   does (connect, then sudo): a first connection never depends on DNS or routes through a tunnel
-  that is down. The capture then starts with the routes of the profiles that are up and of
-  those with a kill switch; one that couldn't connect retries by its reconnect policy.
+  that is down. The capture then starts (after 30 s at most; a profile still connecting carries
+  on) with the routes of the profiles that are up and of those with a kill switch; one that
+  couldn't connect retries by its reconnect policy. The capture starts off the event loop, so
+  tunnels keep reconnecting while sudo asks.
 - Each tunnel reconnects on its own. While one is down, only its destinations get resets and only
   its names SERVFAIL; the others carry on.
 - subtun exits on Ctrl-C, or when every profile has given up. A profile giving up is logged, and
   later shown by `subtun status`.
+- A route that can't be added (another VPN client holds it) doesn't hold up the others; the
+  update is retried, less often while the same error repeats, and a profile's names only switch
+  on once all its routes are in.
 - **Route changes during a session.** With several profiles the root helper always stays up for
   the session and accepts `add_route` and `delete_route` after setup (only for routes it added,
   validated like the first ones). subtun computes the whole route set for the profiles running
