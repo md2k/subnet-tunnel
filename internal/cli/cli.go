@@ -576,9 +576,9 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 
 	errc := make(chan error, 1)
 	if s.dnsListen != "" && dnsOpts != nil {
-		dnsOpts.Tunnel = dns.UpstreamFunc(live.ExchangeDNS)
+		dnsOpts.Tunnels[0].Upstream = dns.UpstreamFunc(live.ExchangeDNS)
 		if rp != nil {
-			dnsOpts.Unreachable = unreachable(rp.plan.Routes)
+			dnsOpts.Tunnels[0].Unreachable = unreachable(rp.plan.Routes)
 		}
 		stopDNS, err := serveDNSDev(ctx, s.dnsListen, dnsOpts, log)
 		if err != nil {
@@ -606,8 +606,8 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		}
 		opts := rp.opts
 		if dnsOpts != nil {
-			dnsOpts.Tunnel = dns.UpstreamFunc(live.ExchangeDNS)
-			dnsOpts.Unreachable = unreachable(final)
+			dnsOpts.Tunnels[0].Upstream = dns.UpstreamFunc(live.ExchangeDNS)
+			dnsOpts.Tunnels[0].Unreachable = unreachable(final)
 			opts.DNS = dnsOpts
 		}
 		opts.KillSwitch, opts.AllowDNS, opts.BlockIPv6 = gp.killSwitch, gp.allowDNS, gp.blockIPv6

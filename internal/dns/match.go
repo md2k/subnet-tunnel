@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"regexp"
@@ -9,15 +10,35 @@ import (
 	"sync/atomic"
 )
 
-// Matcher decides which names are resolved through the tunnel.
+// Matcher decides which names are resolved through a tunnel, and with
+// several tunnels, through which one: each domain and pattern belongs to a
+// target (the tunnel's index).
 type Matcher struct {
-	all      bool
-	domains  []string
-	patterns []*regexp.Regexp
+	all      int // target of ".", -1: none
+	domains  []domain
+	patterns []pattern
+	off      []atomic.Bool            // per target: switched off (its tunnel gave up)
 	local    atomic.Pointer[[]string] // suffixes "." leaves alone; see SetLocal
 }
 
-// NewMatcher builds a matcher from domain suffixes and regular expressions.
+type domain struct {
+	name   string
+	target int
+}
+
+type pattern struct {
+	re     *regexp.Regexp
+	target int
+}
+
+// Names is one target's domains and patterns.
+type Names struct {
+	Domains  []string
+	Patterns []string
+}
+
+// NewMatcher builds a matcher from domain suffixes and regular expressions,
+// all for one tunnel (target 0).
 //
 // A domain matches itself and every name below it: "company.com" matches
 // "company.com" and "db.eu.company.com", not "badcompany.com". "." matches
@@ -27,35 +48,59 @@ type Matcher struct {
 // Patterns are Go regular expressions (RE2), matched against the lowercase
 // name without the trailing dot, unanchored: write ^ and $ where needed.
 func NewMatcher(domains, patterns []string) (*Matcher, error) {
-	m := &Matcher{}
-	seen := map[string]bool{}
-	for _, d := range domains {
-		n, err := NormalizeDomain(d)
-		if err != nil {
-			return nil, err
+	return NewMultiMatcher([]Names{{Domains: domains, Patterns: patterns}})
+}
+
+// NewMultiMatcher builds a matcher for several tunnels, target i being
+// sets[i]. A name goes to the target with the longest matching domain, else
+// to the first target (in order) with a matching pattern, else to the
+// target with "." (local names excepted). The same domain for two targets,
+// or "." for more than one, is an error.
+func NewMultiMatcher(sets []Names) (*Matcher, error) {
+	m := &Matcher{all: -1, off: make([]atomic.Bool, len(sets))}
+	owner := map[string]int{}
+	for t, set := range sets {
+		for _, d := range set.Domains {
+			n, err := NormalizeDomain(d)
+			if err != nil {
+				return nil, err
+			}
+			if n == "." {
+				if m.all >= 0 && m.all != t {
+					return nil, errors.New(`DNS domain ".": only one tunnel can resolve all names`)
+				}
+				m.all = t
+				continue
+			}
+			if o, ok := owner[n]; ok {
+				if o != t {
+					return nil, fmt.Errorf("DNS domain %q is listed for two tunnels", n)
+				}
+				continue
+			}
+			owner[n] = t
+			m.domains = append(m.domains, domain{n, t})
 		}
-		if n == "." {
-			m.all = true
-			continue
+		for _, p := range set.Patterns {
+			re, err := regexp.Compile(p)
+			if err != nil {
+				return nil, fmt.Errorf("DNS pattern %q: %w", p, err)
+			}
+			m.patterns = append(m.patterns, pattern{re, t})
 		}
-		if !seen[n] {
-			seen[n] = true
-			m.domains = append(m.domains, n)
-		}
-	}
-	for _, p := range patterns {
-		re, err := regexp.Compile(p)
-		if err != nil {
-			return nil, fmt.Errorf("DNS pattern %q: %w", p, err)
-		}
-		m.patterns = append(m.patterns, re)
 	}
 	m.SetLocal(nil, nil)
 	return m, nil
 }
 
 // CatchAll reports whether "." is among the domains.
-func (m *Matcher) CatchAll() bool { return m.all }
+func (m *Matcher) CatchAll() bool { return m.all >= 0 }
+
+// SetOn switches a target on or off. A target that is off matches nothing:
+// its names go to the next match, or the fallback.
+func (m *Matcher) SetOn(target int, on bool) { m.off[target].Store(!on) }
+
+func (m *Matcher) on(target int) bool { return !m.off[target].Load() }
 
 // SetLocal sets the system's search domains and the machine's networks.
 // With ".", names under "local" (multicast DNS), under the search domains
@@ -86,31 +131,41 @@ func (m *Matcher) SetLocal(search []string, networks []netip.Prefix) bool {
 func (m *Matcher) Local() []string { return *m.local.Load() }
 
 // Empty reports whether the matcher matches nothing.
-func (m *Matcher) Empty() bool { return !m.all && len(m.domains) == 0 && len(m.patterns) == 0 }
+func (m *Matcher) Empty() bool { return m.all < 0 && len(m.domains) == 0 && len(m.patterns) == 0 }
 
 // Match reports whether name (any case, trailing dot optional) goes through
-// the tunnel.
+// a tunnel.
 func (m *Matcher) Match(name string) bool {
+	_, ok := m.Pick(name)
+	return ok
+}
+
+// Pick returns the target name goes to, if any.
+func (m *Matcher) Pick(name string) (target int, ok bool) {
 	name = normalize(name)
+	best, bestLen := -1, -1
 	for _, d := range m.domains {
-		if under(name, d) {
-			return true
+		if len(d.name) > bestLen && m.on(d.target) && under(name, d.name) {
+			best, bestLen = d.target, len(d.name)
 		}
 	}
-	for _, re := range m.patterns {
-		if re.MatchString(name) {
-			return true
+	if best >= 0 {
+		return best, true
+	}
+	for _, p := range m.patterns {
+		if m.on(p.target) && p.re.MatchString(name) {
+			return p.target, true
 		}
 	}
-	if !m.all {
-		return false
+	if m.all < 0 || !m.on(m.all) {
+		return -1, false
 	}
 	for _, d := range *m.local.Load() {
 		if under(name, d) {
-			return false
+			return -1, false
 		}
 	}
-	return true
+	return m.all, true
 }
 
 // under reports whether name is d or below it.

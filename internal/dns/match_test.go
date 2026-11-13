@@ -183,3 +183,72 @@ func TestMatcherCatchAllLeavesLocalReverseZones(t *testing.T) {
 		t.Error("listed reverse zone not sent through the tunnel")
 	}
 }
+
+// Several tunnels: the longest matching domain wins, then patterns in
+// order, then ".", and a tunnel switched off gives its names to the next
+// match.
+func TestMultiMatcherPick(t *testing.T) {
+	m, err := NewMultiMatcher([]Names{
+		{Domains: []string{".", "example"}},                          // 0: work, full tunnel
+		{Domains: []string{"corp.example", "cluster.local"}},         // 1: dev
+		{Patterns: []string{`^db-[0-9]+\.`}, Domains: []string{"x"}}, // 2: db
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetLocal([]string{"lan"}, nil)
+	want := map[string]int{
+		"web.corp.example.": 1, // longer than "example"
+		"corp.example":      1,
+		"other.example":     0,
+		"svc.cluster.local": 1, // listed, though under "local"
+		"db-1.corp.example": 1, // a domain beats a pattern
+		"db-1.github.com":   2,
+		"github.com":        0, // "."
+		"printer.local":     -1,
+		"nas.lan":           -1,
+		"a.x":               2,
+	}
+	pick := func(name string) int {
+		if t, ok := m.Pick(name); ok {
+			return t
+		}
+		return -1
+	}
+	for name, w := range want {
+		if got := pick(name); got != w {
+			t.Errorf("%s: target %d, want %d", name, got, w)
+		}
+	}
+	// dev gave up: its names go to work's "example" and ".".
+	m.SetOn(1, false)
+	for name, w := range map[string]int{"web.corp.example": 0, "svc.cluster.local": -1, "db-1.corp.example": 0} {
+		if got := pick(name); got != w {
+			t.Errorf("dev off, %s: target %d, want %d", name, got, w)
+		}
+	}
+	m.SetOn(0, false)
+	if got := pick("github.com"); got != -1 {
+		t.Errorf("work off, github.com: target %d", got)
+	}
+	m.SetOn(1, true)
+	if got := pick("web.corp.example"); got != 1 {
+		t.Errorf("dev back on: target %d", got)
+	}
+}
+
+func TestMultiMatcherConflicts(t *testing.T) {
+	for want, sets := range map[string][]Names{
+		"listed for two tunnels": {{Domains: []string{"corp.example"}}, {Domains: []string{"*.Corp.Example."}}},
+		"only one tunnel":        {{Domains: []string{"."}}, {Domains: []string{"."}}},
+		"looks like a regular":   {{Domains: []string{"a"}}, {Domains: []string{"^b$"}}},
+	} {
+		if _, err := NewMultiMatcher(sets); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%v: %v, want %q", sets, err, want)
+		}
+	}
+	// The same domain twice for one tunnel is fine.
+	if _, err := NewMultiMatcher([]Names{{Domains: []string{"a.example", "A.example."}}}); err != nil {
+		t.Error(err)
+	}
+}

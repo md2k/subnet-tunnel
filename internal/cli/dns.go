@@ -49,7 +49,7 @@ func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
 		search, _ := systemSearch()
 		m.SetLocal(search, localPrefixes())
 	}
-	opts := &capture.DNSOptions{Match: m, Unrouted: unrouted}
+	opts := &capture.DNSOptions{Match: m, Tunnels: []capture.DNSTunnel{{Unrouted: unrouted}}}
 	if m.CatchAll() {
 		opts.Locals = localPrefixes
 	}
@@ -137,7 +137,7 @@ func printDNSPlan(w io.Writer, d *capture.DNSOptions, domains, patterns []string
 	if d.Match.CatchAll() {
 		fmt.Fprintf(w, "  except names under %s (local network; list one to send it through the tunnel)\n", strings.Join(d.Match.Local(), ", "))
 	}
-	fmt.Fprintf(w, "  answers through the tunnel at private addresses no route covers: %s\n", d.Unrouted)
+	fmt.Fprintf(w, "  answers through the tunnel at private addresses no route covers: %s\n", d.Tunnels[0].Unrouted)
 	if d.Fallback != nil {
 		fmt.Fprintf(w, "  other names: %s\n", d.Fallback[0])
 	} else {

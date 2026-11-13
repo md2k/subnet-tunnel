@@ -23,7 +23,7 @@ func newEngine(t *testing.T, tunnel, fallback *fakeUpstream) *Engine {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Engine{Match: m, Tunnel: tunnel, Fallback: fallback, Log: slog.New(slog.DiscardHandler)}
+	return &Engine{Match: m, Tunnels: []Tunnel{{Upstream: tunnel}}, Fallback: fallback, Log: slog.New(slog.DiscardHandler)}
 }
 
 func TestAnswerRoutesByName(t *testing.T) {
@@ -119,7 +119,7 @@ func TestAnswerDropsWhatIsNotAQuery(t *testing.T) {
 
 func TestAnswerWithWrongIDIsServfail(t *testing.T) {
 	e := newEngine(t, &fakeUpstream{}, &fakeUpstream{})
-	e.Tunnel = UpstreamFunc(func(_ context.Context, q []byte) ([]byte, error) {
+	e.Tunnels[0].Upstream = UpstreamFunc(func(_ context.Context, q []byte) ([]byte, error) {
 		a := buildAnswer(q, 1)
 		a[0] ^= 0xff
 		return a, nil
@@ -203,5 +203,27 @@ func TestServeTCP(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Several tunnels: each name goes to its tunnel, named in the log.
+func TestAnswerRoutesToTunnels(t *testing.T) {
+	m, err := NewMultiMatcher([]Names{{Domains: []string{"work.example"}}, {Domains: []string{"dev.example"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	work, dev, fb := &fakeUpstream{records: 1}, &fakeUpstream{records: 2}, &fakeUpstream{records: 3}
+	e := &Engine{Match: m, Tunnels: []Tunnel{{Name: "work", Upstream: work}, {Name: "dev", Upstream: dev}},
+		Fallback: fb, Log: slog.New(slog.DiscardHandler)}
+	for name, records := range map[string]int{"a.work.example.": 1, "b.dev.example.": 2, "example.org.": 3} {
+		q := buildQuery(7, name, 0)
+		if got := e.Answer(context.Background(), q, true); !bytes.Equal(got, buildAnswer(q, records)) {
+			t.Errorf("%s: wrong upstream", name)
+		}
+	}
+	m.SetOn(1, false)
+	q := buildQuery(8, "b.dev.example.", 0)
+	if got := e.Answer(context.Background(), q, true); !bytes.Equal(got, buildAnswer(q, 3)) {
+		t.Error("a tunnel switched off still answers")
 	}
 }

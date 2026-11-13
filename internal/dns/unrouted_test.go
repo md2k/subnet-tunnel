@@ -63,7 +63,7 @@ func TestUnroutedModes(t *testing.T) {
 	for _, mode := range []string{UnroutedWarn, UnroutedFallback, UnroutedBlock} {
 		tun, fb := &fakeUpstream{records: 2}, &fakeUpstream{records: 1}
 		e := newEngine(t, tun, fb)
-		e.Unrouted = &Unrouted{Mode: mode, Unreachable: func(a netip.Addr) bool { return a == second }, Log: slog.New(slog.DiscardHandler)}
+		e.Tunnels[0].Unrouted = &Unrouted{Mode: mode, Unreachable: func(a netip.Addr) bool { return a == second }, Log: slog.New(slog.DiscardHandler)}
 		got := e.Answer(context.Background(), q, true)
 		switch mode {
 		case UnroutedWarn:
@@ -86,11 +86,11 @@ func TestUnroutedModes(t *testing.T) {
 	for _, mode := range []string{UnroutedFallback, UnroutedBlock} {
 		tun, fb := &fakeUpstream{records: 2}, &fakeUpstream{records: 2}
 		e := newEngine(t, tun, fb)
-		e.Unrouted = &Unrouted{Mode: mode, Unreachable: func(netip.Addr) bool { return false }, Log: slog.New(slog.DiscardHandler)}
+		e.Tunnels[0].Unrouted = &Unrouted{Mode: mode, Unreachable: func(netip.Addr) bool { return false }, Log: slog.New(slog.DiscardHandler)}
 		if got := e.Answer(context.Background(), q, true); !bytes.Equal(got, buildAnswer(q, 2)) {
 			t.Errorf("%s: answer changed without unreachable addresses", mode)
 		}
-		e.Unrouted.Unreachable = func(netip.Addr) bool { return true }
+		e.Tunnels[0].Unrouted.Unreachable = func(netip.Addr) bool { return true }
 		other := buildQuery(8, "example.org.", 0)
 		if got := e.Answer(context.Background(), other, true); !bytes.Equal(got, buildAnswer(other, 2)) {
 			t.Errorf("%s: a fallback answer was checked", mode)
