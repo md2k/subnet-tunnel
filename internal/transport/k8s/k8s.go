@@ -223,6 +223,10 @@ func (d debugOnly) Enabled(ctx context.Context, _ slog.Level) bool {
 }
 
 func (d debugOnly) Handle(ctx context.Context, r slog.Record) error {
+	// Error records reach Handle without Enabled being asked (logr's Error).
+	if !d.Handler.Enabled(ctx, slog.LevelDebug) {
+		return nil
+	}
 	r.Level = slog.LevelDebug
 	return d.Handler.Handle(ctx, r)
 }
