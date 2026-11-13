@@ -25,6 +25,9 @@ type DNSOptions struct {
 	// check.
 	Unrouted    string
 	Unreachable func(netip.Addr) bool
+	// Locals reads the machine's networks: with ".", their reverse zones
+	// stay with the fallback, following network changes. nil: none.
+	Locals func() []netip.Prefix
 }
 
 // Engine builds the DNS engine for these options.
@@ -124,8 +127,12 @@ func (r *dnsRuntime) follow(ctx context.Context, interval time.Duration, log *sl
 		// The search domains change with the network too; skip the moments
 		// mid-change when the file is empty.
 		if err == nil && len(servers) > 0 && r.opts.Match.CatchAll() {
-			if search, err := dns.SearchDomains(dns.ResolvConf); err == nil && r.opts.Match.SetLocal(search) {
-				log.Info("DNS search domains changed; names under them stay local", "stay_local", r.opts.Match.Local())
+			var nets []netip.Prefix
+			if r.opts.Locals != nil {
+				nets = r.opts.Locals()
+			}
+			if search, err := dns.SearchDomains(dns.ResolvConf); err == nil && r.opts.Match.SetLocal(search, nets) {
+				log.Info("local DNS names changed (search domains, local networks); names under them stay local", "stay_local", r.opts.Match.Local())
 			}
 		}
 		return servers, notes, err

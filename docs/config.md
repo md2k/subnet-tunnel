@@ -273,12 +273,20 @@ regular expressions, matched against the lowercase name without the trailing dot
 anchored, so write `^` and `$` where you need them (sshuttle used Python's `re.match`, which anchors
 at the start only).
 
-**`.` leaves local names alone:** names under `local` (multicast DNS) and under the system's search
-domains (from `/etc/resolv.conf`, such as a router's `lan` or `home.arpa`, which also complete short
-names) go to the fallback resolver: they belong to your network, and the target's resolver can't
-answer them. List one to send it through the tunnel anyway: `--dns-domain . --dns-domain
-cluster.local`. Patterns win the same way. The search domains follow the system when the network
-changes (with `servers: auto`); `--dry-run` and the log list them.
+**`.` leaves local names alone:** these go to the fallback resolver, since they belong to your
+network and the target's resolver can't answer them:
+- names under `local` (multicast DNS);
+- names under the system's search domains (from `/etc/resolv.conf`, such as a router's `lan` or
+  `home.arpa`, which also complete short names);
+- reverse lookups for this machine's networks and for link-local addresses: PTR queries and Bonjour's
+  browse-domain queries for the LAN (`1.168.192.in-addr.arpa` on a `192.168.1.0/24` LAN,
+  `254.169.in-addr.arpa`, `e.f.ip6.arpa`).
+
+List one to send it through the tunnel anyway: `--dns-domain . --dns-domain cluster.local`. Patterns
+win the same way. The search domains and networks follow the system when the network changes (with
+`servers: auto`); `--dry-run` and the log list them. Bonjour itself (multicast DNS on port 5353)
+never goes near the tunnel: it isn't captured, multicast is never routed, and the kill switch leaves
+it alone.
 
 **Answers outside the routes** (`unrouted`). The target's resolver can answer with private addresses
 your routes don't cover: an address in its own network, or one from a VPN on that side (one answered

@@ -2,6 +2,7 @@ package dns
 
 import (
 	"fmt"
+	"net/netip"
 	"regexp"
 	"slices"
 	"strings"
@@ -49,22 +50,25 @@ func NewMatcher(domains, patterns []string) (*Matcher, error) {
 		}
 		m.patterns = append(m.patterns, re)
 	}
-	m.SetLocal(nil)
+	m.SetLocal(nil, nil)
 	return m, nil
 }
 
 // CatchAll reports whether "." is among the domains.
 func (m *Matcher) CatchAll() bool { return m.all }
 
-// SetLocal sets the system's search domains. With ".", names under them,
-// and under "local" (multicast DNS), stay with the fallback resolver: they
-// belong to the local network (a router's "lan" or "home.arpa", short names
-// completed with them), and the target's resolver can't answer them. A
-// listed domain or pattern still sends such a name through the tunnel
-// ("cluster.local"). It reports whether the list changed.
-func (m *Matcher) SetLocal(search []string) bool {
+// SetLocal sets the system's search domains and the machine's networks.
+// With ".", names under "local" (multicast DNS), under the search domains
+// (a router's "lan" or "home.arpa", short names completed with them) and
+// under the reverse zones of the networks and of link-local addresses
+// (PTR lookups and DNS-SD browsing for the LAN) stay with the fallback
+// resolver: they belong to the local network, and the target's resolver
+// can't answer them. A listed domain or pattern still sends such a name
+// through the tunnel ("cluster.local"). It reports whether the list
+// changed.
+func (m *Matcher) SetLocal(search []string, networks []netip.Prefix) bool {
 	list := []string{"local"}
-	for _, d := range search {
+	for _, d := range append(search, ReverseZones(networks)...) {
 		n, err := NormalizeDomain(d)
 		if err != nil || n == "." || slices.Contains(list, n) {
 			continue
@@ -143,4 +147,58 @@ func NormalizeDomain(d string) (string, error) {
 		}
 	}
 	return s, nil
+}
+
+// linkLocalZones are the reverse zones of link-local addresses: IPv4
+// 169.254.0.0/16, and fe00::/8 for IPv6 (fe80::/10 and the rest of the
+// non-global block).
+var linkLocalZones = []string{"254.169.in-addr.arpa", "e.f.ip6.arpa"}
+
+// ReverseZones returns the in-addr.arpa zones covering the IPv4 networks,
+// plus the link-local zones. Zones follow octet boundaries: a /24 or longer
+// is its /24's zone, a /8 or /16 its own; a network between two boundaries
+// is the zones of the next longer one when that's at most 16 of them, else
+// the zone of the shorter one (192.168.0.0/22: four /24 zones; 10.0.0.0/17:
+// 0.10.in-addr.arpa).
+func ReverseZones(networks []netip.Prefix) []string {
+	var out []string
+	add := func(z string) {
+		if !slices.Contains(out, z) {
+			out = append(out, z)
+		}
+	}
+	for _, p := range networks {
+		p = p.Masked()
+		if !p.Addr().Is4() || p.Bits() < 8 {
+			continue
+		}
+		bits := p.Bits()
+		below := min(bits/8*8, 24)
+		if bits >= 24 || bits%8 == 0 {
+			add(zone(p.Addr(), below))
+			continue
+		}
+		next := below + 8
+		if next-bits > 4 {
+			add(zone(p.Addr(), below))
+			continue
+		}
+		b := p.Addr().As4()
+		v := uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+		for i := 0; i < 1<<(next-bits); i++ {
+			w := v + uint32(i)<<(32-next)
+			add(zone(netip.AddrFrom4([4]byte{byte(w >> 24), byte(w >> 16), byte(w >> 8), byte(w)}), next))
+		}
+	}
+	return append(out, linkLocalZones...)
+}
+
+// zone is the in-addr.arpa zone of a's first bits (8, 16 or 24).
+func zone(a netip.Addr, bits int) string {
+	b := a.As4()
+	labels := make([]string, 0, 4)
+	for i := bits/8 - 1; i >= 0; i-- {
+		labels = append(labels, fmt.Sprint(b[i]))
+	}
+	return strings.Join(append(labels, "in-addr.arpa"), ".")
 }

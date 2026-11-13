@@ -46,11 +46,13 @@ func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
 		return nil, nil, err
 	}
 	if m.CatchAll() {
-		if search, err := systemSearch(); err == nil {
-			m.SetLocal(search)
-		}
+		search, _ := systemSearch()
+		m.SetLocal(search, localPrefixes())
 	}
 	opts := &capture.DNSOptions{Match: m, Unrouted: unrouted}
+	if m.CatchAll() {
+		opts.Locals = localPrefixes
+	}
 	var notes []string
 
 	if len(s.dnsServers) == 0 || len(s.dnsServers) == 1 && s.dnsServers[0] == "auto" {
