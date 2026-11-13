@@ -25,8 +25,11 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/tunnel"
 )
 
-// resolveEndpoint looks up a target's endpoint addresses; replaced in tests.
-var resolveEndpoint = transport.ResolveEndpoint
+// lookupEndpoint looks up a target's endpoint addresses; replaced in tests.
+var lookupEndpoint = transport.LookupEndpoint
+
+// layoutRetry is how soon a failed route update is tried again.
+const layoutRetry = 5 * time.Second
 
 // tunnelSpec is one profile of a run with several.
 type tunnelSpec struct {
@@ -44,6 +47,7 @@ type multiPlan struct {
 	policies []reconnectPolicy
 	ks       []string     // kill switch per profile: off, on, lockdown
 	rps      []*routePlan // nil: SOCKS only
+	hosts    []string     // each target's endpoint as configured
 	finals   []atomic.Pointer[[]netip.Prefix]
 
 	mu        sync.Mutex
@@ -73,11 +77,13 @@ func (mp *multiPlan) hasRoutes() bool {
 
 // planMulti validates several profiles together before anything connects
 // or asks for sudo: each profile's own settings, the shared ones, and the
-// rules for combining them.
-func planMulti(ctx context.Context, specs []*tunnelSpec) (*multiPlan, error) {
+// rules for combining them. It looks nothing up: the endpoints' addresses
+// come later (lookupEndpoints), after rules an earlier session left (which
+// may block DNS) are taken over.
+func planMulti(specs []*tunnelSpec) (*multiPlan, error) {
 	n := len(specs)
 	mp := &multiPlan{specs: specs, policies: make([]reconnectPolicy, n), ks: make([]string, n),
-		rps: make([]*routePlan, n), finals: make([]atomic.Pointer[[]netip.Prefix], n),
+		rps: make([]*routePlan, n), hosts: make([]string, n), finals: make([]atomic.Pointer[[]netip.Prefix], n),
 		dnsNames: make([]dns.Names, n), unrouted: make([]string, n)}
 	note := func(name, msg string) { mp.warns = append(mp.warns, name+": "+msg) }
 
@@ -90,7 +96,7 @@ func planMulti(ctx context.Context, specs []*tunnelSpec) (*multiPlan, error) {
 		if p.Tun.MTU == 0 {
 			return ""
 		}
-		return fmt.Sprint(p.Tun.MTU)
+		return strconv.Itoa(p.Tun.MTU)
 	})
 	if err != nil {
 		return nil, err
@@ -119,19 +125,8 @@ func planMulti(ctx context.Context, specs []*tunnelSpec) (*multiPlan, error) {
 			return nil, fmt.Errorf("profile %s: %w", sp.name, err)
 		}
 		mp.policies[i] = p
-	}
-
-	// Every target's endpoint stays out of every route, so no tunnel's own
-	// connection runs inside another tunnel (or its own).
-	for _, sp := range specs {
-		host, err := sp.endpoint()
-		if err != nil {
+		if mp.hosts[i], err = sp.endpoint(); err != nil {
 			return nil, fmt.Errorf("profile %s: %w", sp.name, err)
-		}
-		for _, a := range resolveEndpoint(ctx, host) {
-			if !slices.Contains(mp.endpoints, a) {
-				mp.endpoints = append(mp.endpoints, a)
-			}
 		}
 	}
 
@@ -147,10 +142,7 @@ func planMulti(ctx context.Context, specs []*tunnelSpec) (*multiPlan, error) {
 		}
 		mp.rps[i] = rp
 		if rp != nil {
-			final, _, err := carveEndpoints(rp, mp.endpoints)
-			if err != nil {
-				return nil, fmt.Errorf("profile %s: %w", sp.name, err)
-			}
+			final := rp.plan.Routes
 			mp.finals[i].Store(&final)
 		}
 		gp, notes, err := planGuard(sp.s, rp)
@@ -236,8 +228,9 @@ func agree(specs []*tunnelSpec, key string, get func(config.Profile) string) (st
 	return val, nil
 }
 
-// checkOverlaps refuses the same CIDR in two profiles: routes split by
-// destination address, and nothing says which tunnel would get it.
+// checkOverlaps refuses the same CIDR in the routes of two profiles: the
+// most specific route decides which profile carries an address, and two
+// equal ones leave it undecided.
 func checkOverlaps(mp *multiPlan) error {
 	owner := map[netip.Prefix]string{}
 	for i, rp := range mp.rps {
@@ -245,13 +238,8 @@ func checkOverlaps(mp *multiPlan) error {
 			continue
 		}
 		name := mp.specs[i].name
-		seen := map[netip.Prefix]bool{}
-		for _, p := range append(slices.Clone(rp.includes), mp.final(i)...) {
-			if seen[p] {
-				continue
-			}
-			seen[p] = true
-			if other, ok := owner[p]; ok {
+		for _, p := range rp.includes {
+			if other, ok := owner[p]; ok && other != name {
 				return fmt.Errorf("%s is routed by both profiles %s and %s: a CIDR can belong to one profile only", p, other, name)
 			}
 			owner[p] = name
@@ -271,6 +259,12 @@ func planMultiDNS(mp *multiPlan, participants []int) error {
 		search, _ := systemSearch()
 		m.SetLocal(search, localPrefixes())
 	}
+	// The targets' own names must resolve while their tunnels are down.
+	own := make([]string, len(mp.hosts))
+	for i, h := range mp.hosts {
+		own[i] = transport.HostName(h)
+	}
+	m.SetOwn(own)
 	opts := &capture.DNSOptions{Match: m, Tunnels: make([]capture.DNSTunnel, len(mp.specs))}
 	if m.CatchAll() {
 		opts.Locals = localPrefixes
@@ -279,40 +273,43 @@ func planMultiDNS(mp *multiPlan, participants []int) error {
 		opts.Tunnels[i] = capture.DNSTunnel{Name: sp.name, Unrouted: mp.unrouted[i]}
 	}
 	auto := false
+	var pinned []netip.Addr
 	for _, i := range participants {
 		list := mp.specs[i].s.dnsServers
 		if len(list) == 0 || len(list) == 1 && list[0] == "auto" {
 			auto = true
 			continue
 		}
-		pinned, err := parseServers(list)
+		servers, err := parseServers(list)
 		if err != nil {
 			return fmt.Errorf("profile %s: %w", mp.specs[i].name, err)
 		}
-		for _, a := range pinned {
-			if !slices.Contains(opts.Pinned, a) {
-				opts.Pinned = append(opts.Pinned, a)
+		for _, a := range servers {
+			if !slices.Contains(pinned, a) {
+				pinned = append(pinned, a)
 			}
 		}
 	}
-	opts.Servers = slices.Clone(opts.Pinned)
 	if auto {
+		// The system's first, then the pinned ones: the order the capture
+		// keeps when it follows the system's servers.
 		servers, notes, err := systemDNS()
 		if err != nil {
 			return fmt.Errorf("reading the system's DNS servers: %w", err)
 		}
 		mp.warns = append(mp.warns, notes...)
-		for _, a := range servers {
+		opts.Servers = slices.Clone(servers)
+		for _, a := range pinned {
 			if !slices.Contains(opts.Servers, a) {
 				opts.Servers = append(opts.Servers, a)
 			}
 		}
-		if len(servers) == 0 && len(opts.Pinned) == 0 {
+		if len(opts.Servers) == 0 {
 			return fmt.Errorf("no IPv4 DNS server in %s to capture; set the servers explicitly", dns.ResolvConf)
 		}
-		opts.Auto = true
+		opts.Auto, opts.Pinned = true, pinned
 	} else {
-		opts.Pinned = nil // the servers are all there is; nothing to follow
+		opts.Servers = pinned
 	}
 	if f := mp.specs[0].s.dnsFallback; f != "" && f != "system" {
 		ap, err := parseResolver(f)
@@ -325,6 +322,83 @@ func planMultiDNS(mp *multiPlan, participants []int) error {
 	return nil
 }
 
+// lookupEndpoints finds the targets' endpoint addresses and takes them out
+// of every route. A failed lookup is reported: that profile's own
+// connection may then go into a tunnel.
+func (mp *multiPlan) lookupEndpoints(ctx context.Context) []string {
+	var warns []string
+	var addrs []netip.Addr
+	for i, host := range mp.hosts {
+		a, err := lookupEndpoint(ctx, host)
+		if err != nil {
+			warns = append(warns, fmt.Sprintf("%s: looking up %s failed (%v); if its address lies inside the routes, this profile's own connection goes into a tunnel and can't connect", mp.specs[i].name, transport.HostName(host), err))
+		}
+		addrs = append(addrs, a...)
+	}
+	if _, err := mp.addEndpoints(addrs); err != nil {
+		warns = append(warns, fmt.Sprintf("excluding the targets' endpoints from the routes: %v", err))
+	}
+	return warns
+}
+
+// addEndpoints takes endpoint addresses out of every route (found before
+// connecting, or after: the API server's name resolved to a new address),
+// and reports whether any route changed.
+func (mp *multiPlan) addEndpoints(addrs []netip.Addr) (bool, error) {
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+	var added bool
+	for _, a := range addrs {
+		if !slices.Contains(mp.endpoints, a) {
+			mp.endpoints = append(mp.endpoints, a)
+			added = true
+		}
+	}
+	if !added {
+		return false, nil
+	}
+	changed := false
+	for i, rp := range mp.rps {
+		if rp == nil {
+			continue
+		}
+		final, err := carveEndpoints(rp, mp.endpoints)
+		if err != nil {
+			return changed, err
+		}
+		if !slices.Equal(final, mp.final(i)) {
+			mp.finals[i].Store(&final)
+			changed = true
+		}
+	}
+	return changed, nil
+}
+
+// carveEndpoints takes endpoint addresses the routes cover out of them.
+func carveEndpoints(rp *routePlan, endpoints []netip.Addr) ([]netip.Prefix, error) {
+	var hit []netip.Prefix
+	for _, p := range routes.HostPrefixes(endpoints) {
+		if _, ok := rp.plan.Routed(p.Addr()); ok {
+			hit = append(hit, p)
+		}
+	}
+	if len(hit) == 0 {
+		return rp.plan.Routes, nil
+	}
+	plan, err := routes.Compute(rp.includes, append(slices.Clone(rp.excludes), hit...))
+	if err != nil {
+		return nil, err
+	}
+	reserved := make([]routes.Reserved, len(endpoints))
+	for i, a := range endpoints {
+		reserved[i] = routes.Reserved{Addr: a, What: "subtun's own endpoint"}
+	}
+	if errs, _ := routes.Check(plan, reserved, nil); len(errs) > 0 {
+		return nil, errors.New(strings.Join(errs, "; "))
+	}
+	return plan.Routes, nil
+}
+
 // tunnelState is where a profile's tunnel is.
 type tunnelState int
 
@@ -335,58 +409,135 @@ const (
 	stateGaveUp                          // out of attempts
 )
 
-// active reports whether profile i's routes and names are in use: while its
-// tunnel is up or reconnecting, and always with a kill switch (its traffic
-// is refused rather than leaking).
-func (mp *multiPlan) active(i int, st tunnelState) bool {
-	if mp.rps[i] == nil {
-		return false
+// activeSet reports which profiles' routes and names are in use: while
+// their tunnel is up or reconnecting, and always with a kill switch (the
+// traffic is refused rather than leaking).
+func (mp *multiPlan) activeSet(states []tunnelState) []bool {
+	active := make([]bool, len(mp.specs))
+	for i, st := range states {
+		active[i] = mp.rps[i] != nil && (mp.ks[i] != "off" || st == stateUp || st == stateReconnecting)
 	}
-	return mp.ks[i] != "off" || st == stateUp || st == stateReconnecting
+	return active
+}
+
+// owned is a prefix and the profile that carries it.
+type owned struct {
+	prefix netip.Prefix
+	i      int
+}
+
+// owner returns the profile that carries address a: of the active profiles
+// whose own routes (after their excludes) cover it, the one with the most
+// specific configured route containing it. -1: none.
+func (mp *multiPlan) owner(a netip.Addr, active []bool) int {
+	best, bits := -1, -1
+	for i, on := range active {
+		if !on || !slices.ContainsFunc(mp.final(i), func(p netip.Prefix) bool { return p.Contains(a) }) {
+			continue
+		}
+		for _, inc := range mp.rps[i].includes {
+			if inc.Bits() > bits && inc.Contains(a) {
+				best, bits = i, inc.Bits()
+			}
+		}
+	}
+	return best
+}
+
+// ownership splits the addresses the active profiles route into prefixes,
+// each carried by one profile (see owner). Within a prefix that no route
+// or route piece lies strictly inside, every address has the same owner.
+func (mp *multiPlan) ownership(active []bool) []owned {
+	var bounds, roots []netip.Prefix
+	for i, on := range active {
+		if !on {
+			continue
+		}
+		bounds = append(append(bounds, mp.rps[i].includes...), mp.final(i)...)
+		roots = append(roots, mp.final(i)...)
+	}
+	// Start from the pieces no other piece contains.
+	var tops []netip.Prefix
+	for _, r := range roots {
+		inside := slices.ContainsFunc(roots, func(q netip.Prefix) bool {
+			return q.Bits() < r.Bits() && q.Contains(r.Addr())
+		})
+		if !inside && !slices.Contains(tops, r) {
+			tops = append(tops, r)
+		}
+	}
+	var out []owned
+	var walk func(p netip.Prefix)
+	walk = func(p netip.Prefix) {
+		split := slices.ContainsFunc(bounds, func(b netip.Prefix) bool {
+			return b.Bits() > p.Bits() && p.Contains(b.Addr())
+		})
+		if split {
+			lo, hi := halves(p)
+			walk(lo)
+			walk(hi)
+			return
+		}
+		if i := mp.owner(p.Addr(), active); i >= 0 {
+			out = append(out, owned{p, i})
+		}
+	}
+	for _, t := range tops {
+		walk(t)
+	}
+	return out
+}
+
+// halves splits an IPv4 prefix in two.
+func halves(p netip.Prefix) (netip.Prefix, netip.Prefix) {
+	b := p.Addr().As4()
+	v := uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+	v |= 1 << (31 - p.Bits())
+	hi := netip.AddrFrom4([4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
+	return netip.PrefixFrom(p.Addr(), p.Bits()+1), netip.PrefixFrom(hi, p.Bits()+1)
 }
 
 // layout is what the capture needs for the profiles in use: the routes on
-// the utun, the router's table, and the kill switch's guard.
-func (mp *multiPlan) layout(states []tunnelState, lives []*liveTunnel) ([]netip.Prefix, []routeEntry, capture.Guard, error) {
+// the utun, the router's table, and the kill switch's guard (the addresses
+// profiles with a kill switch carry, and those in lockdown).
+func (mp *multiPlan) layout(active []bool, lives []*liveTunnel) ([]netip.Prefix, []routeEntry, capture.Guard, error) {
 	var all []netip.Prefix
-	var entries []routeEntry
-	var ks, plain, lock, notLock []netip.Prefix
-	for i := range mp.specs {
-		if !mp.active(i, states[i]) {
+	for i, on := range active {
+		if !on {
 			continue
 		}
-		f := mp.final(i)
-		for _, p := range f {
+		for _, p := range mp.final(i) {
 			if !slices.Contains(all, p) {
 				all = append(all, p)
 			}
-			entries = append(entries, routeEntry{prefix: p, tunnel: lives[i]})
 		}
-		if mp.ks[i] == "off" {
-			plain = append(plain, f...)
-		} else {
-			ks = append(ks, f...)
-		}
-		if mp.ks[i] == "lockdown" {
-			lock = append(lock, f...)
-		} else {
-			notLock = append(notLock, f...)
+	}
+	var entries []routeEntry
+	var ks, lock []netip.Prefix
+	for _, o := range mp.ownership(active) {
+		entries = append(entries, routeEntry{prefix: o.prefix, tunnel: lives[o.i], i: o.i})
+		switch mp.ks[o.i] {
+		case "lockdown":
+			lock = append(lock, o.prefix)
+			fallthrough
+		case "on":
+			ks = append(ks, o.prefix)
 		}
 	}
 	var g capture.Guard
-	if len(ks) > 0 {
-		base, err := routes.Compute(ks, plain)
-		if err != nil {
-			return nil, nil, g, err
+	merge := func(ps []netip.Prefix) ([]netip.Prefix, error) {
+		if len(ps) == 0 {
+			return nil, nil
 		}
-		g.Base = base.Routes
+		p, err := routes.Compute(ps, nil)
+		return p.Routes, err
 	}
-	if len(lock) > 0 {
-		l, err := routes.Compute(lock, notLock)
-		if err != nil {
-			return nil, nil, g, err
-		}
-		g.Lockdown = l.Routes
+	var err error
+	if g.Base, err = merge(ks); err != nil {
+		return nil, nil, g, err
+	}
+	if g.Lockdown, err = merge(lock); err != nil {
+		return nil, nil, g, err
 	}
 	return all, entries, g, nil
 }
@@ -406,71 +557,22 @@ func (mp *multiPlan) ksMode() string {
 	return mode
 }
 
-// carveEndpoints takes endpoint addresses the routes cover out of them.
-func carveEndpoints(rp *routePlan, endpoints []netip.Addr) (final []netip.Prefix, hit []netip.Prefix, err error) {
-	for _, p := range routes.HostPrefixes(endpoints) {
-		if _, ok := rp.plan.Routed(p.Addr()); ok {
-			hit = append(hit, p)
-		}
-	}
-	if len(hit) == 0 {
-		return rp.plan.Routes, nil, nil
-	}
-	plan, err := routes.Compute(rp.includes, append(slices.Clone(rp.excludes), hit...))
-	if err != nil {
-		return nil, nil, err
-	}
-	reserved := make([]routes.Reserved, len(endpoints))
-	for i, a := range endpoints {
-		reserved[i] = routes.Reserved{Addr: a, What: "subtun's own endpoint"}
-	}
-	if errs, _ := routes.Check(plan, reserved, nil); len(errs) > 0 {
-		return nil, nil, errors.New(strings.Join(errs, "; "))
-	}
-	return plan.Routes, hit, nil
-}
-
-// addEndpoints excludes endpoint addresses found after connecting (the API
-// server's name resolved to a new address) from every route, and reports
-// whether any route changed.
-func (mp *multiPlan) addEndpoints(addrs []netip.Addr) (bool, error) {
-	mp.mu.Lock()
-	defer mp.mu.Unlock()
-	var added bool
-	for _, a := range addrs {
-		if !slices.Contains(mp.endpoints, a) {
-			mp.endpoints = append(mp.endpoints, a)
-			added = true
-		}
-	}
-	if !added {
-		return false, nil
-	}
-	changed := false
-	for i, rp := range mp.rps {
-		if rp == nil {
-			continue
-		}
-		final, _, err := carveEndpoints(rp, mp.endpoints)
-		if err != nil {
-			return changed, err
-		}
-		if !slices.Equal(final, mp.final(i)) {
-			mp.finals[i].Store(&final)
-			changed = true
-		}
-	}
-	return changed, nil
-}
-
 func printMultiPlan(w io.Writer, mp *multiPlan) {
+	everyone := make([]bool, len(mp.specs))
+	for i := range everyone {
+		everyone[i] = mp.rps[i] != nil
+	}
+	carried := map[netip.Prefix]int{}
+	for _, o := range mp.ownership(everyone) {
+		carried[o.prefix] = o.i
+	}
 	for i, sp := range mp.specs {
 		fmt.Fprintf(w, "profile %s:\n", sp.name)
 		if rp := mp.rps[i]; rp != nil {
 			f := mp.final(i)
 			fmt.Fprintf(w, "  routes (%d, from %d given):\n", len(f), len(rp.includes))
 			for _, p := range f {
-				fmt.Fprintf(w, "    %s%s\n", p, takenBy(mp, i, p))
+				fmt.Fprintf(w, "    %s%s\n", p, carriedBy(mp, i, p, carried))
 			}
 			for _, n := range rp.plan.Redundant {
 				fmt.Fprintf(w, "  dropped: %s\n", n)
@@ -512,6 +614,9 @@ func printMultiPlan(w io.Writer, mp *multiPlan) {
 		if mp.dns.Match.CatchAll() {
 			fmt.Fprintf(w, "  names under %s stay local (list one to send it through a tunnel)\n", strings.Join(mp.dns.Match.Local(), ", "))
 		}
+		if own := mp.dns.Match.Own(); len(own) > 0 {
+			fmt.Fprintf(w, "  %s (subtun's own endpoints) never go through a tunnel\n", strings.Join(own, ", "))
+		}
 		if mp.dns.Fallback != nil {
 			fmt.Fprintf(w, "  other names: %s\n", mp.dns.Fallback[0])
 		} else {
@@ -540,20 +645,29 @@ func printMultiPlan(w io.Writer, mp *multiPlan) {
 	}
 }
 
-// takenBy notes when a route of profile i lies inside another profile's
-// broader route (most specific wins).
-func takenBy(mp *multiPlan, i int, p netip.Prefix) string {
-	for j := range mp.specs {
-		if j == i {
+// carriedBy notes when a route piece of profile i, or parts of it, go to
+// another profile whose route is more specific.
+func carriedBy(mp *multiPlan, i int, p netip.Prefix, carried map[netip.Prefix]int) string {
+	var others []string
+	mine := false
+	for q, j := range carried {
+		if q.Bits() < p.Bits() || !p.Contains(q.Addr()) {
 			continue
 		}
-		for _, q := range mp.final(j) {
-			if q.Bits() < p.Bits() && q.Contains(p.Addr()) {
-				return fmt.Sprintf("  (taken from %s's %s)", mp.specs[j].name, q)
-			}
+		if j == i {
+			mine = true
+		} else if !slices.Contains(others, mp.specs[j].name) {
+			others = append(others, mp.specs[j].name)
 		}
 	}
-	return ""
+	if len(others) == 0 {
+		return ""
+	}
+	slices.Sort(others)
+	if !mine {
+		return fmt.Sprintf("  (carried by %s: a more specific route)", strings.Join(others, ", "))
+	}
+	return fmt.Sprintf("  (parts carried by %s: more specific routes)", strings.Join(others, ", "))
 }
 
 // tunnelEvent is a profile's tunnel changing state.
@@ -561,7 +675,7 @@ type tunnelEvent struct {
 	i       int
 	state   tunnelState
 	carrier *transport.Carrier // stateUp
-	err     error              // stateGaveUp
+	err     error              // stateGaveUp, or stateConnecting after the first attempt failed
 }
 
 // runTunnel keeps one profile's tunnel connected by its reconnect policy:
@@ -587,6 +701,9 @@ func runTunnel(ctx context.Context, i int, live *liveTunnel, policy reconnectPol
 			return
 		}
 		log.Warn("connecting failed", "err", err, "policy", policy.String())
+		if !send(tunnelEvent{i: i, state: stateConnecting, err: err}) {
+			return
+		}
 		if s, err = reconnect(ctx, policy, nil, try, log); err != nil {
 			gaveUp(fmt.Errorf("could not connect; %w", err))
 			return
@@ -622,18 +739,20 @@ func runTunnel(ctx context.Context, i int, live *liveTunnel, policy reconnectPol
 }
 
 // runMulti runs several profiles at once: one utun, helper and rule set,
-// each profile's tunnel connecting and reconnecting on its own. It ends on
-// Ctrl-C, or when every profile has given up.
+// each profile's tunnel connecting and reconnecting on its own. As with
+// one profile, every tunnel tries to connect once before the capture (and
+// sudo) starts. It ends on Ctrl-C, or when every profile has given up.
 func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnelSpec, dryRun bool, maxDuration time.Duration) error {
 	log := newLogger(g.verbose)
 	if maxDuration < 0 {
 		return errors.New("--max-duration must be positive")
 	}
-	mp, err := planMulti(ctx, specs)
+	mp, err := planMulti(specs)
 	if err != nil {
 		return err
 	}
 	if dryRun {
+		mp.warns = append(mp.warns, mp.lookupEndpoints(ctx)...)
 		printMultiPlan(out, mp)
 		return nil
 	}
@@ -687,34 +806,58 @@ func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnel
 		logs[i].Info("SOCKS5 proxy ready", "addr", ln.Addr().String())
 	}
 
+	// Rules an earlier session may have left (kill switch, a killed helper)
+	// can block DNS, which connecting and finding the endpoints need: take
+	// them over first.
+	marker := &leftovers{mark: privhelper.MarkLeftovers, clear: privhelper.ClearLeftovers}
+	var early *privhelper.Client
+	if privhelper.LeftoversMarked() {
+		if !mp.hasRoutes() {
+			log.Warn("firewall rules from another subtun session may be in place; if networking misbehaves and none is running, run: subtun cleanup")
+		} else {
+			log.Info("firewall rules from another subtun session may be in place; checking with the root helper before connecting")
+			if early, err = privhelper.Start(ctx, &transport.LineLog{Log: log, Prefix: "helper: "}, log); err != nil {
+				return startErr(ctx, err)
+			}
+			res, err := early.Adopt()
+			if err != nil {
+				_ = early.Close()
+				return fmt.Errorf("taking over firewall rules: %w", err)
+			}
+			log.Info(res.Message)
+			marker.adopted(res)
+			// Until the capture takes it, closing it puts the rules back.
+			defer func() {
+				if early != nil {
+					_ = early.Close()
+				}
+			}()
+		}
+	}
+	for _, wn := range mp.lookupEndpoints(ctx) {
+		log.Warn(wn)
+	}
+
 	// The tunnels run until this returns; firewall rules and routes go
-	// first (deferred below), then the tunnels.
+	// first (the capture's stop is deferred after this), then the tunnels.
 	tctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	defer func() {
 		cancel()
 		wg.Wait()
 	}()
-
-	states := make([]tunnelState, n)
-	rt := &router{}
 	var c *capture.Capture
-	var helperExited <-chan struct{}
-	deliberate := false
-	if mp.hasRoutes() {
-		marker := &leftovers{mark: privhelper.MarkLeftovers, clear: privhelper.ClearLeftovers}
-		if c, err = startMultiCapture(ctx, mp, states, lives, rt, marker, log); err != nil {
-			return err
+	deliberate := false // the user stopped subtun (signal), as opposed to a failure
+	defer func() {
+		if c == nil {
+			return
 		}
-		defer func() {
-			leftBehind := c.Stop(deliberate)
-			marker.stopped(leftBehind)
-			if leftBehind {
-				log.Warn("kill switch: blocking rules stay in place; the next subtun run takes them over, or remove them with: subtun cleanup")
-			}
-		}()
-		helperExited = c.HelperExited()
-	}
+		leftBehind := c.Stop(deliberate)
+		marker.stopped(leftBehind)
+		if leftBehind {
+			log.Warn("kill switch: blocking rules stay in place; the next subtun run takes them over, or remove them with: subtun cleanup")
+		}
+	}()
 
 	events := make(chan tunnelEvent)
 	send := func(ev tunnelEvent) bool {
@@ -725,7 +868,7 @@ func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnel
 			return false
 		}
 	}
-	started := make([]time.Time, n)
+	started := time.Now()
 	for i, sp := range specs {
 		try := func(ctx context.Context) (*session, error) {
 			carrier, err := sp.connect(ctx, agents, logs[i])
@@ -740,7 +883,6 @@ func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnel
 			}
 			return &session{carrier: carrier, client: client}, nil
 		}
-		started[i] = time.Now()
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -748,34 +890,42 @@ func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnel
 		}()
 	}
 
-	helperGone := func() error {
-		select {
-		case <-ctx.Done():
-			deliberate = true
-			logShutdown(ctx, log)
-			return nil
-		case <-time.After(300 * time.Millisecond):
-		}
-		return errors.New("the root helper exited unexpectedly; its firewall rules may still be in place: the next subtun run takes them over, or remove them with: subtun cleanup")
+	states := make([]tunnelState, n)
+	tried := make([]bool, n) // the first attempt is over
+	rt := &router{}
+	var helperExited <-chan struct{}
+	var retry <-chan time.Time
+	stop := func() error {
+		deliberate = true
+		logShutdown(ctx, log)
+		return nil
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			deliberate = true
-			logShutdown(ctx, log)
-			return nil
+			return stop()
 		case err := <-errc:
+			if ctx.Err() != nil {
+				return stop() // Ctrl-C closed the listener
+			}
 			return fmt.Errorf("SOCKS listener: %w", err)
 		case <-helperExited:
-			return helperGone()
+			select {
+			case <-ctx.Done():
+				return stop() // Ctrl-C reaches the helper too
+			case <-time.After(300 * time.Millisecond):
+			}
+			return errors.New("the root helper exited unexpectedly; its firewall rules may still be in place: the next subtun run takes them over, or remove them with: subtun cleanup")
+		case <-retry:
+			retry = nil
 		case ev := <-events:
 			tl := logs[ev.i]
 			prev := states[ev.i]
-			states[ev.i] = ev.state
+			states[ev.i], tried[ev.i] = ev.state, true
 			switch ev.state {
 			case stateUp:
 				if prev == stateConnecting {
-					tl.Info("tunnel up", "via", ev.carrier.Desc, "took", time.Since(started[ev.i]).Round(time.Millisecond))
+					tl.Info("tunnel up", "via", ev.carrier.Desc, "after", time.Since(started).Round(time.Millisecond))
 				} else {
 					tl.Info("reconnected", "via", ev.carrier.Desc)
 				}
@@ -800,37 +950,33 @@ func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnel
 			if !slices.ContainsFunc(states, func(s tunnelState) bool { return s != stateGaveUp }) {
 				return errors.New("every profile gave up")
 			}
-			if c != nil {
-				if err := applyLayout(c, mp, states, lives, rt); err != nil {
-					log.Warn("updating the routes failed", "err", err)
-				}
+		}
+		if !mp.hasRoutes() {
+			continue
+		}
+		if c == nil {
+			if slices.Contains(tried, false) {
+				continue // the first round isn't over
 			}
+			if c, err = startMultiCapture(ctx, mp, mp.activeSet(states), lives, rt, early, marker, log); err != nil {
+				return err
+			}
+			early = nil
+			helperExited = c.HelperExited()
+			continue
+		}
+		if err := applyLayout(c, mp, states, lives, rt); err != nil {
+			log.Warn("updating the routes failed; trying again shortly", "err", err)
+			retry = time.After(layoutRetry)
 		}
 	}
 }
 
-// startMultiCapture starts the capture before any tunnel connects: the
-// helper stays up for the session, and the routes of the profiles in use
-// (those with a kill switch, at first) follow as tunnels come and go.
-func startMultiCapture(ctx context.Context, mp *multiPlan, states []tunnelState, lives []*liveTunnel, rt *router,
-	marker *leftovers, log *slog.Logger) (*capture.Capture, error) {
-	var early *privhelper.Client
-	if privhelper.LeftoversMarked() {
-		log.Info("firewall rules from another subtun session may be in place; checking with the root helper")
-		h, err := privhelper.Start(ctx, &transport.LineLog{Log: log, Prefix: "helper: "}, log)
-		if err != nil {
-			return nil, startErr(ctx, err)
-		}
-		res, err := h.Adopt()
-		if err != nil {
-			_ = h.Close()
-			return nil, fmt.Errorf("taking over firewall rules: %w", err)
-		}
-		log.Info(res.Message)
-		marker.adopted(res)
-		early = h
-	}
-	all, entries, guard, err := mp.layout(states, lives)
+// startMultiCapture starts the capture for the profiles in use. The helper
+// stays up for the session, and the routes follow as tunnels come and go.
+func startMultiCapture(ctx context.Context, mp *multiPlan, active []bool, lives []*liveTunnel, rt *router,
+	early *privhelper.Client, marker *leftovers, log *slog.Logger) (*capture.Capture, error) {
+	all, entries, guard, err := mp.layout(active, lives)
 	if err != nil {
 		if early != nil {
 			_ = early.Close()
@@ -849,8 +995,10 @@ func startMultiCapture(ctx context.Context, mp *multiPlan, states []tunnelState,
 	if mp.dns != nil {
 		for i := range mp.specs {
 			mp.dns.Tunnels[i].Upstream = dns.UpstreamFunc(lives[i].ExchangeDNS)
-			mp.dns.Tunnels[i].Unreachable = func(a netip.Addr) bool { return unreachable(mp.final(i))(a) }
-			mp.dns.Match.SetOn(i, mp.active(i, states[i]))
+			// A private address another profile carries, or none, is out of
+			// this tunnel's reach.
+			mp.dns.Tunnels[i].Unreachable = func(a netip.Addr) bool { return dns.Private(a) && rt.pickIndex(a) != i }
+			mp.dns.Match.SetOn(i, active[i])
 		}
 		opts.DNS = mp.dns
 	}
@@ -866,18 +1014,31 @@ func startMultiCapture(ctx context.Context, mp *multiPlan, states []tunnelState,
 }
 
 // applyLayout brings the router, the DNS matcher and the capture's routes
-// and guard in line with the profiles in use. New routes reach the router
-// before the utun; removed ones leave the utun last (Capture.Update).
+// and guard in line with the profiles in use. A profile's names stop
+// before its routes go, and start after its routes are in.
 func applyLayout(c *capture.Capture, mp *multiPlan, states []tunnelState, lives []*liveTunnel, rt *router) error {
-	all, entries, guard, err := mp.layout(states, lives)
+	active := mp.activeSet(states)
+	all, entries, guard, err := mp.layout(active, lives)
 	if err != nil {
 		return err
 	}
 	rt.set(entries)
 	if mp.dns != nil {
-		for i := range mp.specs {
-			mp.dns.Match.SetOn(i, mp.active(i, states[i]))
+		for i, on := range active {
+			if !on {
+				mp.dns.Match.SetOn(i, false)
+			}
 		}
 	}
-	return c.Update(all, guard)
+	if err := c.Update(all, guard); err != nil {
+		return err
+	}
+	if mp.dns != nil {
+		for i, on := range active {
+			if on {
+				mp.dns.Match.SetOn(i, true)
+			}
+		}
+	}
+	return nil
 }

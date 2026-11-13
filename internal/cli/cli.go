@@ -772,6 +772,11 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 			live.set(cur.client)
 			log.Info("reconnected", "via", cur.carrier.Desc, "after", time.Since(lost).Round(100*time.Millisecond))
 		case err := <-errc:
+			if ctx.Err() != nil { // Ctrl-C closed the listener
+				deliberate = true
+				logShutdown(ctx, log)
+				return nil
+			}
 			return fmt.Errorf("SOCKS listener: %w", err)
 		case <-helperExited:
 			return helperGone()

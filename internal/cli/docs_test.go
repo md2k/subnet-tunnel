@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"os"
 	"regexp"
 	"strings"
@@ -60,7 +59,7 @@ func TestDocExamplesPlan(t *testing.T) {
 			}
 			// An example with several profiles must also run as a set.
 			if len(specs) > 1 {
-				if _, err := planMulti(context.Background(), specs); err != nil {
+				if _, err := planMulti(specs); err != nil {
 					t.Errorf("%s: profiles %v don't plan together: %v", doc, f.Names(), err)
 				}
 				t.Logf("%s: planned %v together", doc, f.Names())

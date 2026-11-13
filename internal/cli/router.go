@@ -23,6 +23,7 @@ type router struct {
 type routeEntry struct {
 	prefix netip.Prefix
 	tunnel *liveTunnel
+	i      int // the profile
 }
 
 // set replaces the table.
@@ -34,13 +35,29 @@ func (r *router) set(entries []routeEntry) {
 
 // pick returns the tunnel for a destination address.
 func (r *router) pick(a netip.Addr) *liveTunnel {
+	if e := r.entry(a); e != nil {
+		return e.tunnel
+	}
+	return nil
+}
+
+// pickIndex returns the profile that carries a destination address, -1 if
+// none.
+func (r *router) pickIndex(a netip.Addr) int {
+	if e := r.entry(a); e != nil {
+		return e.i
+	}
+	return -1
+}
+
+func (r *router) entry(a netip.Addr) *routeEntry {
 	t := r.table.Load()
 	if t == nil {
 		return nil
 	}
-	for _, e := range *t {
-		if e.prefix.Contains(a) {
-			return e.tunnel
+	for k := range *t {
+		if (*t)[k].prefix.Contains(a) {
+			return &(*t)[k]
 		}
 	}
 	return nil

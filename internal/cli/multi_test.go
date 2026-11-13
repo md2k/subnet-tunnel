@@ -35,9 +35,12 @@ func multiPlanFor(t *testing.T, names ...string) *multiPlan {
 		sp.connect, sp.endpoint = profileTarget(p, &sp.s, &globalOpts{})
 		specs = append(specs, sp)
 	}
-	mp, err := planMulti(context.Background(), specs)
+	mp, err := planMulti(specs)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if w := mp.lookupEndpoints(context.Background()); len(w) > 0 {
+		t.Fatalf("endpoints: %v", w)
 	}
 	return mp
 }
@@ -49,10 +52,10 @@ func TestUpSeveralDryRun(t *testing.T) {
 	}
 	for _, want := range []string{
 		"profile work:\n",
-		"    10.0.0.0/8\n",
+		"    10.0.0.0/8  (parts carried by dev, vault: more specific routes)\n",
 		"    203.0.113.128/26\n", // work's /24 minus its own endpoint 203.0.113.200
 		"profile dev:\n",
-		"    10.50.0.0/16  (taken from work's 10.0.0.0/8)\n",
+		"    10.50.0.0/16\n",
 		"  SOCKS5 proxy on 127.0.0.1:1081\n",
 		"  DNS through this tunnel: cluster.local (unrouted answers: warn)\n",
 		"  routes added when its tunnel is up, removed if it gives up\n",
@@ -123,7 +126,7 @@ func TestLayoutFollowsProfiles(t *testing.T) {
 	rt := &router{}
 	check := func(states []tunnelState, devRouted bool) {
 		t.Helper()
-		all, entries, guard, err := mp.layout(states, lives)
+		all, entries, guard, err := mp.layout(mp.activeSet(states), lives)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -183,9 +186,89 @@ func TestRunTunnelGivesUp(t *testing.T) {
 	send := func(ev tunnelEvent) bool { got = append(got, ev); return true }
 	p := reconnectPolicy{attempts: 2, delay: time.Millisecond, maxDelay: time.Millisecond}
 	runTunnel(context.Background(), 3, &liveTunnel{}, p, try, send, discardLogger())
-	if tries != 3 || len(got) != 1 || got[0].i != 3 || got[0].state != stateGaveUp || got[0].err == nil {
+	// The first failure is reported (the first round is over), then the give-up.
+	if tries != 3 || len(got) != 2 || got[0].state != stateConnecting || got[0].err == nil ||
+		got[1].i != 3 || got[1].state != stateGaveUp || got[1].err == nil {
 		t.Fatalf("tries %d, events %+v", tries, got)
 	}
 }
 
 func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
+// Who carries an address follows the configured routes: of the profiles
+// whose own routes cover it, the most specific configured route wins, not
+// the pieces left after excludes.
+func TestOwnershipFollowsConfiguredRoutes(t *testing.T) {
+	carrier := func(mp *multiPlan, a string) string {
+		active := mp.activeSet([]tunnelState{stateUp, stateUp})
+		if i := mp.owner(netip.MustParseAddr(a), active); i >= 0 {
+			return mp.specs[i].name
+		}
+		return "none"
+	}
+	// The LAN (192.168.77.0/24, stubbed) is taken out of both: the pieces
+	// left are identical in both profiles, which is fine.
+	mp := multiPlanFor(t, "full", "calico")
+	for a, want := range map[string]string{"192.168.5.5": "calico", "192.168.77.5": "none", "8.8.8.8": "full"} {
+		if got := carrier(mp, a); got != want {
+			t.Errorf("full+calico, %s: %s, want %s", a, got, want)
+		}
+	}
+	active := mp.activeSet([]tunnelState{stateUp, stateUp})
+	_, entries, guard, err := mp.layout(active, []*liveTunnel{{}, {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := &router{}
+	rt.set(entries)
+	if rt.pickIndex(netip.MustParseAddr("192.168.200.1")) != 1 || rt.pickIndex(netip.MustParseAddr("1.1.1.1")) != 0 {
+		t.Error("router disagrees with owner")
+	}
+	if covers(guard.Base, "192.168.5.5") || !covers(guard.Base, "8.8.8.8") || covers(guard.Base, "192.168.77.5") {
+		t.Errorf("guard: %v", guard.Base)
+	}
+
+	// One profile's exclude doesn't hand another profile's addresses to it.
+	mp = multiPlanFor(t, "work-x", "dev")
+	for a, want := range map[string]string{"10.50.3.5": "dev", "10.50.1.5": "dev", "10.1.1.1": "work-x"} {
+		if got := carrier(mp, a); got != want {
+			t.Errorf("work-x+dev, %s: %s, want %s", a, got, want)
+		}
+	}
+
+	// An endpoint carved out of both after connecting changes nothing else.
+	mp = multiPlanFor(t, "work", "dev")
+	if _, err := mp.addEndpoints([]netip.Addr{netip.MustParseAddr("10.50.7.7")}); err != nil {
+		t.Fatal(err)
+	}
+	for a, want := range map[string]string{"10.50.3.3": "dev", "10.50.7.7": "none", "10.1.1.1": "work"} {
+		if got := carrier(mp, a); got != want {
+			t.Errorf("work+dev after the endpoint, %s: %s, want %s", a, got, want)
+		}
+	}
+}
+
+// A target's API server named by hostname: its name never goes through a
+// tunnel, and its address stays out of the routes.
+func TestNamedEndpoint(t *testing.T) {
+	mp := multiPlanFor(t, "named", "dev")
+	if !slices.Equal(mp.dns.Match.Own(), []string{"api.named.example.test"}) {
+		t.Errorf("own names: %v", mp.dns.Match.Own())
+	}
+	if _, ok := mp.dns.Match.Pick("api.named.example.test"); ok {
+		t.Error("the API server's name goes through a tunnel")
+	}
+	if covers(mp.final(0), "172.24.9.9") || !covers(mp.final(0), "172.24.9.10") {
+		t.Errorf("named's routes: %v", mp.final(0))
+	}
+}
+
+// A failed endpoint lookup is reported.
+func TestEndpointLookupFailureWarns(t *testing.T) {
+	mp := multiPlanFor(t, "work", "dev")
+	mp.hosts[1] = "https://nowhere.example.test:6443"
+	w := mp.lookupEndpoints(context.Background())
+	if len(w) != 1 || !strings.Contains(w[0], "dev: looking up nowhere.example.test failed") {
+		t.Fatalf("warnings: %v", w)
+	}
+}

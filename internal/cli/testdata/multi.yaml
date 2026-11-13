@@ -68,3 +68,33 @@ profiles:
     routes: [172.21.0.0/16]
     tun:
       address: 198.18.251.1
+  full:
+    target:
+      docker:
+        host: tcp://198.51.100.207:2376
+        container: full
+    routes: [0.0.0.0/1, 128.0.0.0/1]
+    killSwitch:
+      mode: "on"
+  calico:
+    target:
+      docker:
+        host: tcp://198.51.100.208:2376
+        container: calico
+    routes: [192.168.0.0/16]
+  work-x:
+    target:
+      docker:
+        host: tcp://198.51.100.209:2376
+        container: workx
+    routes: [10.0.0.0/8]
+    exclude: [10.50.1.0/24]
+  named:
+    target:
+      k8s:
+        kubeconfig: testdata/kubeconfig
+        context: named
+        pod: debug
+    routes: [172.24.0.0/16]
+    dns:
+      domains: [.]
