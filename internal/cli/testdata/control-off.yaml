@@ -4,3 +4,4 @@ profiles:
   p:
     target: {docker: {container: c}}
     socks: 127.0.0.1:1080
+log: {file: off, level: "info,dns=debug"}

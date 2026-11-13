@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/md2k/subnet-tunnel/internal/logx"
 	"github.com/md2k/subnet-tunnel/internal/netstack"
 	"github.com/md2k/subnet-tunnel/internal/platform"
 	"github.com/md2k/subnet-tunnel/internal/privhelper"
@@ -328,7 +329,7 @@ func Start(ctx context.Context, prefixes []netip.Prefix, opts Options, dialer ne
 	// The DNS engine listens before any rule points at it.
 	var dr *dnsRuntime
 	if opts.DNS != nil {
-		if dr, err = startDNS(ctx, opts.DNS, log); err != nil {
+		if dr, err = startDNS(ctx, opts.DNS, log.With(logx.ComponentKey, "dns")); err != nil {
 			return nil, err
 		}
 		defer func() {
@@ -340,7 +341,7 @@ func Start(ctx context.Context, prefixes []netip.Prefix, opts Options, dialer ne
 
 	h := opts.Helper
 	if h == nil {
-		if h, err = privhelper.Start(ctx, &transport.LineLog{Log: log, Prefix: "helper: "}, log); err != nil {
+		if h, err = privhelper.Start(ctx, &transport.LineLog{Log: log.With(logx.ComponentKey, "helper"), Prefix: "helper: "}, log); err != nil {
 			return nil, err
 		}
 	}
@@ -393,7 +394,7 @@ func Start(ctx context.Context, prefixes []netip.Prefix, opts Options, dialer ne
 		}
 		return nil, err
 	}
-	st, err := netstack.New(dev, dialer, netstack.Options{Logger: log, TunAddr: opts.TunAddr, OnRefuse: opts.OnRefuse})
+	st, err := netstack.New(dev, dialer, netstack.Options{Logger: log.With(logx.ComponentKey, "conn"), TunAddr: opts.TunAddr, OnRefuse: opts.OnRefuse})
 	if err != nil {
 		_ = dev.Close()
 		if session {

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/md2k/subnet-tunnel/internal/config"
 	"github.com/md2k/subnet-tunnel/internal/control"
 	"github.com/md2k/subnet-tunnel/internal/meter"
 )
@@ -97,26 +98,39 @@ func TestEngineStatus(t *testing.T) {
 	}
 }
 
-// subtun k8s and subtun docker take the config file's control: too, unless
-// --control is given.
-func TestControlFromConfig(t *testing.T) {
+// subtun k8s and subtun docker take the config file's control: and log:
+// too, under the flags given.
+func TestGlobalsFromConfig(t *testing.T) {
 	cmd := newK8sCmd(&globalOpts{})
 	var s settings
 	s.control = controlStatus
-	controlFromConfig(cmd, &globalOpts{config: "testdata/control-off.yaml"}, &s)
-	if s.control != controlOff {
-		t.Fatalf("from the file: %q", s.control)
+	if err := globalsFromConfig(cmd, &globalOpts{config: "testdata/control-off.yaml"}, &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.control != controlOff || s.log.File != "off" || s.log.Level != "info,dns=debug" {
+		t.Fatalf("from the file: %q %+v", s.control, s.log)
 	}
 	s.control = controlStatus
-	controlFromConfig(cmd, &globalOpts{config: "testdata/no-such-config.yaml"}, &s)
+	_ = globalsFromConfig(cmd, &globalOpts{config: "testdata/no-such-config.yaml"}, &s)
 	if s.control != controlStatus {
 		t.Fatalf("no file: %q", s.control)
 	}
 	if err := cmd.Flags().Set("control", controlStatus); err != nil {
 		t.Fatal(err)
 	}
-	controlFromConfig(cmd, &globalOpts{config: "testdata/control-off.yaml"}, &s)
-	if s.control != controlStatus {
-		t.Fatalf("the flag lost to the file: %q", s.control)
+	if err := cmd.Flags().Set("log-file", "on"); err != nil {
+		t.Fatal(err)
+	}
+	s.log = config.Log{File: "on"}
+	_ = globalsFromConfig(cmd, &globalOpts{config: "testdata/control-off.yaml"}, &s)
+	if s.control != controlStatus || s.log.File != "on" || s.log.Level != "info,dns=debug" {
+		t.Fatalf("the flags lost to the file: %q %+v", s.control, s.log)
+	}
+	if err := cmd.Flags().Set("log-level", "loud"); err != nil {
+		t.Fatal(err)
+	}
+	s.log.Level = "loud"
+	if err := globalsFromConfig(cmd, &globalOpts{config: "testdata/control-off.yaml"}, &s); err == nil {
+		t.Fatal("a bad --log-level accepted")
 	}
 }

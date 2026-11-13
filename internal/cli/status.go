@@ -255,11 +255,3 @@ var startControl = func(ctx context.Context, es *engineStatus, ring *logring.Rin
 	}()
 	log.Debug("control socket ready", "path", path)
 }
-
-// newRunLogger is newLogger plus a ring buffer of the same lines (for
-// subtun logs).
-func newRunLogger(verbose bool) (*slog.Logger, *logring.Ring) {
-	ring := logring.New(0, 0)
-	opts := logOptions(verbose)
-	return slog.New(logring.Tee(slog.NewTextHandler(os.Stderr, opts), ring.Handler(opts))), ring
-}
