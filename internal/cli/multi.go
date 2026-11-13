@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/config"
 	"github.com/md2k/subnet-tunnel/internal/control"
 	"github.com/md2k/subnet-tunnel/internal/dns"
+	"github.com/md2k/subnet-tunnel/internal/logx"
 	"github.com/md2k/subnet-tunnel/internal/meter"
 	"github.com/md2k/subnet-tunnel/internal/privhelper"
 	"github.com/md2k/subnet-tunnel/internal/routes"
@@ -69,6 +71,8 @@ type multiPlan struct {
 
 	mu        sync.Mutex
 	endpoints []netip.Addr // every target's: excluded from every route
+
+	domains atomic.Pointer[[]string] // every profile's DNS domains, for log masking (never under smu)
 
 	// smu guards what status reads while the engine's loop changes it
 	// (control: full): the per-profile slices (they grow when a profile is
@@ -222,6 +226,7 @@ func planMulti(specs []*tunnelSpec) (*multiPlan, error) {
 			return nil, err
 		}
 	}
+	mp.noteDomains()
 	return mp, nil
 }
 
@@ -815,8 +820,8 @@ func runTunnel(ctx context.Context, i int, live *liveTunnel, policy reconnectPol
 
 // runMulti plans several profiles and runs them (runEngine), or prints
 // the plan.
-func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnelSpec, dryRun bool, maxDuration time.Duration, control string) error {
-	if maxDuration < 0 {
+func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnelSpec, dryRun bool, eo engineOpts) error {
+	if eo.maxDuration < 0 {
 		return errors.New("--max-duration must be positive")
 	}
 	mp, err := planMulti(specs)
@@ -828,7 +833,7 @@ func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnel
 		printMultiPlan(out, mp)
 		return nil
 	}
-	return runEngine(ctx, g, mp, engineOpts{maxDuration: maxDuration, control: control})
+	return runEngine(ctx, g, mp, eo)
 }
 
 // engineOpts are what differs between one profile and several.
@@ -838,9 +843,10 @@ type engineOpts struct {
 	// firewall rules need a session, log lines name no tunnel.
 	single      bool
 	maxDuration time.Duration
-	agentFile   string // development: upload this agent binary
-	dnsListen   string // development: answer DNS here instead of capturing it (one profile)
-	control     string // status (default) or off: the control socket
+	agentFile   string     // development: upload this agent binary
+	dnsListen   string     // development: answer DNS here instead of capturing it (one profile)
+	control     string     // status (default), full or off: the control socket
+	log         config.Log // logging
 }
 
 // runEngine runs a plan: one utun, helper and rule set, each profile's
@@ -849,7 +855,14 @@ type engineOpts struct {
 // when every profile has given up. With control: full, changes through the
 // control socket (routes, DNS names, profiles) are made by its loop.
 func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts) error {
-	log, ring := newRunLogger(g.verbose)
+	rl, logWarn := newRunLog(g.verbose, eo.log, mp.dnsDomains, os.Stderr)
+	defer rl.close() // last: after the capture has stopped
+	log, ring := rl.log, rl.ring
+	if logWarn != "" {
+		log.Warn(logWarn)
+	} else if rl.file != nil {
+		log.Debug("log file", "path", rl.file.Path())
+	}
 	ctx, done := withMaxDuration(ctx, eo.maxDuration, log)
 	defer done() // last: the watchdog covers stopping
 
@@ -857,9 +870,9 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	lives := make([]*liveTunnel, n)
 	logs := make([]*slog.Logger, n)
 	for i, sp := range mp.specs {
-		lives[i], logs[i] = &liveTunnel{}, log.With("tunnel", sp.name)
+		lives[i], logs[i] = &liveTunnel{}, log.With(logx.ComponentKey, "tunnel", "tunnel", sp.name)
 		if eo.single {
-			logs[i] = log
+			logs[i] = log.With(logx.ComponentKey, "tunnel")
 		}
 	}
 	for i, rp := range mp.rps {
@@ -927,7 +940,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	defer stopStatus()
 	go es.sample(sctx)
 	if eo.control != controlOff && eo.control != "" { // "": tests, internal callers
-		startControl(sctx, es, ring, log)
+		startControl(sctx, es, ring, log.With(logx.ComponentKey, "control"))
 	}
 
 	// Listen before connecting, so a busy port fails fast. A listener is
@@ -940,6 +953,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		}
 	}()
 	listenSOCKS := func(addr string, tl *slog.Logger, d socks.Dialer) (*socksListener, error) {
+		tl = tl.With(logx.ComponentKey, "socks")
 		ln, err := net.Listen("tcp", addr)
 		if err != nil {
 			return nil, err
@@ -984,7 +998,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			log.Warn("firewall rules from another subtun session may be in place; if networking misbehaves and none is running, run: subtun cleanup")
 		} else {
 			log.Info("firewall rules from another subtun session may be in place; checking with the root helper before connecting")
-			if early, err = privhelper.Start(ctx, &transport.LineLog{Log: log, Prefix: "helper: "}, log); err != nil {
+			if early, err = privhelper.Start(ctx, &transport.LineLog{Log: log.With(logx.ComponentKey, "helper"), Prefix: "helper: "}, log); err != nil {
 				return startErr(ctx, err)
 			}
 			res, err := early.Adopt()
@@ -1059,13 +1073,14 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		r.cancel, r.done = rcancel, done
 		started[i] = time.Now()
 		sp, policy, live, tl, info := mp.specs[i], mp.policies[i], lives[i], logs[i], es.infos[i]
+		tt := tl.With(logx.ComponentKey, "transport")
 		try := func(ctx context.Context) (*session, error) {
-			carrier, err := sp.connect(ctx, agents, tl)
+			carrier, err := sp.connect(ctx, agents, tt)
 			if err != nil {
 				return nil, err
 			}
 			hctx, hcancel := context.WithTimeout(ctx, 30*time.Second)
-			client, err := tunnel.NewClient(hctx, carrier, tunnel.Options{ExpectSHA256: carrier.SHA256, Logger: tl})
+			client, err := tunnel.NewClient(hctx, carrier, tunnel.Options{ExpectSHA256: carrier.SHA256, Logger: tt})
 			hcancel()
 			if err != nil {
 				return nil, fmt.Errorf("starting agent in %s: %w", carrier.Desc, err)
@@ -1272,7 +1287,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	addProfile := func(ac *addChange) error {
 		sp := ac.spec
 		i := len(mp.specs)
-		live, tl := &liveTunnel{}, log.With("tunnel", sp.name)
+		live, tl := &liveTunnel{}, log.With(logx.ComponentKey, "tunnel", "tunnel", sp.name)
 		info, m, dc := &tunnelInfo{since: time.Now(), state: stateConnecting}, meter.New(), &dns.Counts{}
 		var l *socksListener
 		if sp.s.socks != "" { // the one step that can fail: first
@@ -1317,12 +1332,13 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			mp.smu.Lock()
 			mp.dnsNames = ac.names
 			mp.smu.Unlock()
+			mp.noteDomains()
 		}
 		if c == nil { // the capture starts with them
 			mp.allowDNS, mp.blockIPv6, mp.ipv6Why = ac.allowDNS, ac.blockIPv6, ac.ipv6Why
 		}
 		if single { // a run of several from now on
-			logs[0] = log.With("tunnel", mp.specs[0].name) // its next runner names it
+			logs[0] = log.With(logx.ComponentKey, "tunnel", "tunnel", mp.specs[0].name) // its next runner names it
 			if c == nil && starting == nil && !roundOver && firstRound == nil {
 				firstRound = time.After(firstRoundWait)
 			}
@@ -1599,7 +1615,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 						if mp.rps[0] != nil {
 							devDNS.Tunnels[0].Unreachable = unreachable(mp.final(0))
 						}
-						stopDNS, err := serveDNSDev(ctx, eo.dnsListen, devDNS, log)
+						stopDNS, err := serveDNSDev(ctx, eo.dnsListen, devDNS, log.With(logx.ComponentKey, "dns"))
 						if err != nil {
 							return err
 						}
@@ -1669,6 +1685,26 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	}
 }
 
+// dnsDomains returns every profile's configured DNS domains (masked names
+// keep theirs), from any goroutine, without a lock: logging may happen
+// anywhere.
+func (mp *multiPlan) dnsDomains() []string {
+	if p := mp.domains.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// noteDomains records the DNS domains for dnsDomains; called by whoever
+// changes dnsNames.
+func (mp *multiPlan) noteDomains() {
+	var out []string
+	for _, n := range mp.dnsNames {
+		out = append(out, n.Domains...)
+	}
+	mp.domains.Store(&out)
+}
+
 // nothingToCapture reports whether every profile with routes is stopped or
 // gave up, none holding its routes (a kill switch): the capture would have
 // nothing to do until one starts again.
@@ -1725,7 +1761,7 @@ func startMultiCapture(ctx context.Context, mp *multiPlan, active []bool, lives 
 	if opts.DNS != nil || opts.KillSwitch != "off" || opts.BlockIPv6 {
 		marker.firewall()
 	}
-	c, err := capture.Start(ctx, all, opts, rt, log)
+	c, err := capture.Start(ctx, all, opts, rt, log.With(logx.ComponentKey, "capture"))
 	if err != nil {
 		marker.startFailed()
 		return nil, startErr(ctx, fmt.Errorf("utun capture: %w", err))

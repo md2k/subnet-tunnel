@@ -8,7 +8,7 @@ with `subtun up NAME`.
 Location: `--config FILE`, else `$SUBTUN_CONFIG`, else `$XDG_CONFIG_HOME/subtun/config.yaml`, else
 `~/.config/subtun/config.yaml`. Parsing is strict: an unknown key is an error, so a typo can't
 silently drop a setting. Besides `defaults:` and `profiles:`, the top level takes `control:` (see
-[Status and logs](#status-and-logs)).
+[Status and logs](#status-and-logs)) and `log:` (see [Log files](#log-files)).
 
 ```yaml
 defaults:                          # optional: any profile key except target, for every profile
@@ -481,7 +481,8 @@ with them).
 ## Status and logs
 
 Every running subtun answers `subtun status` and `subtun logs` through a control socket that only
-your user can use (in `~/Library/Caches/subtun/run`; no root, no network port).
+your user can use (in `~/.local/state/subtun/run`, or `$XDG_RUNTIME_DIR/subtun` when set; no root, no
+network port).
 
 ```sh
 subtun status                    # every running subtun
@@ -499,9 +500,10 @@ through SOCKS), bytes each way with the rate of the last second, the names it an
 connections the loop guard refused. Then the shared DNS capture (the servers captured now, the
 fallback, the names that stay local) and the kill switch (guarded prefixes).
 
-The log lines are the ones subtun prints, kept in memory only (at most 5000 lines or 4 MB, so a
-long run keeps its latest lines), never written to disk. With `-v` they include every name resolved
-and every connection captured; `subtun logs` shows them only to your user, like the terminal does.
+`subtun logs` shows the lines subtun prints, kept in memory (at most 5000 lines or 4 MB, so a long
+run keeps its latest lines); the log file below keeps them on disk. With debug levels they include
+every name resolved and every connection captured; `subtun logs` shows them only to your user, like
+the terminal does.
 
 | Setting | Flag | Values |
 |---|---|---|
@@ -509,6 +511,56 @@ and every connection captured; `subtun logs` shows them only to your user, like 
 
 `control` is set once for the whole run, never per profile; `subtun k8s` and `subtun docker` take
 the config file's key too (`--control` wins).
+
+## Log files
+
+Every run also writes its log to a file, one per start, in `~/.local/state/subtun/logs`
+(`$XDG_STATE_HOME/subtun/logs` when set): `subtun-<start time>-<pid>.json`, one JSON object per
+line, with the component that logged it. A long run starts a new part at `log.maxSize`
+(`...-2.json`, `...-3.json`); at start and every hour subtun removes its log files older than
+`log.maxAge`, then the oldest while all of them take more than `log.maxTotal`: only files named
+as subtun's, never one another running subtun writes. The default directory is yours only (0700);
+files are 0600.
+
+```yaml
+log:
+  file: on              # off: no file
+  format: json          # or text
+  level: info           # and per component, in one line: "info,dns=debug"
+  levels:
+    dns: debug          # every DNS query, without every other debug line
+  maxSize: 20MB
+  maxAge: 3d
+  maxTotal: 500MB
+  mask: [dns, destinations]
+```
+
+| Setting | Flag | Values |
+|---|---|---|
+| `log.file` | `--log-file` | `on` (default), `off` |
+| `log.dir` | `--log-dir` | default `~/.local/state/subtun/logs` |
+| `log.format` | `--log-format` | `json` (default), `text` |
+| `log.level` | `--log-level` | `debug`, `info` (default), `warn`, `error`, plus `component=level` pairs |
+| `log.levels` | (in `--log-level`) | per component: `tunnel`, `dns`, `conn`, `capture`, `helper`, `control`, `socks`, `transport` |
+| `log.maxSize` | `--log-max-size` | `20MB` |
+| `log.maxAge` | `--log-max-age` | `3d` (also `12h`, `90m`) |
+| `log.maxTotal` | `--log-max-total` | `500MB` |
+| `log.mask` | `--log-mask` | `dns`, `destinations`, both, none (default) |
+
+- **Levels** apply to the terminal, `subtun logs` and the file alike. The components: `tunnel`
+  (connecting, reconnecting, changes while running), `dns` (every query at debug, answers that point
+  outside the routes), `conn` (every captured connection at debug), `capture` (utun, routes,
+  firewall, kill switch), `helper` (the root helper), `control`, `socks` (every connection through
+  the proxy at debug), `transport` (reaching the pod or container, the agent). `-v` is debug for
+  all. `--log-level info,dns=debug` is all you need to follow DNS.
+- **Masking** replaces DNS names and destinations (connections, the addresses answers point at, the
+  ones errors repeat, and the agent's own lines at debug) by short hashes: the same name or address gives the same hash during a
+  run, nothing links two runs. A masked name keeps the configured domain it falls under
+  (`h3fa9c1.corp.example`), else its last two labels (a name of one or two labels becomes just
+  the hash, `h3fa9c1`); a SOCKS destination given by name is masked as a name. Useful to share a log; leave it off to investigate. Other lines (routes, DNS servers, the
+  root helper's) aren't masked.
+- `log` is set once for the whole run, never per profile (as `control`); flags win over the file,
+  and `--log-level` replaces both `log.level` and `log.levels`.
 
 ## Changes while running
 

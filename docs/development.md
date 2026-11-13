@@ -45,6 +45,8 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/control` | the control socket (per process, user-only), its HTTP+JSON API (status, logs, changes), the client the commands use |
 | `internal/meter` | a tunnel's counters: connections, bytes, 1 s rates, open connections |
 | `internal/logring` | the recent log lines in memory (capped by lines and bytes) |
+| `internal/logx` | levels per component (the `component` attribute), masking of DNS names and destinations, log files rotated by size and pruned by age and total size |
+| `internal/xdg` | subtun's directories, nix style: state (`~/.local/state/subtun`: logs) and run (`$XDG_RUNTIME_DIR/subtun` or `<state>/run`: sockets) |
 | `internal/cli` | the commands; planning of routes (automatic excludes), DNS and the kill switch; dry-run output; the engine every run uses, one profile or several (`multi.go`: planning, each profile's tunnel, `runEngine`; `router.go`: a connection's tunnel; `change.go`: changes while running, planned and checked; `status.go`, `statuscmd.go`, `changecmd.go`: status and the control commands) |
 | `internal/capture` | utun capture setup: helper → utun + routes → netstack; the DNS runtime; the kill switch guard following the local networks; routes and guard changing while running |
 | `internal/dns` | DNS engine: match names (`.` leaves local names alone) and pick a tunnel among several, tunnel or fallback, answers outside the routes, UDP/TCP listener, loop-free forwarder |

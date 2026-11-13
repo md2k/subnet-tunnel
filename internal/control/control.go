@@ -27,6 +27,7 @@ import (
 
 	"github.com/md2k/subnet-tunnel/internal/logring"
 	"github.com/md2k/subnet-tunnel/internal/meter"
+	"github.com/md2k/subnet-tunnel/internal/xdg"
 )
 
 // Status is a running subtun.
@@ -294,11 +295,10 @@ func (o ownerOnly) Accept() (net.Conn, error) {
 // RunDir is the private run directory (the root helper's sockets and the
 // control sockets): created 0700, and refused unless it is ours alone.
 func RunDir() (string, error) {
-	base, err := os.UserCacheDir()
+	dir, err := xdg.RunDir()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(base, "subtun", "run")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}

@@ -235,3 +235,27 @@ func TestControlKey(t *testing.T) {
 		t.Error("control in defaults accepted: it is global only")
 	}
 }
+
+// log is global (top level), checked when loaded.
+func TestLogKey(t *testing.T) {
+	base := "profiles:\n  p:\n    target: {docker: {container: c}}\n    socks: 127.0.0.1:1080\n"
+	good := "log:\n  file: off\n  format: text\n  level: warn,dns=debug\n  levels: {conn: info}\n  maxSize: 10MB\n  maxAge: 2d\n  maxTotal: 1GB\n  mask: [dns, destinations]\n"
+	f, err := Parse([]byte(good+base), "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Log.File != "off" || f.Log.Levels["conn"] != "info" || len(f.Log.Mask) != 2 {
+		t.Errorf("log: %+v", f.Log)
+	}
+	for _, bad := range []string{
+		"log: {file: maybe}\n", "log: {format: xml}\n", "log: {level: loud}\n", "log: {levels: {disk: debug}}\n",
+		"log: {maxSize: lots}\n", "log: {maxAge: 3w}\n", "log: {mask: [everything]}\n", "log: {colour: red}\n",
+	} {
+		if _, err := Parse([]byte(bad+base), "t"); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	if _, err := Parse([]byte("defaults:\n  log: {file: off}\n"+base), "t"); err == nil {
+		t.Error("log in defaults accepted: it is global only")
+	}
+}

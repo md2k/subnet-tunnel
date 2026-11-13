@@ -79,7 +79,7 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 	up, err := s.Dialer.DialContext(dctx, "tcp", addr)
 	cancel()
 	if err != nil {
-		s.Logger.Info("connect failed", "addr", addr, "err", err)
+		s.Logger.Info("connect failed", "dst", addr, "err", err)
 		_ = writeReply(c, replyFor(err))
 		_ = c.Close()
 		return
@@ -92,9 +92,9 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 	_ = c.SetDeadline(time.Time{})
 
 	start := time.Now()
-	s.Logger.Debug("connected", "addr", addr)
+	s.Logger.Debug("connected", "dst", addr)
 	sent, recv := relay.Pipe(c, up)
-	s.Logger.Debug("closed", "addr", addr, "sent", sent, "recv", recv, "dur", time.Since(start).Round(time.Millisecond))
+	s.Logger.Debug("closed", "dst", addr, "sent", sent, "recv", recv, "dur", time.Since(start).Round(time.Millisecond))
 }
 
 // Handshake runs the SOCKS5 greeting and request on c and returns the

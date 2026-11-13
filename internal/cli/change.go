@@ -412,6 +412,7 @@ func (mp *multiPlan) setNames(names []dns.Names, m *dns.Matcher) error {
 	mp.smu.Lock()
 	mp.dnsNames = names
 	mp.smu.Unlock()
+	mp.noteDomains()
 	return nil
 }
 

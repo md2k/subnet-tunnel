@@ -132,7 +132,8 @@ type settings struct {
 	reconnectDelay    time.Duration
 	reconnectMaxDelay time.Duration
 
-	control string // the control socket: status, full or off (global for the run)
+	control string     // the control socket: status, full or off (global for the run)
+	log     config.Log // logging (global for the run)
 }
 
 func (s *settings) register(cmd *cobra.Command) {
@@ -165,6 +166,7 @@ func (s *settings) register(cmd *cobra.Command) {
 	f.DurationVar(&s.reconnectMaxDelay, "reconnect-max-delay", defaultReconnectMaxDelay, "longest wait between reconnect attempts")
 	_ = f.MarkHidden("max-duration")
 	f.StringVar(&s.control, "control", controlStatus, "the control socket: status (subtun status and subtun logs), full (also changes while running: subtun route, dns, profile) or off")
+	registerLogFlags(cmd, &s.log)
 }
 
 // applyProfile fills settings from a profile; flags given on the command
@@ -275,6 +277,9 @@ Without a profile name, lists the profiles.`,
 			if !cmd.Flags().Changed("control") && f.Control != "" {
 				s.control = string(f.Control) // the config file's, for every run
 			}
+			if err := mergeLog(cmd.Flags(), &s.log, f.Log); err != nil {
+				return err // the file's own log: was checked when loaded
+			}
 			if len(names) > 1 {
 				return upSeveral(cmd, g, f, path, names, args, s)
 			}
@@ -305,6 +310,9 @@ func upSeveral(cmd *cobra.Command, g *globalOpts, f *config.File, path string, n
 		switch fl.Name {
 		case "profile", "dry-run", "max-duration", "verbose", "config", "control":
 		default:
+			if slices.Contains(logFlags, fl.Name) {
+				return // global for the run
+			}
 			refused = append(refused, "--"+fl.Name)
 		}
 	})
@@ -322,7 +330,7 @@ func upSeveral(cmd *cobra.Command, g *globalOpts, f *config.File, path string, n
 	if err := config.ValidControl(defaults.control); err != nil {
 		return err
 	}
-	return runMulti(cmd.Context(), cmd.OutOrStdout(), g, specs, defaults.dryRun, defaults.maxDuration, defaults.control)
+	return runMulti(cmd.Context(), cmd.OutOrStdout(), g, specs, defaults.dryRun, engineOpts{maxDuration: defaults.maxDuration, control: defaults.control, log: defaults.log})
 }
 
 // profileSpec builds a profile of the config file at path: base settings
@@ -423,7 +431,9 @@ runs as you. --socks adds a SOCKS5 proxy, for example for a browser.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			t.Pod = strings.TrimPrefix(args[0], "pod/")
 			s.routes = args[1:]
-			controlFromConfig(cmd, g, &s)
+			if err := globalsFromConfig(cmd, g, &s); err != nil {
+				return err
+			}
 			return run(cmd.Context(), cmd.OutOrStdout(), g, &tunnelSpec{s: s, connect: func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
 				return k8s.Connect(ctx, t, agents, s.transport(g), log)
 			}})
@@ -457,7 +467,9 @@ CIDRs are captured transparently through a utun interface (sudo asks once);
 		RunE: func(cmd *cobra.Command, args []string) error {
 			t.Container = args[0]
 			s.routes = args[1:]
-			controlFromConfig(cmd, g, &s)
+			if err := globalsFromConfig(cmd, g, &s); err != nil {
+				return err
+			}
 			return run(cmd.Context(), cmd.OutOrStdout(), g, &tunnelSpec{s: s, connect: func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
 				return docker.Connect(ctx, t, agents, s.transport(g), log)
 			}})
@@ -469,29 +481,31 @@ CIDRs are captured transparently through a utun interface (sudo asks once);
 	return cmd
 }
 
-// controlFromConfig applies the config file's top-level control: to a run
-// without a profile (subtun k8s, subtun docker) unless --control was
-// given: it is global for every run. No config file is fine; a broken one
-// only loses the setting.
-func controlFromConfig(cmd *cobra.Command, g *globalOpts, s *settings) {
-	if cmd.Flags().Changed("control") {
-		return
+// globalsFromConfig applies the config file's top-level control: and log:
+// to a run without a profile (subtun k8s, subtun docker), under the flags
+// given: they are global for every run. No config file is fine; a broken
+// one only loses those settings.
+func globalsFromConfig(cmd *cobra.Command, g *globalOpts, s *settings) error {
+	var f *config.File
+	if path := configPath(g); fileExists(path) {
+		var err error
+		if f, err = config.Load(path); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %v (its control: and log: settings are ignored)\n", err)
+			f = nil
+		}
 	}
-	path := g.config
-	if path == "" {
-		path = config.DefaultPath()
+	if f == nil {
+		f = &config.File{}
 	}
-	if _, err := os.Stat(path); err != nil {
-		return
-	}
-	f, err := config.Load(path)
-	if err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %v (its control: setting is ignored)\n", err)
-		return
-	}
-	if f.Control != "" {
+	if !cmd.Flags().Changed("control") && f.Control != "" {
 		s.control = string(f.Control)
 	}
+	return mergeLog(cmd.Flags(), &s.log, f.Log)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 type connectFunc func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error)
@@ -643,7 +657,7 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, sp *tunnelSpec) erro
 	}
 	mp := singlePlan(sp, policy, rp, dnsOpts, gp, warns)
 	return runEngine(ctx, g, mp, engineOpts{single: true, maxDuration: s.maxDuration, agentFile: s.agentFile, dnsListen: s.dnsListen,
-		control: s.control})
+		control: s.control, log: s.log})
 }
 
 // singlePlan turns one profile's checked plan into the engine's plan.
@@ -674,6 +688,7 @@ func singlePlan(sp *tunnelSpec, policy reconnectPolicy, rp *routePlan, dnsOpts *
 	if dnsOpts != nil {
 		mp.unrouted[0] = dnsOpts.Tunnels[0].Unrouted
 	}
+	mp.noteDomains()
 	return mp
 }
 

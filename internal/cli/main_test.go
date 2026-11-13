@@ -14,8 +14,15 @@ import (
 // Dry runs don't depend on the machine's networks: one LAN, 192.168.77.0/24
 // on en0, with its gateway.
 func TestMain(m *testing.M) {
-	// Never the user's own config file.
+	// Never the user's own config file, log files or sockets.
 	os.Setenv("SUBTUN_CONFIG", "testdata/no-such-config.yaml")
+	state, err := os.MkdirTemp("", "subtun-test-state-")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(state)
+	os.Setenv("XDG_STATE_HOME", state)
+	os.Unsetenv("XDG_RUNTIME_DIR")
 	localNetworks = func() []routes.Local {
 		return []routes.Local{{Iface: "en0", Network: netip.MustParsePrefix("192.168.77.0/24")}}
 	}
@@ -35,5 +42,7 @@ func TestMain(m *testing.M) {
 		}
 		return nil, errors.New("no such host (test)")
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	os.RemoveAll(state)
+	os.Exit(code)
 }
