@@ -263,7 +263,7 @@ func planMultiDNS(mp *multiPlan, participants []int) error {
 	}
 	if m.CatchAll() {
 		search, _ := systemSearch()
-		m.SetLocal(search, localPrefixes())
+		m.SetLocal(search, dnsLocals(mp.tunAddr)())
 	}
 	// The targets' own names must resolve while their tunnels are down.
 	own := make([]string, len(mp.hosts))
@@ -273,7 +273,7 @@ func planMultiDNS(mp *multiPlan, participants []int) error {
 	m.SetOwn(own)
 	opts := &capture.DNSOptions{Match: m, Tunnels: make([]capture.DNSTunnel, len(mp.specs))}
 	if m.CatchAll() {
-		opts.Locals = localPrefixes
+		opts.Locals = dnsLocals(mp.tunAddr)
 	}
 	for i, sp := range mp.specs {
 		opts.Tunnels[i] = capture.DNSTunnel{Name: sp.name, Unrouted: mp.unrouted[i]}
@@ -846,7 +846,8 @@ func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnel
 
 	// The tunnels run until this returns; firewall rules and routes go
 	// first (the capture's stop is deferred after this), then the tunnels.
-	tctx, cancel := context.WithCancel(ctx)
+	// So a signal doesn't stop them by itself: it ends this loop.
+	tctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	var wg sync.WaitGroup
 	defer func() {
 		cancel()
@@ -908,7 +909,8 @@ func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnel
 	}
 
 	states := make([]tunnelState, n)
-	tried := make([]bool, n) // the first attempt is over
+	tried := make([]bool, n)     // the first attempt is over
+	lost := make([]time.Time, n) // when each tunnel was lost
 	rt := &router{}
 	var helperExited <-chan struct{}
 	var retry <-chan time.Time
@@ -959,7 +961,7 @@ func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnel
 				if prev == stateConnecting {
 					tl.Info("tunnel up", "via", ev.carrier.Desc, "after", time.Since(started).Round(time.Millisecond))
 				} else {
-					tl.Info("reconnected", "via", ev.carrier.Desc)
+					tl.Info("reconnected", "via", ev.carrier.Desc, "after", time.Since(lost[ev.i]).Round(100*time.Millisecond))
 				}
 				if ev.carrier.Local && routesInternet(mp.final(ev.i)) {
 					tl.Warn(localLoopWarning)
@@ -969,6 +971,8 @@ func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnel
 				} else if changed {
 					tl.Info("excluded from routes: subtun's own connection goes there", "addrs", ev.carrier.Endpoints)
 				}
+			case stateReconnecting:
+				lost[ev.i] = time.Now()
 			case stateGaveUp:
 				what := "its routes and names are removed"
 				switch {

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 
 	"github.com/md2k/subnet-tunnel/internal/capture"
@@ -45,13 +46,17 @@ func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	var tunAddr netip.Addr
+	if rp != nil {
+		tunAddr = rp.opts.TunAddr
+	}
 	if m.CatchAll() {
 		search, _ := systemSearch()
-		m.SetLocal(search, localPrefixes())
+		m.SetLocal(search, dnsLocals(tunAddr)())
 	}
 	opts := &capture.DNSOptions{Match: m, Tunnels: []capture.DNSTunnel{{Unrouted: unrouted}}}
 	if m.CatchAll() {
-		opts.Locals = localPrefixes
+		opts.Locals = dnsLocals(tunAddr)
 	}
 	var notes []string
 
@@ -96,6 +101,17 @@ func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
 		}
 	}
 	return opts, notes, nil
+}
+
+// dnsLocals reads the machine's networks for the names "." leaves local,
+// without subtun's own utun address: it appears once the utun exists, and
+// its reverse zone is no local network.
+func dnsLocals(tunAddr netip.Addr) func() []netip.Prefix {
+	return func() []netip.Prefix {
+		return slices.DeleteFunc(localPrefixes(), func(p netip.Prefix) bool {
+			return tunAddr.IsValid() && p.Bits() == 32 && p.Addr() == tunAddr
+		})
+	}
 }
 
 // parseServers checks a list of DNS servers to capture.

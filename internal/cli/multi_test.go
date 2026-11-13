@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/md2k/subnet-tunnel/internal/config"
+	"github.com/md2k/subnet-tunnel/internal/routes"
 )
 
 func multiPlanFor(t *testing.T, names ...string) *multiPlan {
@@ -270,5 +271,25 @@ func TestEndpointLookupFailureWarns(t *testing.T) {
 	w := mp.lookupEndpoints(context.Background())
 	if len(w) != 1 || !strings.Contains(w[0], "dev: looking up nowhere.example.test failed") {
 		t.Fatalf("warnings: %v", w)
+	}
+}
+
+// subtun's own utun address isn't a local network for DNS: once the utun
+// exists, its reverse zone would join the names "." leaves local.
+func TestDNSLocalsSkipTheUtun(t *testing.T) {
+	orig := localNetworks
+	t.Cleanup(func() { localNetworks = orig })
+	localNetworks = func() []routes.Local {
+		return []routes.Local{
+			{Iface: "en0", Network: netip.MustParsePrefix("192.168.77.0/24")},
+			{Iface: "utun9", Network: netip.MustParsePrefix("198.18.249.1/32")},
+		}
+	}
+	got := dnsLocals(netip.MustParseAddr("198.18.249.1"))()
+	if !slices.Equal(got, []netip.Prefix{netip.MustParsePrefix("192.168.77.0/24")}) {
+		t.Fatalf("locals: %v", got)
+	}
+	if got := dnsLocals(netip.Addr{})(); len(got) != 2 {
+		t.Fatalf("without a utun address: %v", got)
 	}
 }
