@@ -528,6 +528,7 @@ subtun profile stop dev                                 # as Ctrl-C, for dev onl
 subtun profile start dev                                # connect it again
 subtun profile start dev --reload                       # ... reading it from the config file again
 subtun profile reconnect work                           # drop its connection and connect again now
+subtun profile start vault                              # add a profile of the config file to the run
 subtun route add --profile dev 10.80.0.0/16 --dry-run   # only show what would change
 ```
 
@@ -555,14 +556,22 @@ subtun route add --profile dev 10.80.0.0/16 --dry-run   # only show what would c
   `killSwitch.*`, `blockIPv6`) need a restart, and a reload that changes them is refused, as is
   one that adds DNS names asked of servers the run doesn't capture, or moves the target to an
   IPv6 address while IPv6 is blocked.
+- **`profile start NAME` of a profile that isn't part of the run** adds it from the config file the
+  run reads (`--config`, `$SUBTUN_CONFIG` or the default), with the config's settings only, as
+  `subtun up --profile a,b` takes them; it is checked against the running profiles as at start:
+  `tun.*` and `dns.fallback` must agree with the run's, no CIDR, DNS domain (or `.`) or SOCKS
+  address in two profiles. It needs what the run set up at start: routes only if the run has a utun
+  capture, a kill switch only if the run's capture has one (a profile had a kill switch when it
+  started), DNS names only if the run captures DNS and its servers. An added profile stays part of
+  the run until it ends (`profile stop` stops it); a run of one profile becomes a run of several
+  (it ends when every profile has given up).
 - **`profile reconnect`** drops the profile's connection and connects again at once, then by its
   reconnect settings; its routes stay meanwhile, as when a connection is lost.
 - **Limits for now.** Routes can be added to a profile that started with routes (not to a
   SOCKS-only one), and a profile keeps at least one route (stop it instead). DNS names can be added
   when the run captures DNS already (a profile had DNS names when it started), and only for a
   profile whose DNS servers it captures: which servers are captured, and whether the system's are
-  followed, was decided at start by the profiles that had names then. Starting a profile that isn't
-  part of the run is planned.
+  followed, was decided at start by the profiles that had names then.
 
 With `control: full` the root helper stays up for the whole run, also for one profile with routes
 only (otherwise it exits after setup), so routes can change without a sudo prompt: any program

@@ -562,7 +562,7 @@ build on the route changes above.
 
 ## Status and control
 
-Both are built (starting a profile that isn't part of the run is next). A running subtun answers
+Both are built. A running subtun answers
 questions about itself (`subtun status`, `subtun logs`), and on request accepts changes (routes, DNS
 names, profiles) without a restart. Everything is
 shaped as a list of tunnels: one in a single-profile run, several with `--profile a,b`.
@@ -617,6 +617,7 @@ the endpoints; `--dry-run` shows the effect):
 subtun route add|del [--profile P] [-x] CIDR...                # a profile's routes (-x: excludes)
 subtun dns add|del [--profile P] [DOMAIN...] [--pattern RE]... # a profile's DNS names
 subtun profile stop|start|reconnect [NAME] [--reload]          # one profile; the others go on
+                                                               # (start NAME not in the run: add it)
 ```
 
 Changes are temporary: they last until subtun stops, and nothing is written back to the config
@@ -682,8 +683,11 @@ built once. They keep their behaviour:
 2. Status: the socket, counters, connections, logs, `subtun status` and `subtun logs`. Done.
 3. Control: `control: full` and the changes to the run's profiles. Done.
 4. Starting a profile that isn't part of the run (`profile start NAME` from the config file, next to
-   the others): every per-profile table of the engine (DNS engine, matcher, counters, status) grows
-   while running.
+   the others). Done: the engine's per-profile tables grow while running (the plan and the status
+   under `mp.smu`, runners, SOCKS listeners, the DNS engine's tunnels via `Engine.AddTunnel`, the
+   matcher's targets, which start switched off); the profile is planned with the config's settings
+   only, against the run (`planAdd`). A profile with routes needs a run with a capture, one with a
+   kill switch a capture with a guard; DNS names need the run's DNS capture and its servers.
 
 ## Decisions
 

@@ -141,8 +141,8 @@ turns an sshuttle options file into a profile ([details](docs/config.md#importin
 
 ## Planned
 
-- Starting a profile next to the running ones, routes that follow network changes, and DNS answers
-  outside the routes routed into the tunnel; a terminal and a web UI.
+- Routes that follow network changes, and DNS answers outside the routes routed into the tunnel; a
+  terminal and a web UI.
 - SSH transport to any host.
 - DNS without firewall rules: subtun as the system resolver, or only for the listed domains.
 - UDP and IPv6 through the tunnel; capture on Linux (TUN) and Windows (wintun).
