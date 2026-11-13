@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/md2k/subnet-tunnel/internal/proto"
@@ -38,10 +39,27 @@ type TCPUpstream interface {
 
 // Engine answers queries.
 type Engine struct {
-	Match    *Matcher
-	Tunnels  []Tunnel    // by the matcher's targets
-	Fallback TCPUpstream // everything else
-	Log      *slog.Logger
+	Match          *Matcher
+	Tunnels        []Tunnel    // by the matcher's targets
+	Fallback       TCPUpstream // everything else
+	FallbackCounts *Counts     // names the fallback answered; nil: not counted
+	Log            *slog.Logger
+}
+
+// Counts are the queries an upstream answered or failed (for status).
+type Counts struct {
+	Answered, Failed atomic.Uint64
+}
+
+func (c *Counts) count(err error) {
+	if c == nil {
+		return
+	}
+	if err != nil {
+		c.Failed.Add(1)
+	} else {
+		c.Answered.Add(1)
+	}
 }
 
 // Tunnel resolves the names the matcher gives one tunnel.
@@ -49,6 +67,7 @@ type Tunnel struct {
 	Name     string    // the profile, for the log ("" with one tunnel)
 	Upstream Upstream  // resolves through the agent (returns complete answers)
 	Unrouted *Unrouted // answers pointing at private addresses its routes don't cover; nil: no check
+	Counts   *Counts   // nil: not counted
 }
 
 const (
@@ -92,6 +111,11 @@ func (e *Engine) Answer(ctx context.Context, msg []byte, udp bool) []byte {
 		if a, how := tun.Unrouted.check(ctx, e.Fallback, q, msg, answer); how != "" {
 			answer, route = a, how
 		}
+	}
+	if tun != nil {
+		tun.Counts.count(err)
+	} else {
+		e.FallbackCounts.count(err)
 	}
 	if err != nil {
 		e.Log.Debug("dns: failed", "name", q.name, "type", q.question.Type, "via", route, "err", err)
