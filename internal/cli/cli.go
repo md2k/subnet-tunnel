@@ -758,7 +758,7 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 			case errors.Is(err, errHelperGone):
 				return helperGone()
 			default:
-				return err
+				return fmt.Errorf("connection to the agent was lost; %w", err)
 			}
 			cur = next
 			if hit := routedEndpoints(final, cur.carrier.Endpoints); len(hit) > 0 {

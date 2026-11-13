@@ -575,6 +575,12 @@ func runTunnel(ctx context.Context, i int, live *liveTunnel, policy reconnectPol
 			cur.close()
 		}
 	}()
+	gaveUp := func(err error) {
+		live.gone.Store(true)
+		if ctx.Err() == nil {
+			send(tunnelEvent{i: i, state: stateGaveUp, err: err})
+		}
+	}
 	s, err := try(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -582,9 +588,7 @@ func runTunnel(ctx context.Context, i int, live *liveTunnel, policy reconnectPol
 		}
 		log.Warn("connecting failed", "err", err, "policy", policy.String())
 		if s, err = reconnect(ctx, policy, nil, try, log); err != nil {
-			if ctx.Err() == nil {
-				send(tunnelEvent{i: i, state: stateGaveUp, err: err})
-			}
+			gaveUp(fmt.Errorf("could not connect; %w", err))
 			return
 		}
 	}
@@ -603,7 +607,7 @@ func runTunnel(ctx context.Context, i int, live *liveTunnel, policy reconnectPol
 		cur.close()
 		cur = nil
 		if policy.attempts == 0 {
-			send(tunnelEvent{i: i, state: stateGaveUp, err: errors.New("connection to the agent was lost")})
+			gaveUp(errors.New("connection to the agent was lost (reconnect attempts: 0)"))
 			return
 		}
 		log.Warn("connection to the agent lost; reconnecting", "policy", policy.String())
@@ -611,9 +615,7 @@ func runTunnel(ctx context.Context, i int, live *liveTunnel, policy reconnectPol
 			return
 		}
 		if s, err = reconnect(ctx, policy, nil, try, log); err != nil {
-			if ctx.Err() == nil {
-				send(tunnelEvent{i: i, state: stateGaveUp, err: err})
-			}
+			gaveUp(fmt.Errorf("connection to the agent was lost; %w", err))
 			return
 		}
 	}
