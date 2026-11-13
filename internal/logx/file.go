@@ -5,11 +5,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
+
+// logName is a subtun log file's name: subtun-<date>-<time>-<pid>[-<part>].
+var logName = regexp.MustCompile(`^subtun-\d{8}-\d{6}-(\d+)(?:-\d+)?\.(?:json|log)$`)
 
 // File defaults (log.maxSize, log.maxAge, log.maxTotal).
 const (
@@ -87,7 +93,9 @@ func (l *File) openPart(n int) error {
 		name = fmt.Sprintf("%s-%d", l.base, n)
 	}
 	path := filepath.Join(l.opts.Dir, name+"."+l.opts.Ext)
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	// A new name every time: O_EXCL also refuses to follow a symlink
+	// planted under it.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
@@ -115,10 +123,10 @@ func (l *File) Write(p []byte) (int, error) {
 	}
 	n, err := l.f.Write(p)
 	l.size += int64(n)
-	l.mu.Unlock()
 	if rotated {
-		l.prune(time.Now())
+		l.pruneLocked(time.Now())
 	}
+	l.mu.Unlock()
 	return n, err
 }
 
@@ -150,9 +158,16 @@ func (l *File) pruneLoop() {
 	}
 }
 
-// prune removes old log files, never the one in use.
+// prune removes old log files: subtun's only (by their exact names), never
+// the one in use, nor another running subtun's.
 func (l *File) prune(now time.Time) {
-	current := l.Path()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pruneLocked(now)
+}
+
+func (l *File) pruneLocked(now time.Time) {
+	current := l.path
 	entries, err := os.ReadDir(l.opts.Dir)
 	if err != nil {
 		return
@@ -165,8 +180,12 @@ func (l *File) prune(now time.Time) {
 	var files []logFile
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, "subtun-") || !(strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".log")) {
+		m := logName.FindStringSubmatch(name)
+		if e.IsDir() || m == nil {
 			continue
+		}
+		if pid, _ := strconv.Atoi(m[1]); pid != os.Getpid() && running(pid) {
+			continue // another subtun is still writing it
 		}
 		info, err := e.Info()
 		if err != nil {
@@ -182,10 +201,7 @@ func (l *File) prune(now time.Time) {
 		}
 		files = append(files, logFile{path, info.ModTime(), info.Size()})
 	}
-	total := int64(0)
-	if info, err := os.Stat(current); err == nil {
-		total = info.Size()
-	}
+	total := l.size
 	for _, f := range files {
 		total += f.size
 	}
@@ -198,6 +214,19 @@ func (l *File) prune(now time.Time) {
 			total -= f.size
 		}
 	}
+}
+
+// running reports whether a process with this pid exists.
+func running(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = p.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, os.ErrPermission)
 }
 
 // ParseSize reads a size: 20MB, 500KB, 1GB, or plain bytes.

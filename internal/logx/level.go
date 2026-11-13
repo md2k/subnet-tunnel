@@ -132,16 +132,27 @@ func (f filter) Enabled(ctx context.Context, l slog.Level) bool {
 	return l >= f.spec.Level(f.comp) && f.h.Enabled(ctx, l)
 }
 
-func (f filter) Handle(ctx context.Context, r slog.Record) error { return f.h.Handle(ctx, r) }
+// Handle adds the component once, last (nested With calls would repeat
+// the key otherwise).
+func (f filter) Handle(ctx context.Context, r slog.Record) error {
+	if f.comp != "" {
+		r = r.Clone()
+		r.AddAttrs(slog.String(ComponentKey, f.comp))
+	}
+	return f.h.Handle(ctx, r)
+}
 
 func (f filter) WithAttrs(as []slog.Attr) slog.Handler {
 	comp := f.comp
+	rest := make([]slog.Attr, 0, len(as))
 	for _, a := range as {
 		if a.Key == ComponentKey {
 			comp = a.Value.String()
+			continue
 		}
+		rest = append(rest, a)
 	}
-	return filter{h: f.h.WithAttrs(as), spec: f.spec, comp: comp}
+	return filter{h: f.h.WithAttrs(rest), spec: f.spec, comp: comp}
 }
 
 func (f filter) WithGroup(name string) slog.Handler {

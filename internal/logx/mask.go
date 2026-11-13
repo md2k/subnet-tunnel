@@ -9,15 +9,23 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"regexp"
 	"strings"
 )
 
-// Attribute keys masking applies to: DNS names asked through subtun, and
-// the destinations of connections and DNS answers.
+// Attribute keys masking applies to: DNS names asked through subtun, the
+// destinations of connections and DNS answers, and errors (which may repeat
+// a destination: "dial 10.1.2.3:443: ...", "lookup db.corp.example: ...").
 const (
 	KeyName  = "name"  // a DNS name
-	KeyDst   = "dst"   // a destination, address:port
+	KeyDst   = "dst"   // a destination, address:port or name:port (SOCKS)
 	KeyAddrs = "addrs" // addresses a DNS answer points at
+	KeyErr   = "err"
+)
+
+var (
+	ipv4Re = regexp.MustCompile(`\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b`)
+	nameRe = regexp.MustCompile(`(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]\b`)
 )
 
 // Masker replaces DNS names and destinations in log records by short keyed
@@ -75,12 +83,33 @@ func (m *Masker) Name(name string) string {
 	return "h" + m.hash(n) + "." + suffix
 }
 
-// Addr masks an address, or address:port (the port stays).
+// Addr masks an address, or address:port (the port stays). A host name
+// (a SOCKS destination) is masked as a name.
 func (m *Masker) Addr(s string) string {
-	if host, port, err := net.SplitHostPort(s); err == nil {
-		return net.JoinHostPort("ip-"+m.hash(host), port)
+	host, port, err := net.SplitHostPort(s)
+	if err != nil {
+		host, port = s, ""
 	}
-	return "ip-" + m.hash(s)
+	masked := "ip-" + m.hash(host)
+	if _, err := netip.ParseAddr(host); err != nil {
+		masked = m.Name(host)
+	}
+	if port == "" {
+		return masked
+	}
+	return net.JoinHostPort(masked, port)
+}
+
+// scrub masks what an error text repeats: addresses (destinations) and
+// names (DNS).
+func (m *Masker) scrub(s string) string {
+	if m.Dest {
+		s = ipv4Re.ReplaceAllStringFunc(s, func(a string) string { return "ip-" + m.hash(a) })
+	}
+	if m.DNS {
+		s = nameRe.ReplaceAllStringFunc(s, m.Name)
+	}
+	return s
 }
 
 // Replace is a slog ReplaceAttr: it masks the attributes masking applies
@@ -89,11 +118,26 @@ func (m *Masker) Replace(_ []string, a slog.Attr) slog.Attr {
 	if !m.Active() {
 		return a
 	}
-	switch {
-	case a.Key == KeyName && m.DNS:
-		return slog.String(a.Key, m.Name(a.Value.String()))
-	case (a.Key == KeyDst || a.Key == KeyAddrs) && m.Dest:
-		return slog.Any(a.Key, m.addrs(a.Value))
+	switch a.Key {
+	case KeyName:
+		if m.DNS {
+			return slog.String(a.Key, m.Name(a.Value.String()))
+		}
+	case KeyDst:
+		// An address is a destination; a host name (SOCKS) a name too.
+		host, _, err := net.SplitHostPort(a.Value.String())
+		if err != nil {
+			host = a.Value.String()
+		}
+		if _, err := netip.ParseAddr(host); err == nil && m.Dest || err != nil && (m.DNS || m.Dest) {
+			return slog.String(a.Key, m.Addr(a.Value.String()))
+		}
+	case KeyAddrs:
+		if m.Dest {
+			return slog.Any(a.Key, m.addrs(a.Value))
+		}
+	case KeyErr:
+		return slog.String(a.Key, m.scrub(a.Value.String()))
 	}
 	return a
 }

@@ -72,6 +72,8 @@ type multiPlan struct {
 	mu        sync.Mutex
 	endpoints []netip.Addr // every target's: excluded from every route
 
+	domains atomic.Pointer[[]string] // every profile's DNS domains, for log masking (never under smu)
+
 	// smu guards what status reads while the engine's loop changes it
 	// (control: full): the per-profile slices (they grow when a profile is
 	// added), the specs' settings and dnsNames, and the engine status's
@@ -224,6 +226,7 @@ func planMulti(specs []*tunnelSpec) (*multiPlan, error) {
 			return nil, err
 		}
 	}
+	mp.noteDomains()
 	return mp, nil
 }
 
@@ -1329,6 +1332,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			mp.smu.Lock()
 			mp.dnsNames = ac.names
 			mp.smu.Unlock()
+			mp.noteDomains()
 		}
 		if c == nil { // the capture starts with them
 			mp.allowDNS, mp.blockIPv6, mp.ipv6Why = ac.allowDNS, ac.blockIPv6, ac.ipv6Why
@@ -1682,15 +1686,23 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 }
 
 // dnsDomains returns every profile's configured DNS domains (masked names
-// keep theirs), from any goroutine.
+// keep theirs), from any goroutine, without a lock: logging may happen
+// anywhere.
 func (mp *multiPlan) dnsDomains() []string {
-	mp.smu.RLock()
-	defer mp.smu.RUnlock()
+	if p := mp.domains.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// noteDomains records the DNS domains for dnsDomains; called by whoever
+// changes dnsNames.
+func (mp *multiPlan) noteDomains() {
 	var out []string
 	for _, n := range mp.dnsNames {
 		out = append(out, n.Domains...)
 	}
-	return out
+	mp.domains.Store(&out)
 }
 
 // nothingToCapture reports whether every profile with routes is stopped or

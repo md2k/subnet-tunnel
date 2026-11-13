@@ -307,6 +307,17 @@ func leftoversMarker() (string, error) {
 	return filepath.Join(dir, "firewall-rules-may-be-left"), nil
 }
 
+// oldLeftoversMarker is where versions before the nix-style directories
+// put the marker (~/Library/Caches/subtun/run): still honoured, so rules a
+// crashed earlier version left are taken over.
+func oldLeftoversMarker() string {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, "subtun", "run", "firewall-rules-may-be-left")
+}
+
 // MarkLeftovers notes that firewall rules may outlive this process.
 func MarkLeftovers() error {
 	p, err := leftoversMarker()
@@ -316,15 +327,23 @@ func MarkLeftovers() error {
 	return os.WriteFile(p, nil, 0o600)
 }
 
-// ClearLeftovers removes the note.
+// ClearLeftovers removes the note (and an earlier version's).
 func ClearLeftovers() {
 	if p, err := leftoversMarker(); err == nil {
+		_ = os.Remove(p)
+	}
+	if p := oldLeftoversMarker(); p != "" {
 		_ = os.Remove(p)
 	}
 }
 
 // LeftoversMarked reports whether an earlier session may have left rules.
 func LeftoversMarked() bool {
+	if p := oldLeftoversMarker(); p != "" {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
 	p, err := leftoversMarker()
 	if err != nil {
 		return false

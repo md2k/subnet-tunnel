@@ -278,7 +278,7 @@ Without a profile name, lists the profiles.`,
 				s.control = string(f.Control) // the config file's, for every run
 			}
 			if err := mergeLog(cmd.Flags(), &s.log, f.Log); err != nil {
-				return fmt.Errorf("%s: %w", path, err)
+				return err // the file's own log: was checked when loaded
 			}
 			if len(names) > 1 {
 				return upSeveral(cmd, g, f, path, names, args, s)
@@ -688,6 +688,7 @@ func singlePlan(sp *tunnelSpec, policy reconnectPolicy, rp *routePlan, dnsOpts *
 	if dnsOpts != nil {
 		mp.unrouted[0] = dnsOpts.Tunnels[0].Unrouted
 	}
+	mp.noteDomains()
 	return mp
 }
 

@@ -3,6 +3,7 @@ package logx
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"os"
@@ -44,6 +45,9 @@ func TestFilter(t *testing.T) {
 	conn.Warn("conn warn")
 	conn.With(ComponentKey, "dns").Debug("a later component wins")
 	out := b.String()
+	if n := strings.Count(out, "component=dns"); n != 2 || strings.Count(out, "component=") != 3 {
+		t.Errorf("one component per line, the latest:\n%s", out)
+	}
 	for _, want := range []string{"general info", "dns debug", "conn warn", "a later component wins"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in\n%s", want, out)
@@ -88,6 +92,20 @@ func TestMask(t *testing.T) {
 	if !strings.Contains(out, `"via":"tunnel"`) || !strings.Contains(out, ":443") {
 		t.Errorf("too much masked:\n%s", out)
 	}
+	// Errors repeat destinations; SOCKS destinations can be names.
+	b.Reset()
+	log.Info("connect failed", "dst", "db.svc.corp.example:5432", "err", "tunnel: dial 10.9.9.9:443: connect: connection refused; lookup api.github.com: no such host")
+	if out := b.String(); strings.Contains(out, "10.9.9.9") || strings.Contains(out, "api.github.com") || strings.Contains(out, `"dst":"db.`) ||
+		!strings.Contains(out, ".svc.corp.example:5432") || !strings.Contains(out, "connection refused") {
+		t.Errorf("errors and SOCKS names:\n%s", out)
+	}
+	dnsOnly := NewMasker(true, false, nil)
+	if got := dnsOnly.Replace(nil, slog.String("dst", "db.corp.example:5432")).Value.String(); strings.Contains(got, "db.") {
+		t.Errorf("a SOCKS name with dns masking: %q", got)
+	}
+	if got := dnsOnly.Replace(nil, slog.String("dst", "10.1.2.3:443")).Value.String(); got != "10.1.2.3:443" {
+		t.Errorf("an address with dns masking only: %q", got)
+	}
 	off := &Masker{}
 	if a := off.Replace(nil, slog.String("name", "x.example")); a.Value.String() != "x.example" {
 		t.Error("an inactive masker masked")
@@ -99,8 +117,8 @@ func TestMask(t *testing.T) {
 func TestFile(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
-	old := filepath.Join(dir, "subtun-20200101-000000-1.json")
-	recent := filepath.Join(dir, "subtun-20200102-000000-2.json")
+	old := filepath.Join(dir, "subtun-20200101-000000-7777777.json") // no such process
+	recent := filepath.Join(dir, "subtun-20200102-000000-7777778.json")
 	other := filepath.Join(dir, "notes.txt")
 	for _, p := range []string{old, recent, other} {
 		if err := os.WriteFile(p, []byte(strings.Repeat("x", 100)), 0o600); err != nil {
@@ -110,6 +128,16 @@ func TestFile(t *testing.T) {
 	_ = os.Chtimes(old, now.Add(-100*time.Hour), now.Add(-100*time.Hour))
 	_ = os.Chtimes(recent, now.Add(-time.Hour), now.Add(-time.Hour))
 
+	// Another running subtun's file (this test's own pid stands in for it,
+	// under another start time) and files not subtun's stay.
+	live := filepath.Join(dir, fmt.Sprintf("subtun-20200103-000000-%d.json", os.Getpid()))
+	mine := filepath.Join(dir, "subtun-notes.json")
+	for _, p := range []string{live, mine} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Chtimes(p, now.Add(-100*time.Hour), now.Add(-100*time.Hour))
+	}
 	f, err := OpenFile(FileOptions{Dir: dir, MaxSize: 64, MaxTotal: 250}, now)
 	if err != nil {
 		t.Fatal(err)
@@ -123,6 +151,9 @@ func TestFile(t *testing.T) {
 	}
 	if _, err := os.Stat(other); err != nil {
 		t.Error("a file not subtun's was removed")
+	}
+	if _, err := os.Stat(mine); err != nil {
+		t.Error("a file named like subtun's, not one, was removed")
 	}
 	first := f.Path()
 	if info, err := os.Stat(first); err != nil || info.Mode().Perm() != 0o600 {

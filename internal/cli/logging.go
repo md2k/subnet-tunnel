@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"slices"
 	"time"
 
@@ -37,6 +38,12 @@ type wordFlag config.Word
 
 func (w *wordFlag) String() string { return string(*w) }
 func (w *wordFlag) Set(s string) error {
+	switch s {
+	case "true":
+		s = "on"
+	case "false":
+		s = "off"
+	}
 	*w = wordFlag(s)
 	return nil
 }
@@ -137,9 +144,15 @@ func openLogFile(lc config.Log) (*logx.File, error) {
 	if lc.Format == "text" {
 		opts.Ext = "log"
 	}
-	if opts.Dir == "" {
+	if opts.Dir == "" { // the default directory is the user's only
 		d, err := xdg.LogDir()
 		if err != nil {
+			return nil, err
+		}
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.Chmod(d, 0o700); err != nil {
 			return nil, err
 		}
 		opts.Dir = d
