@@ -321,9 +321,11 @@ func TestStoppedProfile(t *testing.T) {
 	if !slices.Equal(active, []bool{false, false, true}) {
 		t.Errorf("active: %v", active)
 	}
-	if allStopped(mp, []tunnelState{stateStopped, stateStopped, stateStopped}) || !allStopped(multiPlanFor(t, "work", "dev"), []tunnelState{stateStopped, stateStopped}) ||
-		allStopped(mp, []tunnelState{stateStopped, stateUp, stateStopped}) {
-		t.Error("allStopped: the capture has something to do while a profile runs or holds lockdown")
+	two := multiPlanFor(t, "work", "dev") // kill switch on, off
+	if nothingToCapture(mp, []tunnelState{stateStopped, stateStopped, stateStopped}) || nothingToCapture(mp, []tunnelState{stateStopped, stateUp, stateStopped}) ||
+		!nothingToCapture(two, []tunnelState{stateStopped, stateStopped}) || !nothingToCapture(two, []tunnelState{stateStopped, stateGaveUp}) ||
+		nothingToCapture(two, []tunnelState{stateGaveUp, stateStopped}) || nothingToCapture(two, []tunnelState{stateStopped, stateConnecting}) {
+		t.Error("nothingToCapture: wrong while a profile runs, connects or holds its routes")
 	}
 	if !mp.dnsFlushNeeded(1, stateUp, stateStopped, true) || !mp.dnsFlushNeeded(0, stateUp, stateStopped, true) {
 		t.Error("a stopped profile's names go elsewhere: the cache must be flushed")

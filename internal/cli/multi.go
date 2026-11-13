@@ -1338,6 +1338,9 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 				}
 				lives[i].stopped.Store(false)
 				setState(i, stateConnecting, "")
+				if c == nil {
+					tried[i] = false // the capture waits for its first attempt again
+				}
 				startRunner(i, startRetry)
 				logs[i].Info("control: starting", "profile", sp.name, "reloaded", rl != nil)
 			case "reconnect":
@@ -1499,8 +1502,8 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			}
 		}
 		if c == nil {
-			if !mp.hasRoutes() || starting != nil || !roundOver && slices.Contains(tried, false) || allStopped(mp, states) {
-				continue // nothing to capture, starting, the first round isn't over, or everything stopped
+			if !mp.hasRoutes() || starting != nil || !roundOver && slices.Contains(tried, false) || nothingToCapture(mp, states) {
+				continue // nothing to capture, starting, or the first round isn't over
 			}
 			// Off this loop: sudo may ask for a while, and tunnels must
 			// keep reporting (and reconnecting) meanwhile.
@@ -1525,11 +1528,16 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	}
 }
 
-// allStopped reports whether every profile with routes is stopped, none in
-// lockdown: the capture would have nothing to do.
-func allStopped(mp *multiPlan, states []tunnelState) bool {
+// nothingToCapture reports whether every profile with routes is stopped or
+// gave up, none holding its routes (a kill switch): the capture would have
+// nothing to do until one starts again.
+func nothingToCapture(mp *multiPlan, states []tunnelState) bool {
 	for i, rp := range mp.rps {
-		if rp != nil && (states[i] != stateStopped || mp.ks[i] == "lockdown") {
+		switch {
+		case rp == nil:
+		case states[i] == stateStopped && mp.ks[i] != "lockdown":
+		case states[i] == stateGaveUp && mp.ks[i] == "off":
+		default:
 			return false
 		}
 	}
