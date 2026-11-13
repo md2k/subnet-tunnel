@@ -54,6 +54,7 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	if err != nil {
 		return nil, err
 	}
+	c.Host = k.cfg.Host
 	c.Endpoints = transport.ResolveEndpoint(ctx, k.cfg.Host)
 	c.Local = transport.IsLocal(k.cfg.Host, c.Endpoints)
 	return c, nil

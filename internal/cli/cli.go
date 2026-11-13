@@ -640,6 +640,11 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 	live.set(cur.client)
 	log.Info("tunnel up", "via", cur.carrier.Desc, "agent", cur.client.Agent().Version,
 		"took", time.Since(start).Round(time.Millisecond))
+	if dnsOpts != nil {
+		// Reconnecting must resolve the API server or Docker daemon while
+		// the tunnel is down.
+		dnsOpts.Match.SetOwn([]string{transport.HostName(cur.carrier.Host)})
+	}
 
 	errc := make(chan error, 1)
 	if s.dnsListen != "" && dnsOpts != nil {

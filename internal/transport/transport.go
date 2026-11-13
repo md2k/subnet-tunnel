@@ -54,6 +54,9 @@ type Carrier struct {
 	io.ReadWriteCloser
 	SHA256 string // checksum the agent must report in its hello
 	Desc   string // target and agent description
+	// Host is the endpoint as configured (the API server's URL, the Docker
+	// daemon's host); its name must resolve outside the tunnels.
+	Host string
 	// Endpoints are the addresses the carrier itself connects to (the API
 	// server, a remote Docker daemon). Routing them into the tunnel would
 	// cut the tunnel's own connection.
@@ -82,34 +85,50 @@ func IsLocal(raw string, addrs []netip.Addr) bool {
 	return true
 }
 
+// HostName returns the host part of a URL or host[:port]; "" for unix
+// sockets and named pipes.
+func HostName(raw string) string {
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		if u.Scheme == "unix" || u.Scheme == "npipe" {
+			return ""
+		}
+		return u.Hostname()
+	}
+	if strings.HasPrefix(raw, "unix://") || strings.HasPrefix(raw, "npipe://") {
+		return ""
+	}
+	if h, _, err := net.SplitHostPort(raw); err == nil {
+		return h
+	}
+	return raw
+}
+
 // ResolveEndpoint returns the IP addresses of a URL or host[:port]; nothing
 // for unix sockets or names that don't resolve.
 func ResolveEndpoint(ctx context.Context, raw string) []netip.Addr {
-	host := raw
-	if u, err := url.Parse(raw); err == nil && u.Host != "" {
-		if u.Scheme == "unix" || u.Scheme == "npipe" {
-			return nil
-		}
-		host = u.Hostname()
-	} else if h, _, err := net.SplitHostPort(raw); err == nil {
-		host = h
-	}
+	addrs, _ := LookupEndpoint(ctx, raw)
+	return addrs
+}
+
+// LookupEndpoint is ResolveEndpoint with the lookup's error.
+func LookupEndpoint(ctx context.Context, raw string) ([]netip.Addr, error) {
+	host := HostName(raw)
 	if host == "" {
-		return nil
+		return nil, nil
 	}
 	if a, err := netip.ParseAddr(host); err == nil {
-		return []netip.Addr{a.Unmap()}
+		return []netip.Addr{a.Unmap()}, nil
 	}
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	addrs, err := net.DefaultResolver.LookupNetIP(rctx, "ip", host)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	for i := range addrs {
 		addrs[i] = addrs[i].Unmap()
 	}
-	return addrs
+	return addrs, nil
 }
 
 // Agent kinds for Options.Agent.

@@ -252,3 +252,28 @@ func TestMultiMatcherConflicts(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// subtun's own endpoints never go through a tunnel, whatever matches them,
+// so a tunnel that is down can still reach its API server.
+func TestSetOwn(t *testing.T) {
+	m, err := NewMultiMatcher([]Names{{Domains: []string{"."}}, {Domains: []string{"eks.example.com"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetOwn([]string{"ABC.eks.example.com.", "api.dev.example.org", "192.0.2.1", ""})
+	if got := m.Own(); !slices.Equal(got, []string{"abc.eks.example.com", "api.dev.example.org"}) {
+		t.Fatalf("own: %q", got)
+	}
+	for name, want := range map[string]int{
+		"abc.eks.example.com": -1, "api.dev.example.org.": -1,
+		"xyz.eks.example.com": 1, "github.com": 0,
+	} {
+		got := -1
+		if tg, ok := m.Pick(name); ok {
+			got = tg
+		}
+		if got != want {
+			t.Errorf("%s: %d, want %d", name, got, want)
+		}
+	}
+}

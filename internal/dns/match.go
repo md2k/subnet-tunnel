@@ -19,6 +19,7 @@ type Matcher struct {
 	patterns []pattern
 	off      []atomic.Bool            // per target: switched off (its tunnel gave up)
 	local    atomic.Pointer[[]string] // suffixes "." leaves alone; see SetLocal
+	own      atomic.Pointer[[]string] // names never resolved through a tunnel; see SetOwn
 }
 
 type domain struct {
@@ -90,8 +91,27 @@ func NewMultiMatcher(sets []Names) (*Matcher, error) {
 		}
 	}
 	m.SetLocal(nil, nil)
+	m.SetOwn(nil)
 	return m, nil
 }
+
+// SetOwn sets names that never go through a tunnel, whatever matches them:
+// subtun's own endpoints (API servers, Docker daemons). They must resolve
+// while a tunnel is down, or that tunnel could never connect again.
+func (m *Matcher) SetOwn(names []string) {
+	list := []string{}
+	for _, n := range names {
+		n = normalize(strings.TrimSpace(n))
+		if _, err := netip.ParseAddr(n); err == nil || n == "" || slices.Contains(list, n) {
+			continue
+		}
+		list = append(list, n)
+	}
+	m.own.Store(&list)
+}
+
+// Own returns the names SetOwn keeps out of the tunnels.
+func (m *Matcher) Own() []string { return *m.own.Load() }
 
 // CatchAll reports whether "." is among the domains.
 func (m *Matcher) CatchAll() bool { return m.all >= 0 }
@@ -143,6 +163,9 @@ func (m *Matcher) Match(name string) bool {
 // Pick returns the target name goes to, if any.
 func (m *Matcher) Pick(name string) (target int, ok bool) {
 	name = normalize(name)
+	if slices.Contains(*m.own.Load(), name) {
+		return -1, false
+	}
 	best, bestLen := -1, -1
 	for _, d := range m.domains {
 		if len(d.name) > bestLen && m.on(d.target) && under(name, d.name) {
