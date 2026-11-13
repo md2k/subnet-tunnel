@@ -60,7 +60,7 @@ func TestReconnectLoop(t *testing.T) {
 		}
 		return ok, nil
 	}
-	s, err := reconnect(context.Background(), p, nil, try, log)
+	s, err := reconnect(context.Background(), p, nil, try, log, nil)
 	if err != nil || s != ok || calls != 3 {
 		t.Fatalf("got %v, %v after %d calls", s, err, calls)
 	}
@@ -68,7 +68,7 @@ func TestReconnectLoop(t *testing.T) {
 	// Never works: gives up after the attempts.
 	calls = 0
 	never := func(context.Context) (*session, error) { calls++; return nil, errors.New("gone") }
-	if _, err := reconnect(context.Background(), p, nil, never, log); err == nil || calls != 4 || !strings.Contains(err.Error(), "gave up after 4") {
+	if _, err := reconnect(context.Background(), p, nil, never, log, nil); err == nil || calls != 4 || !strings.Contains(err.Error(), "gave up after 4") {
 		t.Fatalf("got %v after %d calls", err, calls)
 	}
 
@@ -76,12 +76,12 @@ func TestReconnectLoop(t *testing.T) {
 	slow := reconnectPolicy{attempts: 4, delay: time.Hour, maxDelay: time.Hour}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := reconnect(ctx, slow, nil, never, log); !errors.Is(err, context.Canceled) {
+	if _, err := reconnect(ctx, slow, nil, never, log, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled: %v", err)
 	}
 	stop := make(chan struct{})
 	close(stop)
-	if _, err := reconnect(context.Background(), slow, stop, never, log); !errors.Is(err, errHelperGone) {
+	if _, err := reconnect(context.Background(), slow, stop, never, log, nil); !errors.Is(err, errHelperGone) {
 		t.Fatalf("helper gone: %v", err)
 	}
 }

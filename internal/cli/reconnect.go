@@ -119,12 +119,17 @@ func (p reconnectPolicy) wait(n int, jitter func() float64) time.Duration {
 var errHelperGone = errors.New("the root helper exited while reconnecting")
 
 // reconnect retries connecting by p, giving up early when ctx ends or stop
-// closes (the root helper went away).
-func reconnect(ctx context.Context, p reconnectPolicy, stop <-chan struct{}, try func(context.Context) (*session, error), log *slog.Logger) (*session, error) {
+// closes (the root helper went away). progress, if set, hears of each
+// attempt before its wait, with the previous attempt's error.
+func reconnect(ctx context.Context, p reconnectPolicy, stop <-chan struct{}, try func(context.Context) (*session, error), log *slog.Logger,
+	progress func(attempt int, next time.Time, err error)) (*session, error) {
 	var last error
 	for n := 1; n <= p.attempts; n++ {
 		w := p.wait(n, rand.Float64)
 		log.Info("reconnecting", "attempt", n, "of", p.attempts, "in", w.Round(10*time.Millisecond))
+		if progress != nil {
+			progress(n, time.Now().Add(w), last)
+		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
