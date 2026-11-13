@@ -642,6 +642,28 @@ func TestHelperAdoptedLeftoversGoWithASessionWithoutFirewall(t *testing.T) {
 	}
 }
 
+// The same for a session that only changes routes (several profiles, none
+// with firewall rules): the leftovers would otherwise block traffic even
+// through the new utun, and stay behind after a crash.
+func TestHelperAdoptedLeftoversGoWithASessionWithoutRules(t *testing.T) {
+	d := &fake.Drivers{Busy: true}
+	st := &memState{st: &state{Owner: 99, Token: "old", Persist: killSwitchReq("").Persist}}
+	c, done := startHelperOpts(t, context.Background(), d, helperOpts{state: st})
+	if r := call(t, c, Request{Op: OpAdopt}); !r.Kept {
+		t.Fatalf("adopt: %+v", r)
+	}
+	call(t, c, createReq)
+	if r := call(t, c, Request{Op: OpDone, Session: true}); !r.OK {
+		t.Fatalf("session done after adopting: %+v", r)
+	}
+	if st.get() != nil {
+		t.Fatal("state left behind")
+	}
+	_ = c.Close() // a crash: nothing to leave behind
+	wait(t, done)
+	checkCalls(t, d, "adopt old", "firewall guard - [10.0.0.0/8] ipv6", created, "flush", "release utun0")
+}
+
 // The DNS cache is flushed when the DNS redirect goes on and off: at the
 // start, so earlier answers don't bypass the capture, and at the end, so
 // answers obtained through the tunnel don't outlive it. Updates that keep

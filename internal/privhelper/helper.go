@@ -117,9 +117,10 @@ func (h *helper) deadline() time.Time {
 // session mode the helper stays up (end is false) to look after the
 // firewall rules.
 func (h *helper) finishSetup(session bool) (end bool, err error) {
-	if !session && h.firewall && h.adopted && !h.applied {
-		// Leftovers taken over by a session that needs no firewall rules:
-		// it replaces them with nothing.
+	if h.firewall && h.adopted && !h.applied {
+		// Leftovers taken over by a run that applied no firewall rules of
+		// its own (one-shot, or a session that only changes routes): it
+		// replaces them with nothing.
 		h.flushFirewall()
 	}
 	if h.firewall && !session {
