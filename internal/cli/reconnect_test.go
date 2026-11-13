@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -95,14 +94,6 @@ func TestLiveTunnelWithoutClient(t *testing.T) {
 	}
 	if _, err := l.ExchangeDNS(context.Background(), nil); !errors.Is(err, errReconnecting) {
 		t.Fatalf("dns: %v", err)
-	}
-}
-
-func TestRoutedEndpoints(t *testing.T) {
-	final := []netip.Prefix{netip.MustParsePrefix("0.0.0.0/1")}
-	got := routedEndpoints(final, []netip.Addr{netip.MustParseAddr("10.1.2.3"), netip.MustParseAddr("192.0.2.9")})
-	if !slices.Equal(got, []netip.Addr{netip.MustParseAddr("10.1.2.3")}) {
-		t.Fatalf("got %v", got)
 	}
 }
 

@@ -218,6 +218,10 @@ func (c *Capture) Update(prefixes []netip.Prefix, g Guard) error {
 	return errors.Join(errs...)
 }
 
+// Session reports whether the root helper stays up, so routes can change
+// (Update).
+func (c *Capture) Session() bool { return c.helper != nil }
+
 // Routes returns the routes on the utun.
 func (c *Capture) Routes() []netip.Prefix {
 	c.mu.Lock()

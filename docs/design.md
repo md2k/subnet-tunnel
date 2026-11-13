@@ -628,17 +628,13 @@ the config file (next to `defaults:` and `profiles:`).
 without a sudo prompt. The routes can only point into subtun's utun, and the helper validates each
 one, but the user should choose that.
 
-**One engine first.** A single profile and several profiles run through two different loops
-today, so status, counters and control would have to be built twice. Single-profile runs (`subtun
-up NAME`, `subtun k8s`, `subtun docker`) move onto the several-profile engine with one profile and
-keep their behaviour:
+**One engine** (done first). Single-profile runs (`subtun up NAME`, `subtun k8s`, `subtun
+docker`) run on the several-profile engine with one profile, so status, counters and control are
+built once. They keep their behaviour:
 - connect, then sudo;
 - a first connection that fails exits at once;
 - a one-shot helper unless firewall rules or `control: full` need a session;
 - giving up exits.
-
-This is a refactor without behaviour changes, root-tested again on the test machine before
-anything builds on it.
 
 **Built on it later** (not part of this):
 - `dns.unrouted: tunnel` and `auto`;

@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -25,11 +26,9 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/dns"
 	"github.com/md2k/subnet-tunnel/internal/privhelper"
 	"github.com/md2k/subnet-tunnel/internal/routes"
-	"github.com/md2k/subnet-tunnel/internal/socks"
 	"github.com/md2k/subnet-tunnel/internal/transport"
 	"github.com/md2k/subnet-tunnel/internal/transport/docker"
 	"github.com/md2k/subnet-tunnel/internal/transport/k8s"
-	"github.com/md2k/subnet-tunnel/internal/tunnel"
 	"github.com/md2k/subnet-tunnel/internal/version"
 )
 
@@ -501,8 +500,10 @@ func printPlan(w io.Writer, rp *routePlan, warns []string) {
 		rp.opts.TunAddr, rp.opts.MTU)
 }
 
+// run runs one profile (subtun up NAME, subtun k8s, subtun docker): it plans
+// and checks everything before connecting, prints the plan with --dry-run,
+// and otherwise runs it on the same engine as several profiles.
 func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect connectFunc) error {
-	log := newLogger(g.verbose)
 	if s.socks == "" && len(s.routes) == 0 && s.dnsListen == "" {
 		return errors.New("nothing to do: give CIDRs to capture, --socks ADDR, or both")
 	}
@@ -558,260 +559,37 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 	if err != nil {
 		return err
 	}
-	// From here on, including the sudo prompt and connecting.
-	ctx, done := withMaxDuration(ctx, s.maxDuration, log)
-	defer done() // last: the watchdog covers stopping
-	if rp != nil {
-		for _, n := range rp.plan.Redundant {
-			log.Info("route rule dropped", "rule", n.String())
-		}
-	}
-	for _, wn := range warns {
-		log.Warn(wn)
-	}
-
-	agents, err := loadAgents(s.agentFile)
-	if err != nil {
-		return err
-	}
-
-	// Listen before connecting, so a busy port fails fast.
-	var ln net.Listener
-	if s.socks != "" {
-		ln, err = net.Listen("tcp", s.socks)
-		if err != nil {
-			return fmt.Errorf("SOCKS listener: %w", err)
-		}
-		defer ln.Close()
-		if host, _, _ := net.SplitHostPort(s.socks); !isLoopback(host) {
-			log.Warn("SOCKS proxy is reachable from other hosts and has no authentication", "addr", ln.Addr())
-		}
-	}
-
-	// Rules an earlier session may have left (kill switch, a killed helper)
-	// can block DNS, which connecting needs: take them over first.
-	var early *privhelper.Client
-	marker := &leftovers{mark: privhelper.MarkLeftovers, clear: privhelper.ClearLeftovers}
-	if privhelper.LeftoversMarked() {
-		if rp == nil {
-			log.Warn("firewall rules from another subtun session may be in place; if networking misbehaves and none is running, run: subtun cleanup")
-		} else {
-			log.Info("firewall rules from another subtun session may be in place; checking with the root helper before connecting")
-			if early, err = privhelper.Start(ctx, &transport.LineLog{Log: log, Prefix: "helper: "}, log); err != nil {
-				return startErr(ctx, err)
-			}
-			res, err := early.Adopt()
-			if err != nil {
-				_ = early.Close()
-				return fmt.Errorf("taking over firewall rules: %w", err)
-			}
-			log.Info(res.Message)
-			marker.adopted(res)
-			// Until capture takes it, closing it puts the rules back.
-			defer func() {
-				if early != nil {
-					_ = early.Close()
-				}
-			}()
-		}
-	}
-
-	// One connection to the agent; the first one, and each reconnect.
-	try := func(ctx context.Context) (*session, error) {
-		carrier, err := connect(ctx, agents, log)
-		if err != nil {
-			return nil, err
-		}
-		hctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		client, err := tunnel.NewClient(hctx, carrier, tunnel.Options{ExpectSHA256: carrier.SHA256, Logger: log})
-		cancel()
-		if err != nil { // NewClient closed the carrier
-			return nil, fmt.Errorf("starting agent in %s: %w", carrier.Desc, err)
-		}
-		return &session{carrier: carrier, client: client}, nil
-	}
-	start := time.Now()
-	cur, err := try(ctx)
-	if err != nil {
-		return startErr(ctx, err)
-	}
-	defer func() { cur.close() }()
-	live := &liveTunnel{}
-	live.set(cur.client)
-	log.Info("tunnel up", "via", cur.carrier.Desc, "agent", cur.client.Agent().Version,
-		"took", time.Since(start).Round(time.Millisecond))
-	if dnsOpts != nil {
-		// Reconnecting must resolve the API server or Docker daemon while
-		// the tunnel is down.
-		dnsOpts.Match.SetOwn([]string{transport.HostName(cur.carrier.Host)})
-	}
-
-	errc := make(chan error, 1)
-	if s.dnsListen != "" && dnsOpts != nil {
-		dnsOpts.Tunnels[0].Upstream = dns.UpstreamFunc(live.ExchangeDNS)
-		if rp != nil {
-			dnsOpts.Tunnels[0].Unreachable = unreachable(rp.plan.Routes)
-		}
-		stopDNS, err := serveDNSDev(ctx, s.dnsListen, dnsOpts, log)
-		if err != nil {
-			return err
-		}
-		defer stopDNS()
-		dnsOpts = nil // not captured
-	}
-	if ln != nil {
-		srv := &socks.Server{Dialer: live, Logger: log}
-		go func() { errc <- srv.Serve(ctx, ln) }()
-		log.Info("SOCKS5 proxy ready", "addr", ln.Addr().String())
-	}
-
-	var helperExited <-chan struct{}
-	var final []netip.Prefix
-	deliberate := false // the user stopped subtun (signal), as opposed to a failure
-	if rp != nil {
-		final, err = excludeEndpoints(rp, cur.carrier.Endpoints, log)
-		if err != nil {
-			return err
-		}
-		if cur.carrier.Local && routesInternet(final) {
-			log.Warn(localLoopWarning)
-		}
-		opts := rp.opts
-		if dnsOpts != nil {
-			dnsOpts.Tunnels[0].Upstream = dns.UpstreamFunc(live.ExchangeDNS)
-			dnsOpts.Tunnels[0].Unreachable = unreachable(final)
-			opts.DNS = dnsOpts
-		}
-		opts.KillSwitch, opts.AllowDNS, opts.BlockIPv6 = gp.killSwitch, gp.allowDNS, gp.blockIPv6
-		if opts.BlockIPv6 {
-			if a, ok := ipv6Endpoint(cur.carrier.Endpoints); ok {
-				log.Warn("not blocking IPv6: subtun's own connection may use it", "endpoint", a)
-				opts.BlockIPv6, gp.blockIPv6 = false, false
-			}
-		}
-		if gp.on() {
-			guarded, err := guardPrefixes(final, localPrefixes())
-			if err != nil {
-				return err
-			}
-			if len(guarded) == 0 {
-				log.Warn("kill switch has nothing to guard: every route is a local network")
-			}
-			opts.Guard = capture.Guard{Base: final}
-			if gp.killSwitch == "lockdown" {
-				opts.Guard.Lockdown = final
-			}
-			opts.Locals = localPrefixes
-		}
-		opts.Helper, early = early, nil
-		if opts.DNS != nil || gp.on() || gp.blockIPv6 {
-			// Firewall rules may outlive this process; the next run looks.
-			marker.firewall()
-		}
-		c, err := capture.Start(ctx, final, opts, live, log)
-		if err != nil {
-			marker.startFailed()
-			return startErr(ctx, fmt.Errorf("utun capture: %w", err))
-		}
-		// Stopped before the tunnel (deferred above): firewall rules and
-		// routes go first.
-		defer func() {
-			leftBehind := c.Stop(deliberate)
-			marker.stopped(leftBehind)
-			if leftBehind {
-				log.Warn("kill switch: blocking rules stay in place; the next subtun run takes them over, or remove them with: subtun cleanup")
-			}
-		}()
-		helperExited = c.HelperExited()
-	}
-
-	// helperGone decides what the root helper exiting means: Ctrl-C reaches
-	// it too, which is a normal shutdown.
-	helperGone := func() error {
-		select {
-		case <-ctx.Done():
-			deliberate = true
-			logShutdown(ctx, log)
-			return nil
-		case <-time.After(300 * time.Millisecond):
-		}
-		return errors.New("the root helper exited unexpectedly; its firewall rules may still be in place: the next subtun run takes them over, or remove them with: subtun cleanup")
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			deliberate = true
-			logShutdown(ctx, log)
-			return nil
-		case <-cur.client.Done():
-			if policy.attempts == 0 {
-				return errors.New("connection to the agent was lost")
-			}
-			// Routes, firewall rules and listeners stay; new connections and
-			// DNS fail at once meanwhile.
-			live.set(nil)
-			cur.close()
-			lost := time.Now()
-			log.Warn("connection to the agent lost; reconnecting", "policy", policy.String())
-			next, err := reconnect(ctx, policy, helperExited, try, log)
-			switch {
-			case err == nil:
-			case ctx.Err() != nil:
-				deliberate = true
-				logShutdown(ctx, log)
-				return nil
-			case errors.Is(err, errHelperGone):
-				return helperGone()
-			default:
-				return fmt.Errorf("connection to the agent was lost; %w", err)
-			}
-			cur = next
-			if hit := routedEndpoints(final, cur.carrier.Endpoints); len(hit) > 0 {
-				log.Warn("after reconnecting, subtun's own connection goes to an address the routes cover, which may cut it; restart subtun to exclude it", "addrs", hit)
-			}
-			live.set(cur.client)
-			log.Info("reconnected", "via", cur.carrier.Desc, "after", time.Since(lost).Round(100*time.Millisecond))
-		case err := <-errc:
-			if ctx.Err() != nil { // Ctrl-C closed the listener
-				deliberate = true
-				logShutdown(ctx, log)
-				return nil
-			}
-			return fmt.Errorf("SOCKS listener: %w", err)
-		case <-helperExited:
-			return helperGone()
-		}
-	}
+	mp := singlePlan(s, connect, policy, rp, dnsOpts, gp, warns)
+	return runEngine(ctx, g, mp, engineOpts{single: true, maxDuration: s.maxDuration, agentFile: s.agentFile, dnsListen: s.dnsListen})
 }
 
-// excludeEndpoints carves the carrier's own addresses (API server, Docker
-// daemon) out of the routes, so capture can't cut the tunnel.
-func excludeEndpoints(rp *routePlan, endpoints []netip.Addr, log *slog.Logger) ([]netip.Prefix, error) {
-	auto := routes.HostPrefixes(endpoints)
-	var hit []netip.Prefix
-	for _, p := range auto {
-		if _, ok := rp.plan.Routed(p.Addr()); ok {
-			hit = append(hit, p)
-		}
+// singlePlan turns one profile's checked plan into the engine's plan.
+func singlePlan(s settings, connect connectFunc, policy reconnectPolicy, rp *routePlan, dnsOpts *capture.DNSOptions, gp *guardPlan, warns []string) *multiPlan {
+	mp := &multiPlan{
+		specs:    []*tunnelSpec{{s: s, connect: connect}},
+		policies: []reconnectPolicy{policy},
+		ks:       []string{"off"},
+		rps:      []*routePlan{rp},
+		hosts:    []string{""}, // known once connected: excluded then, as always
+		finals:   make([]atomic.Pointer[[]netip.Prefix], 1),
+		dnsNames: []dns.Names{{Domains: s.dnsDomains, Patterns: s.dnsPatterns}},
+		unrouted: []string{""},
+		dns:      dnsOpts,
+		warns:    warns,
 	}
-	if len(hit) == 0 {
-		return rp.plan.Routes, nil
+	if rp != nil {
+		final := rp.plan.Routes
+		mp.finals[0].Store(&final)
+		mp.tunAddr, mp.mtu = rp.opts.TunAddr, rp.opts.MTU
 	}
-	final, err := routes.Compute(rp.includes, append(append([]netip.Prefix{}, rp.excludes...), hit...))
-	if err != nil {
-		return nil, err
+	if gp != nil {
+		mp.ks[0], mp.allowDNS = gp.killSwitch, gp.allowDNS && gp.on()
+		mp.blockIPv6, mp.ipv6Why = gp.blockIPv6, gp.ipv6Why
 	}
-	for _, p := range hit {
-		log.Info("excluded from routes: subtun's own connection goes there", "addr", p.Addr())
+	if dnsOpts != nil {
+		mp.unrouted[0] = dnsOpts.Tunnels[0].Unrouted
 	}
-	reserved := make([]routes.Reserved, len(endpoints))
-	for i, a := range endpoints {
-		reserved[i] = routes.Reserved{Addr: a, What: "subtun's own endpoint"}
-	}
-	if errs, _ := routes.Check(final, reserved, nil); len(errs) > 0 {
-		return nil, errors.New(strings.Join(errs, "; "))
-	}
-	return final.Routes, nil
+	return mp
 }
 
 // ipv6Endpoint finds an IPv6 address subtun itself connects to (API
