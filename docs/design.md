@@ -612,9 +612,11 @@ subtun dns add|del [--profile P] DOMAIN...     # a profile's DNS domains
 subtun profile reconnect|stop|start NAME       # start: from the config file, next to the others
 ```
 
-Changes last until subtun stops; nothing is written back to the config file.
+Changes are temporary: they last until subtun stops, and nothing is written back to the config
+file (saving them is a possible later feature).
 
-**Setting** (`control` / `--control`, run-wide, like `tun.address`):
+**Setting:** global for the run, never per profile: `--control`, or a top-level `control:` key in
+the config file (next to `defaults:` and `profiles:`).
 
 | Mode | What | Root |
 |---|---|---|
