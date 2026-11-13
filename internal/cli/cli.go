@@ -590,6 +590,7 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 			if len(opts.Guarded) == 0 {
 				log.Warn("kill switch has nothing to guard: every route is a local network")
 			}
+			opts.Locals = localPrefixes
 		}
 		opts.Helper, early = early, nil
 		if opts.DNS != nil || gp.on() || gp.blockIPv6 {

@@ -238,7 +238,9 @@ way. The kill switch blocks it with firewall rules.
 What is guarded: your routes minus local networks more specific than them. Your LAN inside a full
 tunnel stays reachable, as it does through the routing table, and a VPN client's own network stays
 with that client. A route more specific than such a network (a CGNAT /24 inside a VPN client's
-/16) stays guarded, since without subtun it would fall back to that network. subtun's own
+/16) stays guarded, since without subtun it would fall back to that network. The guard follows the
+machine's networks while subtun runs: join another Wi-Fi with another subnet and, within about 5
+seconds, that LAN (router, DHCP) is left out and the previous one guarded again. subtun's own
 connection to the API server or Docker daemon is never blocked. With `--dry-run`, subtun shows how
 many prefixes it would guard.
 

@@ -390,7 +390,9 @@ Configuration: [Kill switch](config.md#kill-switch), [IPv6](config.md#ipv6).
   globally (`defaults`) and per profile, since which one is right depends on the use case.
 - **Guarded prefixes** are computed with the route planner: the routes minus local interface
   networks that are more specific (most specific wins, as in the routing table). The LAN in a full
-  tunnel stays reachable; a route more specific than a VPN client's network stays guarded.
+  tunnel stays reachable; a route more specific than a VPN client's network stays guarded. They
+  follow the machine's networks: checked every 5 s, and when they change the whole rule set
+  (running and kept) is sent again, so another Wi-Fi's LAN, router and DHCP aren't blocked.
 - **DNS while blocked** (`killSwitch.dns`): pf can't block by name, so the choice is all DNS to the
   captured servers (`block`, default: no name leaks, and no private-link name resolving to a public
   endpoint) or none (`allow`). The blocking rule replaces the redirect, rather than leaving a
@@ -435,10 +437,11 @@ captured. What stays behind has no `pass` rule and blocks DNS with
 
 ## Open questions
 
-- **Guarded prefixes don't follow network changes:** they are computed at start, minus the local
-  networks of that moment. After switching to a network with another subnet, a full-tunnel kill
-  switch would block the new LAN (router, DHCP) and with it the tunnel's own path. They need
-  recomputing on network changes, like the DNS servers.
+- **Routes don't follow network changes** (the kill switch's guard does: it's recomputed when the
+  local networks change, every 5 s). The automatic excludes for local networks are computed at
+  start: after joining another network, the old LAN's range stays outside the tunnel, and an
+  exclude that splits the routes inside the new LAN would put parts of it into the tunnel. Needs
+  runtime route changes in the session helper.
 - **Reconnecting:** when the carrier drops (pod restarted, laptop asleep, network change), subtun
   exits. It should reconnect, with the kill switch holding the blocks meanwhile.
 - **Targets with neither a shell nor Python** (distroless static, scratch): an ephemeral debug
