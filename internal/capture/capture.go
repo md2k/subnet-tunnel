@@ -161,7 +161,7 @@ func Start(ctx context.Context, prefixes []netip.Prefix, opts Options, dialer ne
 		}
 		return nil, err
 	}
-	st, err := netstack.New(dev, dialer, netstack.Options{Logger: log})
+	st, err := netstack.New(dev, dialer, netstack.Options{Logger: log, TunAddr: opts.TunAddr})
 	if err != nil {
 		_ = dev.Close()
 		if session {

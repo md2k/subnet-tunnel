@@ -77,6 +77,16 @@ func (f fakeTunnel) DialContext(_ context.Context, _, addr string) (net.Conn, er
 // packets go through our capture Stack and on to the fake tunnel.
 func setup(t *testing.T, handlers map[string]func(net.Conn)) *stack.Stack {
 	t.Helper()
+	return setupWith(t, handlers, Options{DialTimeout: 5 * time.Second})
+}
+
+func setupWith(t *testing.T, handlers map[string]func(net.Conn), opts Options) *stack.Stack {
+	t.Helper()
+	return setupDialer(t, fakeTunnel{handlers}, opts)
+}
+
+func setupDialer(t *testing.T, dialer Dialer, opts Options) *stack.Stack {
+	t.Helper()
 	client := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol},
@@ -111,7 +121,7 @@ func setup(t *testing.T, handlers map[string]func(net.Conn)) *stack.Stack {
 		}
 	}()
 
-	st, err := New(dev, fakeTunnel{handlers}, Options{DialTimeout: 5 * time.Second})
+	st, err := New(dev, dialer, opts)
 	if err != nil {
 		t.Fatal(err)
 	}

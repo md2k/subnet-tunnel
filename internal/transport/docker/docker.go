@@ -56,6 +56,7 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 		return nil, err
 	}
 	carrier.Endpoints = transport.ResolveEndpoint(ctx, cli.DaemonHost())
+	carrier.Local = transport.IsLocal(cli.DaemonHost(), carrier.Endpoints)
 	return carrier, nil
 }
 

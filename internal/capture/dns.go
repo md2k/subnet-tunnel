@@ -95,13 +95,27 @@ func (r *dnsRuntime) redirect() *platform.DNSRedirect {
 }
 
 func (r *dnsRuntime) logReady(log *slog.Logger) {
-	log.Info("DNS capture ready", "servers", *r.servers.Load(), "fallback", r.fallback(), "following_system", r.opts.Auto)
+	attrs := []any{"servers", *r.servers.Load(), "fallback", r.fallback(), "following_system", r.opts.Auto}
+	if r.opts.Match.CatchAll() {
+		attrs = append(attrs, "stay_local", r.opts.Match.Local())
+	}
+	log.Info("DNS capture ready", attrs...)
 }
 
 // follow re-points the capture when the system's DNS servers change
 // (network switch, VPN up or down): apply re-sends the firewall rules.
 func (r *dnsRuntime) follow(ctx context.Context, interval time.Duration, log *slog.Logger, apply func() error) {
-	read := func() ([]netip.Addr, []string, error) { return dns.SystemServers(dns.ResolvConf) }
+	read := func() ([]netip.Addr, []string, error) {
+		servers, notes, err := dns.SystemServers(dns.ResolvConf)
+		// The search domains change with the network too; skip the moments
+		// mid-change when the file is empty.
+		if err == nil && len(servers) > 0 && r.opts.Match.CatchAll() {
+			if search, err := dns.SearchDomains(dns.ResolvConf); err == nil && r.opts.Match.SetLocal(search) {
+				log.Info("DNS search domains changed; names under them stay local", "stay_local", r.opts.Match.Local())
+			}
+		}
+		return servers, notes, err
+	}
 	dns.WatchServers(ctx, interval, *r.servers.Load(), read, func(servers []netip.Addr, notes []string) {
 		r.servers.Store(&servers)
 		for _, n := range notes {

@@ -77,3 +77,49 @@ nameserver 1.1.1.1
 		t.Fatalf("notes %q", notes)
 	}
 }
+
+// "." leaves local names alone: multicast DNS (.local) and the system's
+// search domains. Listed domains and patterns still win.
+func TestMatcherCatchAllLeavesLocal(t *testing.T) {
+	m, err := NewMatcher([]string{".", "cluster.local"}, []string{`^db\.lan$`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.CatchAll() {
+		t.Fatal("not a catch-all")
+	}
+	if !m.SetLocal([]string{"lan", "Home.Arpa.", "lan", "."}) || m.SetLocal([]string{"lan", "home.arpa"}) {
+		t.Fatal("SetLocal change reporting wrong")
+	}
+	if got := m.Local(); !slices.Equal(got, []string{"local", "lan", "home.arpa"}) {
+		t.Fatalf("local %v", got)
+	}
+	for name, want := range map[string]bool{
+		"example.com":                          true,
+		"printer.local":                        false,
+		"local":                                false,
+		"kubernetes.default.svc.cluster.local": true, // listed
+		"nas.lan":                              false,
+		"NAS.LAN.":                             false,
+		"db.lan":                               true, // pattern
+		"router.home.arpa":                     false,
+		"planet.com":                           true, // "lan" is a label suffix, not a string suffix
+	} {
+		if got := m.Match(name); got != want {
+			t.Errorf("Match(%q) = %v, want %v", name, got, want)
+		}
+	}
+	// Without ".", local names only go through the tunnel if listed.
+	split, _ := NewMatcher([]string{"corp.example"}, nil)
+	split.SetLocal([]string{"corp.example"})
+	if !split.Match("git.corp.example") || split.Match("printer.local") {
+		t.Fatal("split matcher")
+	}
+}
+
+func TestParseSearch(t *testing.T) {
+	got := parseSearch([]byte("# generated\ndomain lan\nsearch lan home.arpa\nnameserver 192.168.1.1\n"))
+	if !slices.Equal(got, []string{"lan", "home.arpa"}) {
+		t.Fatalf("got %v", got)
+	}
+}

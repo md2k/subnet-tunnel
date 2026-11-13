@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -218,5 +219,28 @@ func TestNoAgentCanRun(t *testing.T) {
 				t.Fatal("uploaded or started despite the error")
 			}
 		})
+	}
+}
+
+func TestIsLocal(t *testing.T) {
+	lo, lo6, pub := netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("::1"), netip.MustParseAddr("203.0.113.10")
+	cases := []struct {
+		raw   string
+		addrs []netip.Addr
+		want  bool
+	}{
+		{"unix:///Users/me/.docker/run/docker.sock", nil, true},
+		{"npipe:////./pipe/docker_engine", nil, true},
+		{"https://kubernetes.docker.internal:6443", []netip.Addr{lo}, true},
+		{"https://localhost:6443", []netip.Addr{lo, lo6}, true},
+		{"https://k8s.example.net", []netip.Addr{pub}, false},
+		{"https://k8s.example.net", []netip.Addr{lo, pub}, false},
+		{"tcp://203.0.113.10:2376", []netip.Addr{pub}, false},
+		{"https://unresolvable.invalid", nil, false},
+	}
+	for _, c := range cases {
+		if got := IsLocal(c.raw, c.addrs); got != c.want {
+			t.Errorf("IsLocal(%q, %v) = %v, want %v", c.raw, c.addrs, got, c.want)
+		}
 	}
 }

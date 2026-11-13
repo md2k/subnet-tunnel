@@ -116,10 +116,32 @@ app ──► SOCKS5 proxy  ───┘   smux streams    exec stdio   in the t
 - **Routes** (`internal/routes`). Routes and excludes combine like sshuttle's: for any address the
   most specific rule decides. Excludes are carved out of the routes rather than installed via the
   normal gateway, so every route stays on the utun and disappears with it. Redundant rules are
-  dropped and reported, siblings merged. Before connecting, routes covering subtun's utun address
-  or the default gateway are refused and overlaps with local interface networks are reported. At
+  dropped and reported, siblings merged. Ranges that never belong in the tunnel (0/8, loopback,
+  link-local, multicast/reserved/broadcast) and the machine's own networks are excluded
+  automatically where a broader route contains them. So the LAN stays on its interface even when
+  an exclude inside it (the API server) splits the routes into pieces more specific than the LAN's
+  route, and no piece starts at a multicast address, which the helper would refuse. The kill
+  switch guards the final routes, so it never blocks DHCP, Bonjour or link-local either. Before
+  connecting, routes covering subtun's utun address or the default gateway are refused and
+  overlaps with local interface networks are reported. At
   connect time the API server or Docker daemon address is excluded automatically. Details:
   [Configuration](config.md).
+- **Routing loops.** A target on this machine (Docker Desktop, kind, minikube) reaches the internet
+  through this machine. Route internet addresses through it, and its connections come back into the
+  tunnel, to the target again, without end.
+  - The stack caps the connections to one destination (address and port): 64 still opening at
+    once, which catches a proxy that connects onward before accepting (Docker Desktop's: measured
+    on the test Mac, cut in 0.4 s), and 256 open at once, for one that accepts first.
+  - A destination that hits a cap is refused for 10 s, so the chain unwinds and retries don't build
+    a new one. One warning per destination a minute; the failures of an unwinding loop, and repeats
+    of any failed connect, are logged at debug level.
+  - Normal clients stay far below both caps. Clients that open and close many connections in a row
+    don't add up, since only concurrent connections count.
+  - The global limit on connections opening at once is 4096, so a full tunnel looping through a
+    local target (dozens of destinations at once) doesn't starve the destinations that work.
+  - subtun also warns at start when its own connection goes to this machine (a unix socket or
+    loopback) and the routes include internet addresses.
+  - So a full tunnel needs a target outside this machine.
 
 - **Agents.** Two implementations of the same protocol; `--agent auto` uses the first that can run.
   - *Binary:* a static Linux Go binary (`cmd/subtun-agent`, ~3.5 MB) embedded in subtun for amd64
@@ -291,7 +313,9 @@ dns:
   the first question's name. Matches go through the tunnel as a new request type (`CmdDNS`): the
   agent passes the raw message to the resolver in the target's `/etc/resolv.conf`, UDP first and
   TCP if the answer is truncated, and returns the answer unchanged, so every record type works.
-  Both agents implement it. The rest goes to the fallback. Errors become SERVFAIL; an answer larger
+  Both agents implement it. The rest goes to the fallback. With `.` (every name), names under
+  `local` and the system's search domains still go to the fallback unless listed: the target's
+  resolver can't answer them, and in request 004 each `.local` query cost a 10 s timeout there. Errors become SERVFAIL; an answer larger
   than a UDP client accepts (512 bytes, or its EDNS0 size) is replaced by an empty truncated one, so
   the client retries over TCP, which is captured too.
 - **Fallback without loops.** The fallback is usually one of the captured servers, so its queries
@@ -300,6 +324,13 @@ dns:
   reset to avoid TIME_WAIT). Each forwarded query gets a fresh ID, and answers from other
   addresses are ignored. (The sshuttle pattern patch set `IP_TTL 42` on its forwarder, but its pf
   rules never check the TTL, so on macOS a `--dns-to` that was also a system server looped.)
+- **Answers to queries that went into the utun.** When the DNS server lies inside the routes (a full
+  tunnel with a server beyond the LAN, or a corporate DNS server inside a routed range), the app's
+  query leaves from the utun's address. pf still redirects it to subtun, but macOS sends subtun's
+  answer to that address out of the utun, since the address is also the point-to-point peer. The
+  stack hands packets for the utun's own address straight back to the system, so the answer
+  reaches the app. Fallback queries to such a server still fail: they are UDP into the utun, which
+  carries TCP only so far.
 - **How queries reach it** is a driver choice:
 
 | `capture` | Mechanism | Notes |
@@ -337,7 +368,9 @@ Configuration: [Kill switch](config.md#kill-switch), [IPv6](config.md#ipv6).
 
 - **Full tunnel** works through route planning: route `0.0.0.0/1` and `128.0.0.0/1`. The real
   default route stays untouched, the LAN stays local and subtun's own connection is excluded. DNS
-  follows with `dns.domains: ["."]`.
+  follows with `dns.domains: ["."]`. The target must be outside this machine (see
+  [Routing loops](#architecture)), and UDP and ICMP to the internet don't pass, since the utun
+  carries TCP only so far.
 - **Kill switch** (`killSwitch.mode: on | lockdown`): if subtun dies, its routes vanish with the
   utun, and that traffic would fall back to the normal default route: a leak. pf rules allow traffic
   to the guarded prefixes only through subtun's utun, and when the tunnel goes away, block rules
@@ -391,9 +424,6 @@ captured. What stays behind has no `pass` rule and blocks DNS with
 
 ## Open questions
 
-- **Kill switch in a full tunnel guards broadcast, multicast and link-local** (255.255.255.255,
-  224.0.0.0/4, 169.254.0.0/16), so DHCP and Bonjour would be blocked; they should always be left out
-  of the guarded prefixes.
 - **Guarded prefixes don't follow network changes:** they are computed at start, minus the local
   networks of that moment. After switching to a network with another subnet, a full-tunnel kill
   switch would block the new LAN (router, DHCP) and with it the tunnel's own path. They need
@@ -413,6 +443,10 @@ captured. What stays behind has no `pass` rule and blocks DNS with
 - **A helper killed with SIGKILL** leaves its running rules, including the DNS redirect to subtun's
   listener port. Until the next session takes them over or `subtun cleanup` runs, a local process
   could bind that port and answer the Mac's DNS queries.
+- **Loop guard limits:** the caps (64 opening, 256 open per destination) aren't configurable. A
+  client opening more connections to one address and port at once would be refused for 10 s. Targets in a VM on a bridge
+  network (an address on a local network rather than loopback) don't trigger the start warning;
+  only the cap catches their loops.
 - **IPv6 DNS servers** are not captured yet (IPv4 only, like sshuttle with `--disable-ipv6`).
 - **UDP through the tunnel:** a fallback resolver inside a routed CIDR fails, because the utun
   carries TCP only so far.

@@ -58,6 +58,28 @@ type Carrier struct {
 	// server, a remote Docker daemon). Routing them into the tunnel would
 	// cut the tunnel's own connection.
 	Endpoints []netip.Addr
+	// Local means the carrier connects to this machine (a unix socket or
+	// loopback): the target probably runs here, in a VM whose traffic
+	// leaves through this machine (Docker Desktop, kind, minikube).
+	Local bool
+}
+
+// IsLocal reports whether raw (a URL or host[:port]) with its resolved
+// addresses points at this machine: a unix socket or named pipe, or only
+// loopback addresses.
+func IsLocal(raw string, addrs []netip.Addr) bool {
+	if u, err := url.Parse(raw); err == nil && (u.Scheme == "unix" || u.Scheme == "npipe") {
+		return true
+	}
+	if len(addrs) == 0 {
+		return false
+	}
+	for _, a := range addrs {
+		if !a.IsLoopback() {
+			return false
+		}
+	}
+	return true
 }
 
 // ResolveEndpoint returns the IP addresses of a URL or host[:port]; nothing

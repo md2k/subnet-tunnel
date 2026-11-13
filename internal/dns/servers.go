@@ -53,6 +53,32 @@ func parseResolvConf(data []byte) ([]netip.Addr, []string) {
 	return servers, notes
 }
 
+// SearchDomains returns the search domains in a resolv.conf ("search" and
+// "domain" lines).
+func SearchDomains(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return parseSearch(data), nil
+}
+
+func parseSearch(data []byte) []string {
+	var out []string
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
+		if len(f) >= 2 && (f[0] == "search" || f[0] == "domain") {
+			for _, d := range f[1:] {
+				if !slices.Contains(out, d) {
+					out = append(out, d)
+				}
+			}
+		}
+	}
+	return out
+}
+
 // WatchServers calls fn with the system's DNS servers whenever they change
 // (network switch, VPN up or down), reading them with read every interval.
 // It doesn't call fn for the servers already in effect at the start

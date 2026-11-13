@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
 	"sync"
 	"time"
@@ -59,12 +60,22 @@ type Dialer interface {
 type Options struct {
 	Logger      *slog.Logger  // nil: discard
 	DialTimeout time.Duration // 0: 15s
+	// TunAddr is the device's own address. Packets the system sends to it
+	// (answers from a local listener to an app whose query went into the
+	// device, like a DNS server redirected by the firewall) are handed
+	// back to the system instead of the stack. Unset: no hand-back.
+	TunAddr netip.Addr
+	// Loop guard (see loopGuard): caps per destination (address and port)
+	// on connections opening and open at once, and how long a destination
+	// that hit one is refused. 0: the defaults.
+	MaxOpening, MaxOpen int
+	LoopHold            time.Duration
 }
 
 const (
 	nicID          = 1
 	outQueueLen    = 1024
-	maxInFlight    = 1024 // connections being dialed at once
+	maxInFlight    = 4096 // connections being dialed at once (all destinations)
 	keepaliveIdle  = 60 * time.Second
 	keepaliveIntvl = 30 * time.Second
 	keepaliveCount = 9
@@ -77,6 +88,9 @@ type Stack struct {
 	dev    Device
 	dialer Dialer
 	opts   Options
+	guard  *loopGuard
+	self   tcpip.Address // TunAddr, for the hand-back
+	wmu    sync.Mutex    // Device.Write isn't safe for concurrent use
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	once   sync.Once
@@ -90,6 +104,15 @@ func New(dev Device, dialer Dialer, opts Options) (*Stack, error) {
 	}
 	if opts.DialTimeout == 0 {
 		opts.DialTimeout = 15 * time.Second
+	}
+	if opts.MaxOpening == 0 {
+		opts.MaxOpening = DefaultMaxOpening
+	}
+	if opts.MaxOpen == 0 {
+		opts.MaxOpen = DefaultMaxOpen
+	}
+	if opts.LoopHold == 0 {
+		opts.LoopHold = DefaultLoopHold
 	}
 	mtu := dev.MTU()
 	if mtu <= 0 {
@@ -125,7 +148,10 @@ func New(dev Device, dialer Dialer, opts Options) (*Stack, error) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	st := &Stack{s: s, ep: ep, dev: dev, dialer: dialer, opts: opts, cancel: cancel}
+	st := &Stack{s: s, ep: ep, dev: dev, dialer: dialer, opts: opts, guard: newLoopGuard(opts.MaxOpening, opts.MaxOpen, opts.LoopHold), cancel: cancel}
+	if opts.TunAddr.Is4() {
+		st.self = tcpip.AddrFrom4(opts.TunAddr.As4())
+	}
 	fwd := tcp.NewForwarder(s, 0, maxInFlight, st.forward)
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, fwd.HandlePacket)
 
@@ -166,11 +192,28 @@ func (st *Stack) forward(r *tcp.ForwarderRequest) {
 	dst := net.JoinHostPort(id.LocalAddress.String(), strconv.Itoa(int(id.LocalPort)))
 	log := st.opts.Logger.With("dst", dst)
 
+	ok, warn, refused := st.guard.acquire(dst)
+	if !ok {
+		if warn {
+			log.Warn("refusing connections to this destination for a while: too many at once, likely a routing loop (the target reaches it through this machine, and the routes send that back into the tunnel)",
+				"for", st.opts.LoopHold, "refused", refused)
+		}
+		r.Complete(true)
+		return
+	}
+	defer st.guard.release(dst)
+
 	ctx, cancel := context.WithTimeout(context.Background(), st.opts.DialTimeout)
 	up, err := st.dialer.DialContext(ctx, "tcp", dst)
 	cancel()
+	st.guard.dialed(dst)
 	if err != nil {
-		log.Info("connect failed", "err", err)
+		// A loop unwinding, or the same destination failing again: debug.
+		if !st.guard.looping(dst) && st.guard.reportFailure(dst) {
+			log.Info("connect failed", "err", err)
+		} else {
+			log.Debug("connect failed", "err", err)
+		}
 		r.Complete(true) // reset: the app sees "connection refused"
 		return
 	}
@@ -222,6 +265,10 @@ func (st *Stack) inbound(stop context.CancelFunc) {
 		var proto tcpip.NetworkProtocolNumber
 		switch header.IPVersion(pkt) {
 		case header.IPv4Version:
+			if st.forSelf(pkt) {
+				st.write(buf[:head+n])
+				continue
+			}
 			proto = header.IPv4ProtocolNumber
 		case header.IPv6Version:
 			proto = header.IPv6ProtocolNumber
@@ -247,9 +294,24 @@ func (st *Stack) outbound(ctx context.Context) {
 		buf := make([]byte, head+view.Size())
 		copy(buf[head:], view.AsSlice())
 		view.Release()
-		if err := st.dev.Write(buf); err != nil {
-			st.opts.Logger.Debug("device write failed", "err", err)
-		}
+		st.write(buf)
+	}
+}
+
+// forSelf reports whether an IPv4 packet from the system is addressed to
+// the device's own address. The system sends those out of the device
+// because its address is also the point-to-point peer.
+func (st *Stack) forSelf(pkt []byte) bool {
+	return st.self.Len() > 0 && len(pkt) >= header.IPv4MinimumSize && header.IPv4(pkt).DestinationAddress() == st.self
+}
+
+// write sends one packet (after the device's headroom) to the system.
+func (st *Stack) write(buf []byte) {
+	st.wmu.Lock()
+	err := st.dev.Write(buf)
+	st.wmu.Unlock()
+	if err != nil {
+		st.opts.Logger.Debug("device write failed", "err", err)
 	}
 }
 

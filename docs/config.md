@@ -98,8 +98,12 @@ the result.
 
 Route `0.0.0.0/1` and `128.0.0.0/1` to send everything through the tunnel. The two halves are more
 specific than the real default route, which stays untouched, so when subtun exits or crashes the
-machine is back to normal. Your LAN stays local (its own route is more specific), and subtun's own
-connection to the API server or Docker daemon is excluded automatically. Add `--dns-domain .` (or
+machine is back to normal. Your LAN, multicast and link-local stay local (see the automatic excludes
+under [Safety checks](#safety-checks)), and subtun's own connection to the API server or Docker
+daemon is excluded automatically. The target must run outside this machine: a pod in Docker Desktop,
+kind or minikube reaches the internet through this machine, so its traffic would loop back into the
+tunnel (subtun warns, and cuts such loops). UDP and ICMP don't go through the tunnel yet, so DNS needs
+`--dns-domain .`, unless your DNS server is on the LAN. Add `--dns-domain .` (or
 `dns.domains: ["."]`) to resolve every name through the tunnel as well. subtun doesn't carry IPv6
 yet, so in a full tunnel it blocks outgoing IPv6 (see [IPv6](#ipv6)); apps fall back to IPv4.
 
@@ -113,8 +117,17 @@ is more specific and keeps the gateway reachable.
 It warns when a route overlaps a network of one of this machine's interfaces (your LAN, a VPN
 client's interface). The more specific route wins, and the warning says which side that is.
 
-Excluded automatically, and listed by `--dry-run`: subtun's own utun address, and, when the tunnel
-is up, the address subtun itself connects to (the Kubernetes API server, a remote Docker daemon).
+Excluded automatically, and listed by `--dry-run`:
+- subtun's own utun address;
+- ranges that never belong in the tunnel, where a broader route contains them: `0.0.0.0/8`,
+  loopback `127.0.0.0/8`, link-local `169.254.0.0/16`, multicast, reserved and broadcast
+  `224.0.0.0/3`;
+- this machine's own networks (your LAN, a VPN client's network), where a broader route contains them,
+  so they stay on their interface even when other excludes split the routes around them. A route at
+  least as specific as such a network (`192.168.1.128/25` on a `192.168.1.0/24` LAN) is your explicit
+  choice: it stays, with the overlap warning;
+- when the tunnel is up, the address subtun itself connects to (the Kubernetes API server, a remote
+  Docker daemon).
 
 ## subtun's own addresses
 
@@ -138,7 +151,7 @@ curl http://web.team-a.svc.cluster.local:8080/      # any program, no proxy sett
 
 | YAML (`dns:`) | Flag | Default | Meaning |
 |---|---|---|---|
-| `domains` | `--dns-domain` (repeatable, comma-separated) | none | suffixes resolved through the tunnel; `.` = every name |
+| `domains` | `--dns-domain` (repeatable, comma-separated) | none | suffixes resolved through the tunnel; `.` = every name except local ones |
 | `patterns` | `--dns-pattern` (repeatable) | none | regular expressions resolved through the tunnel |
 | `servers` | `--dns-servers` | `auto` | DNS servers whose queries are captured: `auto` (the system's) or IPv4 addresses |
 | `fallback` | `--dns-fallback` | `system` | resolver for everything else: `system` (the servers the query was meant for) or `IP[:port]` |
@@ -153,6 +166,13 @@ pattern form) is ignored, so `.*.company.com` from an sshuttle file works as is.
 regular expressions, matched against the lowercase name without the trailing dot. They aren't
 anchored, so write `^` and `$` where you need them (sshuttle used Python's `re.match`, which anchors
 at the start only).
+
+**`.` leaves local names alone:** names under `local` (multicast DNS) and under the system's search
+domains (from `/etc/resolv.conf`, such as a router's `lan` or `home.arpa`, which also complete short
+names) go to the fallback resolver: they belong to your network, and the target's resolver can't
+answer them. List one to send it through the tunnel anyway: `--dns-domain . --dns-domain
+cluster.local`. Patterns win the same way. The search domains follow the system when the network
+changes (with `servers: auto`); `--dry-run` and the log list them.
 
 **Servers.** With `auto`, subtun reads the system's IPv4 DNS servers from `/etc/resolv.conf` and
 follows them when the network changes (Wi-Fi switch, VPN up or down). IPv6 DNS servers and local
