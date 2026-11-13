@@ -26,7 +26,8 @@ func TestMaxDurationWhileConnecting(t *testing.T) {
 	t.Cleanup(func() { systemDNS = orig })
 
 	s := settings{dnsListen: "127.0.0.1:15353", dnsDomains: []string{"example.com"}, agent: transport.AgentAuto,
-		maxDuration: 50 * time.Millisecond}
+		maxDuration:       50 * time.Millisecond,
+		reconnectAttempts: defaultReconnectAttempts, reconnectDelay: defaultReconnectDelay, reconnectMaxDelay: defaultReconnectMaxDelay}
 	connect := func(ctx context.Context, _ []agentbin.Binary, _ *slog.Logger) (*transport.Carrier, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()

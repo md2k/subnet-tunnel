@@ -172,7 +172,11 @@ app ──► SOCKS5 proxy  ───┘   smux streams    exec stdio   in the t
   DNS engine, which resolves matching names through the tunnel and everything else through a
   fallback resolver. See [DNS](#dns).
 - **Lifecycle.** Closing subtun sends EOF on the agent's stdin and the agent exits. If the carrier
-  drops (pod deleted, network lost), subtun notices within seconds and exits with an error.
+  drops (pod deleted, network lost), subtun notices within seconds (smux keepalive: 30 s at most)
+  and reconnects: the capture, the SOCKS proxy and DNS reach the agent through one swappable
+  client, which fails dials and DNS at once while it's down; utun, routes and firewall rules stay.
+  Tries per outage, the first wait and the longest wait are settings (`reconnect`); waits double
+  with ±20 % jitter, and after the last try subtun exits with an error (a kill switch then holds).
 
 ## Privileges
 
@@ -319,8 +323,9 @@ dns:
   agent passes the raw message to the resolver in the target's `/etc/resolv.conf`, UDP first and
   TCP if the answer is truncated, and returns the answer unchanged, so every record type works.
   Both agents implement it. The rest goes to the fallback. With `.` (every name), names under
-  `local` and the system's search domains still go to the fallback unless listed: the target's
-  resolver can't answer them (against a remote cluster each `.local` query cost a 10 s timeout).
+  `local`, the system's search domains and the reverse zones of the local networks and of
+  link-local addresses still go to the fallback unless listed: the target's resolver can't answer
+  them (against a remote cluster each `.local` query cost a 10 s timeout).
   Errors become SERVFAIL; an answer larger than a UDP client accepts (512 bytes, or its EDNS0 size)
   is replaced by an empty truncated one, so the client retries over TCP, which is captured too.
 - **Fallback without loops.** The fallback is usually one of the captured servers, so its queries
@@ -447,8 +452,10 @@ captured. What stays behind has no `pass` rule and blocks DNS with
   start: after joining another network, the old LAN's range stays outside the tunnel, and an
   exclude that splits the routes inside the new LAN would put parts of it into the tunnel. Needs
   runtime route changes in the session helper.
-- **Reconnecting:** when the carrier drops (pod restarted, laptop asleep, network change), subtun
-  exits. It should reconnect, with the kill switch holding the blocks meanwhile.
+- **Reconnecting to a recreated pod:** subtun reconnects to the same pod name. A Deployment's new pod
+  has another name; selecting the target by label or by its owner would find it. Also, routes
+  don't change while running, so if the API server's address moves inside the routes after a
+  reconnect, subtun only warns (restart to exclude it).
 - **Targets with neither a shell nor Python** (distroless static, scratch): an ephemeral debug
   container (Kubernetes) or a helper container in the target's network namespace (Docker).
 - **Aborted streams:** smux has no reset. When the laptop side closes a stream abruptly, an agent

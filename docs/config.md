@@ -45,6 +45,10 @@ profiles:
       mode: off                    # off (default) | on | lockdown
       dns: block                   # block (default) | allow
     blockIPv6: auto                # auto (default: in a full tunnel) | true | false
+    reconnect:                     # when the connection to the agent is lost, see below
+      attempts: 10                 # default; 0: exit instead
+      delay: 1s                    # default: the first wait, doubling after each attempt
+      maxDelay: 1m                 # default: the longest wait
 
   local-app:
     target:
@@ -90,7 +94,8 @@ subtun up dev-cluster 10.50.0.0/16 -x 10.50.1.0/24 --socks 127.0.0.1:1082
 
 Flags given on the command line override the profile's (and defaults') values (`--socks`,
 `--agent`, `--agent-dir`, `--tun-addr`, `--mtu`, `--dns-capture`, `--dns-servers`, `--dns-fallback`,
-`--dns-unrouted`, `--kill-switch`, `--kill-switch-dns`, `--block-ipv6`). CIDRs, `-x/--exclude`,
+`--dns-unrouted`, `--kill-switch`, `--kill-switch-dns`, `--block-ipv6`, `--reconnect-attempts`,
+`--reconnect-delay`, `--reconnect-max-delay`). CIDRs, `-x/--exclude`,
 `--dns-domain` and `--dns-pattern` given on the command line are **added** to the profile's. Without
 a config file, the same flags work on `subtun k8s` and `subtun docker`.
 
@@ -268,12 +273,20 @@ regular expressions, matched against the lowercase name without the trailing dot
 anchored, so write `^` and `$` where you need them (sshuttle used Python's `re.match`, which anchors
 at the start only).
 
-**`.` leaves local names alone:** names under `local` (multicast DNS) and under the system's search
-domains (from `/etc/resolv.conf`, such as a router's `lan` or `home.arpa`, which also complete short
-names) go to the fallback resolver: they belong to your network, and the target's resolver can't
-answer them. List one to send it through the tunnel anyway: `--dns-domain . --dns-domain
-cluster.local`. Patterns win the same way. The search domains follow the system when the network
-changes (with `servers: auto`); `--dry-run` and the log list them.
+**`.` leaves local names alone:** these go to the fallback resolver, since they belong to your
+network and the target's resolver can't answer them:
+- names under `local` (multicast DNS);
+- names under the system's search domains (from `/etc/resolv.conf`, such as a router's `lan` or
+  `home.arpa`, which also complete short names);
+- reverse lookups for this machine's networks and for link-local addresses: PTR queries and Bonjour's
+  browse-domain queries for the LAN (`1.168.192.in-addr.arpa` on a `192.168.1.0/24` LAN,
+  `254.169.in-addr.arpa`, `e.f.ip6.arpa`).
+
+List one to send it through the tunnel anyway: `--dns-domain . --dns-domain cluster.local`. Patterns
+win the same way. The search domains and networks follow the system when the network changes (with
+`servers: auto`); `--dry-run` and the log list them. Bonjour itself (multicast DNS on port 5353)
+never goes near the tunnel: it isn't captured, multicast is never routed, and the kill switch leaves
+it alone.
 
 **Answers outside the routes** (`unrouted`). The target's resolver can answer with private addresses
 your routes don't cover: an address in its own network, or one from a VPN on that side (one answered
@@ -359,6 +372,28 @@ Notes:
 - After a reboot the blocks are gone (pf rules live in memory).
 - The kill switch needs routes (without them it's ignored, with a warning), and keeps the root
   helper running for the session.
+
+## Reconnect
+
+When the connection to the agent is lost (the pod restarted, the laptop slept, a network change broke
+it), subtun tries to connect again instead of exiting. Meanwhile the utun, the routes, the firewall
+rules and the SOCKS listener stay: new connections and names resolved through the tunnel fail at
+once, nothing leaks around the tunnel (with or without a kill switch), and connections that were open
+are lost. Once connected again, everything works as before; the log says `reconnected ... after`.
+
+| YAML (`reconnect:`) | Flag | Default | Meaning |
+|---|---|---|---|
+| `attempts` | `--reconnect-attempts` | `10` | tries per outage; `0` exits at once, as before |
+| `delay` | `--reconnect-delay` | `1s` | the wait before the first try; it doubles after each one |
+| `maxDelay` | `--reconnect-max-delay` | `1m` | the longest wait between tries |
+
+Waits vary by ±20 %, so several clients don't retry in step. With the defaults subtun gives up after
+about 5 minutes without a connection and exits with an error; a kill switch then keeps its blocks
+(mode `on`). After a successful reconnect the count starts over. Like every setting, it works in
+`defaults:` and per profile, and the flags override both.
+
+A reconnect finds the target by the same name. A pod a Deployment recreated has a new name, so subtun
+can't find it; target pods that keep their name (a bare pod, a StatefulSet's) or a container.
 
 ## IPv6
 

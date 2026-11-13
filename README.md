@@ -100,6 +100,10 @@ multicast and link-local stay local, and IPv6, which subtun doesn't carry yet, i
 has to run outside this machine: a local Docker Desktop pod would loop your traffic back (subtun
 warns and cuts such loops). See [Full tunnel](docs/config.md#full-tunnel).
 
+**Reconnect.** When the connection to the target drops, subtun tries again (10 times by default,
+waiting longer each time) while routes, firewall rules and the proxy stay in place. See
+[Reconnect](docs/config.md#reconnect).
+
 **Excludes and profiles.** `-x/--exclude` keeps addresses out of the tunnel; the most specific rule
 wins, like sshuttle. `--dry-run` prints the routes subtun would install. Settings can live in named
 profiles in `~/.config/subtun/config.yaml`:
@@ -124,7 +128,6 @@ turns an sshuttle options file into a profile ([details](docs/config.md#importin
 
 ## Planned
 
-- Reconnect when the connection to the target drops (the kill switch holds meanwhile).
 - `subtun status` and a local control API; change CIDRs and DNS at runtime without a restart (opt-in),
   routes that follow network changes, and DNS answers outside the routes routed into the tunnel.
 - SSH transport to any host.
@@ -134,7 +137,7 @@ turns an sshuttle options file into a profile ([details](docs/config.md#importin
 ## Documentation
 
 - [Configuration](docs/config.md): commands, profiles and defaults, examples, routes and excludes,
-  full tunnel, split DNS, kill switch, IPv6, safety checks, importing from sshuttle.
+  full tunnel, split DNS, kill switch, reconnect, IPv6, safety checks, importing from sshuttle.
 - [Design](docs/design.md): measurements, architecture and open questions.
 - [Development](docs/development.md): tests, code layout, the local test setup, and trying a full
   tunnel or the kill switch safely.

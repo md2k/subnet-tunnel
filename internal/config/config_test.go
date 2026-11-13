@@ -175,3 +175,44 @@ func TestDNSCaptureWords(t *testing.T) {
 		t.Fatalf("capture on: %v", err)
 	}
 }
+
+// reconnect: defaults for every profile, a profile's own values win, and
+// attempts: 0 (off) is a value, not "unset".
+func TestReconnectConfig(t *testing.T) {
+	f, err := Parse([]byte(`defaults:
+  reconnect: {attempts: 5, delay: 2s, maxDelay: 30s}
+profiles:
+  a:
+    target: {k8s: {pod: x}}
+    socks: 127.0.0.1:1080
+  b:
+    target: {k8s: {pod: x}}
+    socks: 127.0.0.1:1080
+    reconnect: {attempts: 0}
+  c:
+    target: {k8s: {pod: x}}
+    socks: 127.0.0.1:1080
+    reconnect: {maxDelay: 5m}
+`), "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := f.Profile("a")
+	b, _ := f.Profile("b")
+	c, _ := f.Profile("c")
+	if *a.Reconnect.Attempts != 5 || a.Reconnect.Delay != "2s" || a.Reconnect.MaxDelay != "30s" {
+		t.Errorf("a: %+v", a.Reconnect)
+	}
+	if *b.Reconnect.Attempts != 0 || b.Reconnect.Delay != "2s" {
+		t.Errorf("b: %+v", b.Reconnect)
+	}
+	if *c.Reconnect.Attempts != 5 || c.Reconnect.MaxDelay != "5m" {
+		t.Errorf("c: %+v", c.Reconnect)
+	}
+	for _, bad := range []string{"{attempts: -1}", "{delay: soon}", "{maxDelay: 0s}"} {
+		y := "profiles:\n  p:\n    target: {k8s: {pod: x}}\n    socks: 127.0.0.1:1080\n    reconnect: " + bad + "\n"
+		if _, err := Parse([]byte(y), "t"); err == nil {
+			t.Errorf("reconnect %s accepted", bad)
+		}
+	}
+}

@@ -452,7 +452,7 @@ func TestDNSCatchAllLeavesLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "except names under local, lan (local network") {
+	if !strings.Contains(out, "except names under local, lan, 77.168.192.in-addr.arpa, 254.169.in-addr.arpa, e.f.ip6.arpa (local network") {
 		t.Fatalf("no local exception in\n%s", out)
 	}
 	out, err = runCLI(t, "k8s", "debug", "203.0.113.0/24", "--dns-domain", "cluster.local", "--dry-run")

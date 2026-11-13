@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -296,4 +299,45 @@ func TestPacketsForTunAddrGoBack(t *testing.T) {
 			return
 		}
 	}
+}
+
+// downTunnel refuses every dial the way a tunnel that is reconnecting does.
+type downTunnel struct{}
+
+func (downTunnel) DialContext(context.Context, string, string) (net.Conn, error) {
+	return nil, fmt.Errorf("the tunnel is down (%w)", ErrNoTunnel)
+}
+
+// While the tunnel is down, connections are refused at once and the failures
+// aren't logged at info level (the outage is reported once elsewhere).
+func TestNoTunnelFailuresQuiet(t *testing.T) {
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	log := slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	client := setupDialer(t, downTunnel{}, Options{DialTimeout: 5 * time.Second, Logger: log})
+	start := time.Now()
+	if c, err := dial(t, client, 7); err == nil {
+		c.Close()
+		t.Fatal("connection accepted without a tunnel")
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("refusal took %v", took)
+	}
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Contains(buf.String(), "connect failed") {
+		t.Fatalf("logged at info: %s", buf.String())
+	}
+}
+
+type lockedWriter struct {
+	w  *bytes.Buffer
+	mu *sync.Mutex
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
