@@ -60,6 +60,17 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	return carrier, nil
 }
 
+// Endpoint returns the Docker daemon's address, without connecting
+// (several tunnels exclude every endpoint from every route).
+func Endpoint(t Target) (string, error) {
+	cli, err := newClient(t)
+	if err != nil {
+		return "", err
+	}
+	defer cli.Close()
+	return cli.DaemonHost(), nil
+}
+
 func newClient(t Target) (*client.Client, error) {
 	opts := []client.Opt{client.WithAPIVersionNegotiation()}
 	if t.Host == "" && t.Context == "" && os.Getenv("DOCKER_HOST") != "" {

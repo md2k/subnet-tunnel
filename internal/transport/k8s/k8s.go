@@ -59,6 +59,20 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	return c, nil
 }
 
+// Endpoint returns the API server's address from the kubeconfig, without
+// connecting (several tunnels exclude every endpoint from every route).
+func Endpoint(t Target) (string, error) {
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if t.Kubeconfig != "" {
+		rules.ExplicitPath = t.Kubeconfig
+	}
+	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{CurrentContext: t.Context}).ClientConfig()
+	if err != nil {
+		return "", fmt.Errorf("kubeconfig: %w", err)
+	}
+	return cfg.Host, nil
+}
+
 type kube struct {
 	cfg       *rest.Config
 	cs        kubernetes.Interface

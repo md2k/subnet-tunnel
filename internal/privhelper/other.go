@@ -27,6 +27,9 @@ func (*Client) CreateTun(int, netip.Addr) (string, *os.File, error) { return "",
 // AddRoute is not implemented on this platform yet.
 func (*Client) AddRoute(netip.Prefix) error { return errUnsupported }
 
+// DeleteRoute is not implemented on this platform yet.
+func (*Client) DeleteRoute(netip.Prefix) error { return errUnsupported }
+
 // ApplyFirewall is not implemented on this platform yet.
 func (*Client) ApplyFirewall(platform.Rules, *platform.Rules) error { return errUnsupported }
 

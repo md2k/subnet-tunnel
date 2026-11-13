@@ -64,14 +64,8 @@ func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
 			return nil, n, fmt.Errorf("no IPv4 DNS server in %s to capture; set the servers explicitly", dns.ResolvConf)
 		}
 		opts.Servers, opts.Auto, notes = servers, true, n
-	} else {
-		for _, v := range s.dnsServers {
-			a, err := netip.ParseAddr(v)
-			if err != nil || !a.Is4() || a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() {
-				return nil, nil, fmt.Errorf("DNS server %q: need a unicast IPv4 address (or auto)", v)
-			}
-			opts.Servers = append(opts.Servers, a)
-		}
+	} else if opts.Servers, err = parseServers(s.dnsServers); err != nil {
+		return nil, nil, err
 	}
 
 	switch s.dnsFallback {
@@ -102,6 +96,19 @@ func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
 		}
 	}
 	return opts, notes, nil
+}
+
+// parseServers checks a list of DNS servers to capture.
+func parseServers(list []string) ([]netip.Addr, error) {
+	var out []netip.Addr
+	for _, v := range list {
+		a, err := netip.ParseAddr(v)
+		if err != nil || !a.Is4() || a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() {
+			return nil, fmt.Errorf("DNS server %q: need a unicast IPv4 address (or auto)", v)
+		}
+		out = append(out, a)
+	}
+	return out, nil
 }
 
 // parseResolver accepts IP or IP:port (IPv4; port 53 by default).

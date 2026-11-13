@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +19,7 @@ type DNSOptions struct {
 	Match    *dns.Matcher
 	Servers  []netip.Addr     // captured: the system's DNS servers, or a pinned list
 	Auto     bool             // follow the system's servers when the network changes
+	Pinned   []netip.Addr     // with Auto: captured as well as the system's (several profiles)
 	Fallback []netip.AddrPort // for names not matched; nil: the captured servers
 	Tunnels  []DNSTunnel      // by the matcher's targets
 	// Locals reads the machine's networks: with ".", their reverse zones
@@ -134,6 +136,13 @@ func (r *dnsRuntime) logReady(log *slog.Logger) {
 func (r *dnsRuntime) follow(ctx context.Context, interval time.Duration, log *slog.Logger, apply func() error) {
 	read := func() ([]netip.Addr, []string, error) {
 		servers, notes, err := dns.SystemServers(dns.ResolvConf)
+		if err == nil && len(servers) > 0 {
+			for _, a := range r.opts.Pinned {
+				if !slices.Contains(servers, a) {
+					servers = append(servers, a)
+				}
+			}
+		}
 		// The search domains change with the network too; skip the moments
 		// mid-change when the file is empty.
 		if err == nil && len(servers) > 0 && r.opts.Match.CatchAll() {
