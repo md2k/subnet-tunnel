@@ -88,8 +88,16 @@ type KillSwitch struct {
 	Mode     string `json:"mode"`
 	Guarded  int    `json:"guardedPrefixes"`
 	Lockdown int    `json:"lockdownPrefixes"`
-	DNS      string `json:"dnsWhileHolding"` // blocked, allowed
+	DNS      string `json:"dnsWhileHolding"` // HoldBlocked, HoldAllowed or HoldNoCapture
 }
+
+// What happens to DNS (to the captured servers) while the kill switch
+// holds.
+const (
+	HoldBlocked   = "blocked"
+	HoldAllowed   = "allowed"
+	HoldNoCapture = "no DNS capture" // nothing to hold
+)
 
 // TunnelConns are one tunnel's open connections.
 type TunnelConns struct {

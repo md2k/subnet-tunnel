@@ -86,6 +86,15 @@ func TestEngineStatus(t *testing.T) {
 	if c := es.conns(); len(c) != 2 || c[1].Name != "dev" {
 		t.Errorf("conns: %+v", c)
 	}
+	// DNS while the kill switch holds: blocked by default; nothing to hold
+	// without DNS capture.
+	if st.KillSwitch.DNS != control.HoldBlocked {
+		t.Errorf("DNS while holding: %q", st.KillSwitch.DNS)
+	}
+	vault := multiPlanFor(t, "vault") // lockdown, no DNS names
+	if ks := newEngineStatus(vault, controlStatus).status().KillSwitch; ks == nil || ks.DNS != control.HoldNoCapture {
+		t.Errorf("without DNS capture: %+v", ks)
+	}
 }
 
 // subtun k8s and subtun docker take the config file's control: too, unless

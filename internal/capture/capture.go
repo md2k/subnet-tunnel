@@ -395,7 +395,10 @@ func Start(ctx context.Context, prefixes []netip.Prefix, opts Options, dialer ne
 	c.helper = h
 	if guard != nil {
 		hold := "allowed"
-		if dr != nil && !opts.AllowDNS {
+		switch {
+		case dr == nil:
+			hold = "no DNS capture"
+		case !opts.AllowDNS:
 			hold = "blocked"
 		}
 		log.Info("kill switch on", "mode", opts.KillSwitch, "guarded_prefixes", len(guarded),

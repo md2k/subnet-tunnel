@@ -181,16 +181,28 @@ func (es *engineStatus) status() control.Status {
 		st.DNS = sd
 	}
 	if mode := mp.ksMode(); mode != "off" {
-		ks := &control.KillSwitch{Mode: mode, DNS: "allowed"}
+		ks := &control.KillSwitch{Mode: mode, DNS: dnsHold(es.dnsOpts != nil && !es.devDNS, !mp.allowDNS)}
 		if c != nil {
 			ks.Guarded, ks.Lockdown = c.GuardCounts()
-			if c.HoldsDNS() {
-				ks.DNS = "blocked"
+			if ks.DNS != control.HoldNoCapture {
+				ks.DNS = dnsHold(true, c.HoldsDNS())
 			}
 		}
 		st.KillSwitch = ks
 	}
 	return st
+}
+
+// dnsHold is what happens to DNS while the kill switch holds: nothing to
+// hold without DNS capture.
+func dnsHold(captured, blocked bool) string {
+	switch {
+	case !captured:
+		return control.HoldNoCapture
+	case blocked:
+		return control.HoldBlocked
+	}
+	return control.HoldAllowed
 }
 
 // conns are the open connections per tunnel.
