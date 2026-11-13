@@ -199,3 +199,37 @@ func (l *File) prune(now time.Time) {
 		}
 	}
 }
+
+// ParseSize reads a size: 20MB, 500KB, 1GB, or plain bytes.
+func ParseSize(s string) (int64, error) {
+	v := strings.ToUpper(strings.TrimSpace(s))
+	mult := int64(1)
+	for _, u := range []struct {
+		suffix string
+		mult   int64
+	}{{"GB", 1 << 30}, {"MB", 1 << 20}, {"KB", 1 << 10}, {"B", 1}} {
+		if strings.HasSuffix(v, u.suffix) {
+			v, mult = strings.TrimSpace(strings.TrimSuffix(v, u.suffix)), u.mult
+			break
+		}
+	}
+	var n int64
+	if _, err := fmt.Sscanf(v, "%d", &n); err != nil || n <= 0 || fmt.Sprint(n) != v {
+		return 0, fmt.Errorf("size %q: a positive number with KB, MB or GB", s)
+	}
+	return n * mult, nil
+}
+
+// ParseAge reads a duration, with days too: 3d, 12h, 90m.
+func ParseAge(s string) (time.Duration, error) {
+	v := strings.TrimSpace(s)
+	if d, ok := strings.CutSuffix(v, "d"); ok {
+		var n int
+		if _, err := fmt.Sscanf(d, "%d", &n); err == nil && n > 0 && fmt.Sprint(n) == d {
+			return time.Duration(n) * 24 * time.Hour, nil
+		}
+	} else if dur, err := time.ParseDuration(v); err == nil && dur > 0 {
+		return dur, nil
+	}
+	return 0, fmt.Errorf("age %q: a positive duration such as 3d, 12h or 90m", s)
+}

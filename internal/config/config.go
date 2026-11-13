@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/md2k/subnet-tunnel/internal/dns"
+	"github.com/md2k/subnet-tunnel/internal/logx"
 	"github.com/md2k/subnet-tunnel/internal/routes"
 )
 
@@ -26,9 +27,61 @@ import (
 type File struct {
 	// Control is the control socket for every run (status, full, off):
 	// global, never per profile.
-	Control  Word               `json:"control,omitempty"`
+	Control Word `json:"control,omitempty"`
+	Log     Log  `json:"log,omitempty"` // global too
+
 	Defaults Profile            `json:"defaults,omitempty"` // every key except target
 	Profiles map[string]Profile `json:"profiles"`
+}
+
+// Log is how a run logs (global, never per profile).
+type Log struct {
+	File     Word              `json:"file,omitempty"`     // on (default), off
+	Dir      string            `json:"dir,omitempty"`      // default ~/.local/state/subtun/logs
+	Format   string            `json:"format,omitempty"`   // json (default), text
+	Level    string            `json:"level,omitempty"`    // info (default), or "info,dns=debug"
+	Levels   map[string]string `json:"levels,omitempty"`   // per component: dns: debug
+	MaxSize  string            `json:"maxSize,omitempty"`  // 20MB
+	MaxAge   string            `json:"maxAge,omitempty"`   // 3d
+	MaxTotal string            `json:"maxTotal,omitempty"` // 500MB
+	Mask     []string          `json:"mask,omitempty"`     // dns, destinations
+}
+
+// Validate checks the log settings.
+func (l Log) Validate() error {
+	switch l.File {
+	case "", "on", "off":
+	default:
+		return fmt.Errorf("log.file %q: use on or off", l.File)
+	}
+	switch l.Format {
+	case "", "json", "text":
+	default:
+		return fmt.Errorf("log.format %q: use json or text", l.Format)
+	}
+	spec, err := logx.ParseSpec(l.Level)
+	if err != nil {
+		return fmt.Errorf("log.level: %w", err)
+	}
+	for c, lvl := range l.Levels {
+		if err := spec.Set(c, lvl); err != nil {
+			return fmt.Errorf("log.levels: %w", err)
+		}
+	}
+	for key, v := range map[string]string{"maxSize": l.MaxSize, "maxTotal": l.MaxTotal} {
+		if _, err := logx.ParseSize(v); v != "" && err != nil {
+			return fmt.Errorf("log.%s: %w", key, err)
+		}
+	}
+	if _, err := logx.ParseAge(l.MaxAge); l.MaxAge != "" && err != nil {
+		return fmt.Errorf("log.maxAge: %w", err)
+	}
+	for _, m := range l.Mask {
+		if m != "dns" && m != "destinations" {
+			return fmt.Errorf("log.mask %q: use dns or destinations", m)
+		}
+	}
+	return nil
 }
 
 // ValidControl checks a control mode (the setting and --control).
@@ -255,6 +308,9 @@ func Parse(data []byte, name string) (*File, error) {
 		return nil, fmt.Errorf("%s: no profiles", name)
 	}
 	if err := ValidControl(string(f.Control)); err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	if err := f.Log.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	if f.Defaults.Target.K8s != nil || f.Defaults.Target.Docker != nil {

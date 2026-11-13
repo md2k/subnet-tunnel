@@ -162,3 +162,26 @@ func TestFile(t *testing.T) {
 		t.Error("write after close")
 	}
 }
+
+func TestParseSizeAndAge(t *testing.T) {
+	for in, want := range map[string]int64{"20MB": 20 << 20, "500kb": 500 << 10, "1GB": 1 << 30, "4096": 4096, "10 MB": 10 << 20} {
+		if got, err := ParseSize(in); err != nil || got != want {
+			t.Errorf("size %q: %d %v", in, got, err)
+		}
+	}
+	for _, bad := range []string{"", "0MB", "-1MB", "20TB", "lots"} {
+		if _, err := ParseSize(bad); err == nil {
+			t.Errorf("size %q accepted", bad)
+		}
+	}
+	for in, want := range map[string]time.Duration{"3d": 72 * time.Hour, "12h": 12 * time.Hour, "90m": 90 * time.Minute} {
+		if got, err := ParseAge(in); err != nil || got != want {
+			t.Errorf("age %q: %v %v", in, got, err)
+		}
+	}
+	for _, bad := range []string{"", "0d", "-3d", "3w", "soon"} {
+		if _, err := ParseAge(bad); err == nil {
+			t.Errorf("age %q accepted", bad)
+		}
+	}
+}
