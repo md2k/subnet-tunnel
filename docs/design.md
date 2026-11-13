@@ -176,9 +176,10 @@ app ──► SOCKS5 proxy  ───┘   smux streams    exec stdio   in the t
 
 ## Privileges
 
-subtun runs as the user. Creating a utun interface, adding routes and loading firewall rules (for
-DNS capture) need root; packet handling and DNS answering never do. Root work is done by a small helper, `subtun helper`,
-that subtun starts through `sudo` (sudo asks for the password on the terminal).
+subtun runs as the user. Creating a utun interface, adding routes and loading firewall rules (DNS
+capture, kill switch, IPv6 block) need root; packet handling and DNS answering never do. Root work
+is done by a small helper, `subtun helper`, that subtun starts through `sudo` (sudo asks for the
+password on the terminal).
 
 ### How the helper is trusted
 
@@ -204,7 +205,7 @@ that subtun starts through `sudo` (sudo asks for the password on the terminal).
 |---|---|---|
 | sudo prompts | one, at start | one, at start |
 | Root process after setup | none: the helper exits | the helper stays up for the session |
-| Accepts after setup | nothing | firewall updates only (DNS servers changed with the network) and `end` |
+| Accepts after setup | nothing | firewall updates only (the DNS servers or the local networks changed) and `end` |
 | Changing CIDRs | restart subtun | restart subtun (runtime changes through a local control API are planned) |
 | Cleanup | automatic: routes live on the utun, and macOS removes the utun and its routes when subtun exits, crashes or is killed | the same for routes; firewall rules as below |
 | Risk | smallest: root exists only for the seconds of setup | a root process stays reachable (only by subtun, over the private socket) for the whole session |
@@ -242,10 +243,11 @@ session, and refuses while a session is running.
 ## Platform drivers
 
 Everything that differs per operating system goes behind small interfaces, implemented once per OS
-and chosen by configuration (with a default per OS). `Tun`, `Routes` and `Firewall` exist
-(`internal/platform`, macOS drivers in `internal/platform/darwin`: utun, `/sbin/route`, pf);
-`Resolver` is planned, for the `override` and `supplemental` DNS modes. The app describes **intent**; each driver
-translates it into its OS's mechanism, so app code never contains pf, nftables or route syntax.
+and chosen by configuration (with a default per OS). `Tun`, `Routes`, `Firewall` and `DNSCache`
+exist (`internal/platform`, macOS drivers in `internal/platform/darwin`: utun, `/sbin/route`, pf,
+`dscacheutil` and mDNSResponder); `Resolver` is planned, for the `override` and `supplemental` DNS
+modes. The app describes **intent**; each driver translates it into its OS's mechanism, so app code
+never contains pf, nftables or route syntax.
 
 ```go
 // internal/platform: what subtun needs from the OS.
@@ -258,6 +260,9 @@ type Routes interface {   // routes on the tunnel interface
 }
 type Firewall interface { // macOS pf, Linux nftables / iptables, Windows WFP
     Apply(r Rules) error  // atomically replaces subtun's own rules (pf anchor, nft table, ...)
+    Flush() error
+}
+type DNSCache interface { // flushed when DNS capture starts and ends
     Flush() error
 }
 type Resolver interface { // system DNS configuration: scutil, systemd-resolved, NRPT
@@ -315,9 +320,9 @@ dns:
   TCP if the answer is truncated, and returns the answer unchanged, so every record type works.
   Both agents implement it. The rest goes to the fallback. With `.` (every name), names under
   `local` and the system's search domains still go to the fallback unless listed: the target's
-  resolver can't answer them, and in request 004 each `.local` query cost a 10 s timeout there. Errors become SERVFAIL; an answer larger
-  than a UDP client accepts (512 bytes, or its EDNS0 size) is replaced by an empty truncated one, so
-  the client retries over TCP, which is captured too.
+  resolver can't answer them (against a remote cluster each `.local` query cost a 10 s timeout).
+  Errors become SERVFAIL; an answer larger than a UDP client accepts (512 bytes, or its EDNS0 size)
+  is replaced by an empty truncated one, so the client retries over TCP, which is captured too.
 - **Fallback without loops.** The fallback is usually one of the captured servers, so its queries
   would be redirected straight back. They leave from one fixed source port that the firewall rules
   let through first (TCP connections from the same port, one per server at a time, closed with a
@@ -332,7 +337,7 @@ dns:
   reaches the app. Fallback queries to such a server still fail: they are UDP into the utun, which
   carries TCP only so far.
 - **Answers outside the routes** (`dns.unrouted`). A tunnel answer with private addresses no route
-  covers (request 006: a remote resolver answered `github.com` with `100.64.0.0/10`) is kept with a
+  covers (a remote cluster's resolver answered `github.com` with `100.64.0.0/10`) is kept with a
   warning (`warn`, default), replaced by the fallback's answer (`fallback`), or rewritten without
   those A records (`block`). Planned: `tunnel`, routing such addresses into the utun for the session
   (needs runtime `add_route` in the session helper), and `auto`, which would start as `tunnel` and
@@ -341,7 +346,7 @@ dns:
   `dscacheutil -flushcache` and SIGHUP to mDNSResponder) whenever the DNS redirect goes on or off,
   and when it takes over or cleans up an earlier session's rules. Otherwise answers from before the
   capture bypass it for their TTL, and, after it, answers obtained through the tunnel point at
-  addresses only reachable through it (request 006: a name kept failing after subtun stopped).
+  addresses only reachable through it (a name kept failing for its TTL after subtun stopped).
 - **How queries reach it** is a driver choice:
 
 | `capture` | Mechanism | Notes |
@@ -449,18 +454,20 @@ captured. What stays behind has no `pass` rule and blocks DNS with
 - **Aborted streams:** smux has no reset. When the laptop side closes a stream abruptly, an agent
   still sending to it waits for window updates that never come, until the destination closes.
   Both agents behave the same; needs a reset signal in the protocol.
-- **Remote clusters:** everything was measured against local clusters so far. Transport flow
-  control there (several carriers in parallel against head-of-line blocking) waits for a real
-  remote cluster's numbers.
+- **Remote clusters:** one has been measured so far: a single arm64 node on the same LAN, through its
+  pod's own internet connection. A full tunnel reached about 20 MB/s down and 8-9 MB/s up, against
+  53 and 38 MB/s directly (SOCKS through the same pod: 20 MB/s down). Where that limit sits (the
+  node, its uplink, exec through the API server, smux) isn't known yet; transport flow control
+  (several carriers in parallel against head-of-line blocking) waits for that answer.
 - **Coexistence** with other VPN or security software that owns its own utun interface or pf anchor
   (pf driver: own anchor, `quick` rules, warn on other anchors; to be tested next to Zscaler).
 - **A helper killed with SIGKILL** leaves its running rules, including the DNS redirect to subtun's
   listener port. Until the next session takes them over or `subtun cleanup` runs, a local process
   could bind that port and answer the Mac's DNS queries.
 - **Loop guard limits:** the caps (64 opening, 256 open per destination) aren't configurable. A
-  client opening more connections to one address and port at once would be refused for 10 s. Targets in a VM on a bridge
-  network (an address on a local network rather than loopback) don't trigger the start warning;
-  only the cap catches their loops.
+  client opening more connections to one address and port at once would be refused for 10 s.
+  Targets in a VM on a bridge network (an address on a local network rather than loopback) don't
+  trigger the start warning; only the caps catch their loops.
 - **IPv6 DNS servers** are not captured yet (IPv4 only, like sshuttle with `--disable-ipv6`).
 - **UDP through the tunnel:** a fallback resolver inside a routed CIDR fails, because the utun
   carries TCP only so far.

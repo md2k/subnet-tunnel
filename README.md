@@ -8,8 +8,8 @@ Inspired by [sshuttle](https://github.com/sshuttle/sshuttle). Built because on m
 pf-based capture caps upload at a few MB/s, while a utun interface with a userspace TCP/IP stack
 reached ~170 MB/s end to end in the same test (see [docs/design.md](docs/design.md)).
 
-> **Status:** early development. Kubernetes and Docker targets, transparent capture of CIDRs on
-> macOS (utun + gVisor), split DNS, a kill switch and a SOCKS5 proxy.
+> **Status:** early development. Kubernetes and Docker targets, transparent capture of CIDRs or a
+> full tunnel on macOS (utun + gVisor), split DNS, a kill switch and a SOCKS5 proxy.
 
 ## Build
 
@@ -52,6 +52,14 @@ build/subtun docker my-app 172.20.0.0/16 --socks 127.0.0.1:1080
 # Split DNS: names under cluster.local resolve inside the pod, everything else as before
 build/subtun k8s -n team-a debug-pod 10.96.0.0/12 10.244.0.0/16 --dns-domain cluster.local
 curl http://my-svc.team-a.svc.cluster.local:8080/
+
+# Everything through a pod in a remote cluster, every name resolved there, and nothing leaking
+# if the tunnel goes away
+build/subtun k8s --context remote -n tools egress 0.0.0.0/1 128.0.0.0/1 \
+  --dns-domain . --dns-domain cluster.local --kill-switch on
+
+build/subtun k8s -n team-a debug-pod 10.0.0.0/8 --dry-run   # what would happen, without root
+build/subtun cleanup                                         # remove blocks a kill switch left
 ```
 
 subtun connects with your kubeconfig or Docker context, starts a small agent in the target over exec
@@ -62,8 +70,8 @@ terminal.
 short-lived helper creates a utun interface (MTU 9000), adds routes for your CIDRs, hands the
 interface to subtun and exits. Traffic is only ever handled by the subtun process running as you.
 The routes live and die with the interface: when subtun exits, crashes or is killed, macOS removes
-both, so nothing is left behind. To change CIDRs, restart subtun. With split DNS the helper stays up
-instead, to remove its pf rules again when subtun stops. See
+both, so nothing is left behind. To change CIDRs, restart subtun. With split DNS, a kill switch or
+IPv6 blocking, the helper stays up instead, to remove its pf rules again when subtun stops. See
 [Privileges](docs/design.md#privileges) for how this works.
 
 Two agents speak the same protocol; `--agent auto` (the default) picks the first that can run:
@@ -79,12 +87,18 @@ static, scratch) are not supported yet.
 **Split DNS.** With `--dns-domain` (suffixes) or `--dns-pattern` (regular expressions), subtun
 answers the queries your Mac sends to its DNS servers: matching names are resolved by the target's
 own resolver through the tunnel, the rest by your normal resolver. Like sshuttle's `--dns` with
-domain patterns, for any number of domains. See [DNS](docs/config.md#dns).
+domain patterns, for any number of domains; `--dns-domain .` sends every name except local ones.
+See [DNS](docs/config.md#dns).
 
 **Kill switch.** `--kill-switch on` keeps traffic for your routes from leaving any other way when
 the tunnel is gone (crash, lost pod): the blocks stay until the next run or `subtun cleanup`;
-`lockdown` keeps them even after Ctrl-C. In a full tunnel (`0.0.0.0/1 128.0.0.0/1`) subtun also
-blocks IPv6, which it doesn't carry yet. See [Kill switch](docs/config.md#kill-switch).
+`lockdown` keeps them even after Ctrl-C. The blocks follow your networks, so another Wi-Fi's LAN
+stays reachable. See [Kill switch](docs/config.md#kill-switch).
+
+**Full tunnel.** Routing `0.0.0.0/1 128.0.0.0/1` sends everything through the target; your LAN,
+multicast and link-local stay local, and IPv6, which subtun doesn't carry yet, is blocked. The target
+has to run outside this machine: a local Docker Desktop pod would loop your traffic back (subtun
+warns and cuts such loops). See [Full tunnel](docs/config.md#full-tunnel).
 
 **Excludes and profiles.** `-x/--exclude` keeps addresses out of the tunnel; the most specific rule
 wins, like sshuttle. `--dry-run` prints the routes subtun would install. Settings can live in named
@@ -111,17 +125,19 @@ turns an sshuttle options file into a profile ([details](docs/config.md#importin
 ## Planned
 
 - Reconnect when the connection to the target drops (the kill switch holds meanwhile).
-- `subtun status` and a local control API; change CIDRs and DNS at runtime without a restart (opt-in).
+- `subtun status` and a local control API; change CIDRs and DNS at runtime without a restart (opt-in),
+  routes that follow network changes, and DNS answers outside the routes routed into the tunnel.
 - SSH transport to any host.
 - DNS without firewall rules: subtun as the system resolver, or only for the listed domains.
 - UDP and IPv6 through the tunnel; capture on Linux (TUN) and Windows (wintun).
 
 ## Documentation
 
-- [Configuration](docs/config.md): profiles and defaults, routes and excludes, split DNS, kill
-  switch, IPv6, safety checks.
+- [Configuration](docs/config.md): commands, profiles and defaults, examples, routes and excludes,
+  full tunnel, split DNS, kill switch, IPv6, safety checks, importing from sshuttle.
 - [Design](docs/design.md): measurements, architecture and open questions.
-- [Development](docs/development.md): tests, code layout and the local test setup.
+- [Development](docs/development.md): tests, code layout, the local test setup, and trying a full
+  tunnel or the kill switch safely.
 
 ## License
 
