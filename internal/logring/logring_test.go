@@ -36,7 +36,7 @@ func TestCaps(t *testing.T) {
 // writer never blocks.
 func TestSubscribe(t *testing.T) {
 	r := New(0, 0)
-	ch, stop := r.Subscribe(2)
+	_, ch, stop := r.Follow(2)
 	r.Add(Line{Text: "a"})
 	r.Add(Line{Text: "b"})
 	done := make(chan struct{})
@@ -76,5 +76,28 @@ func TestHandlerAndTee(t *testing.T) {
 	}
 	if !strings.Contains(term.String(), `msg="tunnel up" tunnel=work`) || strings.Contains(term.String(), "hidden") {
 		t.Fatalf("terminal: %q", term.String())
+	}
+}
+
+// Follow hands over the lines held and then new ones, none twice, also
+// after the ring wrapped around.
+func TestFollow(t *testing.T) {
+	r := New(3, 0)
+	for i := 0; i < 5; i++ {
+		r.Add(Line{Text: fmt.Sprint(i)})
+	}
+	held, ch, stop := r.Follow(4)
+	defer stop()
+	r.Add(Line{Text: "5"})
+	var got []string
+	for _, l := range held {
+		got = append(got, l.Text)
+	}
+	got = append(got, (<-ch).Text)
+	if strings.Join(got, ",") != "2,3,4,5" {
+		t.Fatalf("got %v", got)
+	}
+	if lines := r.Lines(); len(lines) != 3 || lines[0].Text != "3" || lines[2].Text != "5" {
+		t.Fatalf("after wrapping: %v", lines)
 	}
 }

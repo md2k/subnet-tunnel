@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -13,6 +15,9 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/control"
 	"github.com/md2k/subnet-tunnel/internal/logring"
 )
+
+// queryTimeout bounds one question to a running subtun.
+const queryTimeout = 3 * time.Second
 
 // instances finds the running subtuns, or the one with pid (0: all).
 func instances(pid int) ([]control.Instance, error) {
@@ -60,13 +65,18 @@ DNS capture and kill switch. Runs with control: off don't show up.`,
 				}
 				var all []instanceStatus
 				for _, in := range ins {
+					// A suspended or stuck subtun mustn't hold up the others.
+					ctx, cancel := context.WithTimeout(cmd.Context(), queryTimeout)
 					c := control.NewClient(in.Path)
 					var is instanceStatus
-					if err := c.Get(cmd.Context(), "/v1/status", &is.Status); err != nil {
-						continue // it just stopped
+					err := c.Get(ctx, "/v1/status", &is.Status)
+					if err == nil && conns {
+						_ = c.Get(ctx, "/v1/connections", &is.Connections)
 					}
-					if conns {
-						_ = c.Get(cmd.Context(), "/v1/connections", &is.Connections)
+					cancel()
+					if err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "subtun pid %d doesn't answer: %v\n", in.PID, err)
+						continue
 					}
 					all = append(all, is)
 				}
@@ -97,7 +107,9 @@ DNS capture and kill switch. Runs with control: off don't show up.`,
 			t := time.NewTicker(time.Second)
 			defer t.Stop()
 			for {
-				fmt.Fprint(out, "\x1b[H\x1b[2J") // home, clear
+				if !asJSON {
+					fmt.Fprint(out, "\x1b[H\x1b[2J") // home, clear
+				}
 				if err := render(); err != nil {
 					return err
 				}
@@ -146,7 +158,13 @@ then, with -f, follow new ones until Ctrl-C.`,
 				endpoint += "?follow=1"
 			}
 			out := cmd.OutOrStdout()
-			return control.NewClient(ins[0].Path).Stream(cmd.Context(), endpoint, func(b []byte) error {
+			ctx := cmd.Context()
+			if !follow {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, queryTimeout)
+				defer cancel()
+			}
+			return control.NewClient(ins[0].Path).Stream(ctx, endpoint, func(b []byte) error {
 				var l logring.Line
 				if err := json.Unmarshal(b, &l); err != nil {
 					return err
@@ -165,10 +183,15 @@ then, with -f, follow new ones until Ctrl-C.`,
 func writeStatus(w io.Writer, is instanceStatus, now time.Time) {
 	st := is.Status
 	fmt.Fprintf(w, "subtun pid %d, %s, up %s", st.PID, st.Version, ago(now, st.Started))
-	if st.Utun != "" {
+	capturing := st.Utun != ""
+	if capturing {
 		fmt.Fprintf(w, "; %s (%s), %s root helper", st.Utun, st.TunAddr, st.Helper)
 	}
 	fmt.Fprintln(w)
+	routed := slices.ContainsFunc(st.Tunnels, func(t control.Tunnel) bool { return len(t.Routes) > 0 })
+	if routed && !capturing {
+		fmt.Fprintln(w, "  capture not started yet (connecting, or sudo is asking)")
+	}
 	width := 0
 	for _, t := range st.Tunnels {
 		width = max(width, len(tunnelLabel(t)))
@@ -217,13 +240,20 @@ func writeStatus(w io.Writer, is instanceStatus, now time.Time) {
 			fmt.Fprintf(w, "%slast error: %s\n", pad, t.LastError)
 		}
 	}
-	if d := st.DNS; d != nil {
-		follow := ""
+	if d := st.DNS; d != nil && (capturing || d.Development) {
+		what, follow := "DNS capture: queries to ", ""
+		if d.Development {
+			what = "DNS (development listener, nothing captured): other names to "
+		}
 		if d.Follow {
 			follow = ", following the system's"
 		}
-		fmt.Fprintf(w, "  DNS capture: %s%s; other names: %s (%d answered, %d failed)\n",
-			strings.Join(d.Servers, ", "), follow, strings.Join(d.Fallback, ", "), d.Counts.Answered, d.Counts.Failed)
+		if d.Development {
+			fmt.Fprintf(w, "  %s%s (%d answered, %d failed)\n", what, strings.Join(d.Fallback, ", "), d.Counts.Answered, d.Counts.Failed)
+		} else {
+			fmt.Fprintf(w, "  %s%s%s; other names: %s (%d answered, %d failed)\n",
+				what, strings.Join(d.Servers, ", "), follow, strings.Join(d.Fallback, ", "), d.Counts.Answered, d.Counts.Failed)
+		}
 		if len(d.Local) > 0 {
 			fmt.Fprintf(w, "    stay local: %s\n", summary(d.Local, 6))
 		}
@@ -231,7 +261,7 @@ func writeStatus(w io.Writer, is instanceStatus, now time.Time) {
 			fmt.Fprintf(w, "    never through a tunnel: %s\n", strings.Join(d.Own, ", "))
 		}
 	}
-	if k := st.KillSwitch; k != nil {
+	if k := st.KillSwitch; k != nil && capturing {
 		fmt.Fprintf(w, "  kill switch %s: %d guarded prefixes (%d stay after Ctrl-C); DNS while holding: %s\n", k.Mode, k.Guarded, k.Lockdown, k.DNS)
 	}
 	if st.BlockIPv6 {

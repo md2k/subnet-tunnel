@@ -38,7 +38,7 @@ func TestWriteStatus(t *testing.T) {
 		"up 1.2 MB (5.0 kB/s), down 34.0 MB (120.0 kB/s); DNS 340 answered, 2 failed\n",
 		"  dev   reconnecting for 10s (attempt 2 of 10, next in 3s)\n",
 		"last error: pod tools/debug: not found\n",
-		"  DNS capture: 192.168.1.1, following the system's; other names: the captured servers (0 answered, 0 failed)\n",
+		"  DNS capture: queries to 192.168.1.1, following the system's; other names: the captured servers (0 answered, 0 failed)\n",
 		"    stay local: local, lan\n",
 		"  kill switch on: 98 guarded prefixes (0 stay after Ctrl-C); DNS while holding: blocked\n",
 		"  outgoing IPv6 blocked\n",
@@ -84,5 +84,29 @@ func TestEngineStatus(t *testing.T) {
 	}
 	if c := es.conns(); len(c) != 2 || c[1].Name != "dev" {
 		t.Errorf("conns: %+v", c)
+	}
+}
+
+// subtun k8s and subtun docker take the config file's control: too, unless
+// --control is given.
+func TestControlFromConfig(t *testing.T) {
+	cmd := newK8sCmd(&globalOpts{})
+	var s settings
+	s.control = controlStatus
+	controlFromConfig(cmd, &globalOpts{config: "testdata/control-off.yaml"}, &s)
+	if s.control != controlOff {
+		t.Fatalf("from the file: %q", s.control)
+	}
+	s.control = controlStatus
+	controlFromConfig(cmd, &globalOpts{config: "testdata/no-such-config.yaml"}, &s)
+	if s.control != controlStatus {
+		t.Fatalf("no file: %q", s.control)
+	}
+	if err := cmd.Flags().Set("control", controlStatus); err != nil {
+		t.Fatal(err)
+	}
+	controlFromConfig(cmd, &globalOpts{config: "testdata/control-off.yaml"}, &s)
+	if s.control != controlStatus {
+		t.Fatalf("the flag lost to the file: %q", s.control)
 	}
 }

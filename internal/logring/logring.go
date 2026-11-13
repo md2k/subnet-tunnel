@@ -24,12 +24,14 @@ type Line struct {
 	Text string    `json:"text"`
 }
 
-// Ring is the buffer.
+// Ring is the buffer: a circular one, so adding a line costs the same
+// however many are held.
 type Ring struct {
 	mu       sync.Mutex
 	maxLines int
 	maxBytes int
-	lines    []Line // oldest first
+	buf      []Line // circular: n lines from head
+	head, n  int
 	bytes    int
 	subs     map[chan Line]struct{}
 	dropped  uint64 // lines followers lost
@@ -44,7 +46,7 @@ func New(maxLines, maxBytes int) *Ring {
 	if maxBytes <= 0 {
 		maxBytes = DefaultBytes
 	}
-	return &Ring{maxLines: maxLines, maxBytes: maxBytes, subs: map[chan Line]struct{}{}}
+	return &Ring{maxLines: maxLines, maxBytes: maxBytes, buf: make([]Line, maxLines), subs: map[chan Line]struct{}{}}
 }
 
 // Add appends a line, dropping the oldest ones over the caps, and hands it
@@ -52,15 +54,14 @@ func New(maxLines, maxBytes int) *Ring {
 func (r *Ring) Add(l Line) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.lines = append(r.lines, l)
-	r.bytes += len(l.Text)
-	drop := 0
-	for len(r.lines)-drop > r.maxLines || r.bytes > r.maxBytes && len(r.lines)-drop > 1 {
-		r.bytes -= len(r.lines[drop].Text)
-		drop++
+	if r.n == r.maxLines {
+		r.dropOldest()
 	}
-	if drop > 0 {
-		r.lines = append(r.lines[:0], r.lines[drop:]...)
+	r.buf[(r.head+r.n)%r.maxLines] = l
+	r.n++
+	r.bytes += len(l.Text)
+	for r.bytes > r.maxBytes && r.n > 1 {
+		r.dropOldest()
 	}
 	for ch := range r.subs {
 		select {
@@ -71,22 +72,42 @@ func (r *Ring) Add(l Line) {
 	}
 }
 
+func (r *Ring) dropOldest() {
+	r.bytes -= len(r.buf[r.head].Text)
+	r.buf[r.head] = Line{}
+	r.head = (r.head + 1) % r.maxLines
+	r.n--
+}
+
 // Lines returns the lines held, oldest first.
 func (r *Ring) Lines() []Line {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]Line(nil), r.lines...)
+	return r.linesLocked()
 }
 
-// Subscribe returns new lines as they are added, buffering up to buf; the
-// returned function ends the subscription.
-func (r *Ring) Subscribe(buf int) (<-chan Line, func()) {
+func (r *Ring) linesLocked() []Line {
+	out := make([]Line, r.n)
+	for i := range r.n {
+		out[i] = r.buf[(r.head+i)%r.maxLines]
+	}
+	return out
+}
+
+// Follow returns the lines held and, from the same moment, new ones (so
+// none is missed or repeated), buffering up to buf; stop ends it.
+func (r *Ring) Follow(buf int) (held []Line, lines <-chan Line, stop func()) {
 	ch := make(chan Line, buf)
 	r.mu.Lock()
+	held = r.linesLocked()
 	r.subs[ch] = struct{}{}
 	r.mu.Unlock()
+	return held, ch, r.unsubscribe(ch)
+}
+
+func (r *Ring) unsubscribe(ch chan Line) func() {
 	var once sync.Once
-	return ch, func() {
+	return func() {
 		once.Do(func() {
 			r.mu.Lock()
 			delete(r.subs, ch)

@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"log/slog"
+	"net/netip"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -64,6 +66,7 @@ type engineStatus struct {
 	dnsCounts []*dns.Counts
 	fallback  *dns.Counts
 	dnsOpts   *capture.DNSOptions // captured or development DNS; nil: none
+	devDNS    bool                // dnsOpts is the development listener
 	capt      atomic.Pointer[capture.Capture]
 }
 
@@ -79,10 +82,11 @@ func newEngineStatus(mp *multiPlan, control string) *engineStatus {
 	return es
 }
 
-// routesOn records which tunnels' routes are in use.
-func (es *engineStatus) routesOn(active []bool) {
+// routesOn records which tunnels have all their routes on the utun.
+func (es *engineStatus) routesOn(active []bool, onUtun []netip.Prefix) {
 	for i, on := range active {
-		es.infos[i].update(func(t *tunnelInfo) { t.routesOn = on })
+		in := on && !slices.ContainsFunc(es.mp.final(i), func(p netip.Prefix) bool { return !slices.Contains(onUtun, p) })
+		es.infos[i].update(func(t *tunnelInfo) { t.routesOn = in })
 	}
 }
 
@@ -105,10 +109,10 @@ func (es *engineStatus) sample(ctx context.Context) {
 // status is the run now.
 func (es *engineStatus) status() control.Status {
 	mp := es.mp
-	st := control.Status{PID: os.Getpid(), Version: version.String(), Started: es.start, Control: es.control,
-		BlockIPv6: mp.blockIPv6}
+	st := control.Status{PID: os.Getpid(), Version: version.String(), Started: es.start, Control: es.control}
 	c := es.capt.Load()
 	if c != nil {
+		st.BlockIPv6 = c.BlockingIPv6()
 		st.Utun, st.TunAddr = c.Name, mp.tunAddr.String()
 		st.Helper = "one-shot"
 		if c.Session() {
@@ -144,7 +148,7 @@ func (es *engineStatus) status() control.Status {
 				servers, fallback = s, f
 			}
 		}
-		sd := &control.DNS{Follow: d.Auto, Own: d.Match.Own(),
+		sd := &control.DNS{Development: es.devDNS, Follow: d.Auto && !es.devDNS, Own: d.Match.Own(),
 			Counts: control.DNSCounts{Answered: es.fallback.Answered.Load(), Failed: es.fallback.Failed.Load()}}
 		for _, a := range servers {
 			sd.Servers = append(sd.Servers, a.String())
@@ -161,12 +165,12 @@ func (es *engineStatus) status() control.Status {
 		st.DNS = sd
 	}
 	if mode := mp.ksMode(); mode != "off" {
-		ks := &control.KillSwitch{Mode: mode, DNS: "blocked"}
-		if mp.allowDNS {
-			ks.DNS = "allowed"
-		}
+		ks := &control.KillSwitch{Mode: mode, DNS: "allowed"}
 		if c != nil {
 			ks.Guarded, ks.Lockdown = c.GuardCounts()
+			if c.HoldsDNS() {
+				ks.DNS = "blocked"
+			}
 		}
 		st.KillSwitch = ks
 	}

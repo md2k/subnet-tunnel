@@ -237,6 +237,14 @@ func (c *Capture) FlushDNSCache() error {
 	return c.helper.FlushDNSCache()
 }
 
+// BlockingIPv6 reports whether outgoing IPv6 is blocked (it is skipped
+// when subtun's own connection may use IPv6).
+func (c *Capture) BlockingIPv6() bool { return c.helper != nil && c.opts.BlockIPv6 }
+
+// HoldsDNS reports whether DNS to the captured servers stays blocked while
+// the kill switch holds.
+func (c *Capture) HoldsDNS() bool { return c.dns != nil && c.opts.killSwitch() && !c.opts.AllowDNS }
+
 // GuardCounts returns how many prefixes the kill switch guards now, and how
 // many of them stay after a deliberate stop.
 func (c *Capture) GuardCounts() (guarded, lockdown int) {

@@ -503,8 +503,9 @@ written to disk.
 |---|---|---|
 | `control` (top level of the config file, next to `defaults:`) | `--control` | `status` (default), `off` (no socket) |
 
-`control` is set once for the whole run, never per profile. Changing routes and DNS names while
-subtun runs (`control: full`) is planned.
+`control` is set once for the whole run, never per profile; `subtun k8s` and `subtun docker` take
+the config file's key too (`--control` wins). Changing routes and DNS names while subtun runs
+(`control: full`) is planned.
 
 ## Importing from sshuttle
 

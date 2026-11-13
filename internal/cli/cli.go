@@ -381,6 +381,7 @@ runs as you. --socks adds a SOCKS5 proxy, for example for a browser.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			t.Pod = strings.TrimPrefix(args[0], "pod/")
 			s.routes = args[1:]
+			controlFromConfig(cmd, g, &s)
 			return run(cmd.Context(), cmd.OutOrStdout(), g, s, func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
 				return k8s.Connect(ctx, t, agents, s.transport(g), log)
 			})
@@ -414,6 +415,7 @@ CIDRs are captured transparently through a utun interface (sudo asks once);
 		RunE: func(cmd *cobra.Command, args []string) error {
 			t.Container = args[0]
 			s.routes = args[1:]
+			controlFromConfig(cmd, g, &s)
 			return run(cmd.Context(), cmd.OutOrStdout(), g, s, func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
 				return docker.Connect(ctx, t, agents, s.transport(g), log)
 			})
@@ -423,6 +425,31 @@ CIDRs are captured transparently through a utun interface (sudo asks once);
 	cmd.Flags().StringVar(&t.Context, "context", "", "docker context (default: $DOCKER_CONTEXT, then the current context)")
 	s.register(cmd)
 	return cmd
+}
+
+// controlFromConfig applies the config file's top-level control: to a run
+// without a profile (subtun k8s, subtun docker) unless --control was
+// given: it is global for every run. No config file is fine; a broken one
+// only loses the setting.
+func controlFromConfig(cmd *cobra.Command, g *globalOpts, s *settings) {
+	if cmd.Flags().Changed("control") {
+		return
+	}
+	path := g.config
+	if path == "" {
+		path = config.DefaultPath()
+	}
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+	f, err := config.Load(path)
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %v (its control: setting is ignored)\n", err)
+		return
+	}
+	if f.Control != "" {
+		s.control = string(f.Control)
+	}
 }
 
 type connectFunc func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error)

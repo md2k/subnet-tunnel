@@ -69,14 +69,15 @@ type DNSCounts struct {
 	Failed   uint64 `json:"failed"`
 }
 
-// DNS is the shared DNS capture.
+// DNS is the shared DNS capture (or the development listener).
 type DNS struct {
-	Servers  []string  `json:"servers"`
-	Follow   bool      `json:"followSystem"`
-	Fallback []string  `json:"fallback"`
-	Local    []string  `json:"stayLocal,omitempty"`
-	Own      []string  `json:"ownNames,omitempty"`
-	Counts   DNSCounts `json:"fallbackCounts"`
+	Development bool      `json:"development,omitempty"` // a listener for testing; nothing captured
+	Servers     []string  `json:"servers"`
+	Follow      bool      `json:"followSystem"`
+	Fallback    []string  `json:"fallback"`
+	Local       []string  `json:"stayLocal,omitempty"`
+	Own         []string  `json:"ownNames,omitempty"`
+	Counts      DNSCounts `json:"fallbackCounts"`
 }
 
 // KillSwitch is the shared kill switch.
@@ -121,15 +122,16 @@ func writeJSON(w http.ResponseWriter, v any) {
 // it then streams new lines until the client goes away.
 func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	follow := r.URL.Query().Get("follow") == "1"
+	held := s.Logs.Lines()
 	var ch <-chan logring.Line
 	if follow {
 		var stop func()
-		ch, stop = s.Logs.Subscribe(256)
+		held, ch, stop = s.Logs.Follow(256)
 		defer stop()
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	enc := json.NewEncoder(w)
-	for _, l := range s.Logs.Lines() {
+	for _, l := range held {
 		if enc.Encode(l) != nil {
 			return
 		}

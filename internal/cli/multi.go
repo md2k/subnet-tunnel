@@ -860,7 +860,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		if d == nil {
 			continue
 		}
-		es.dnsOpts = d
+		es.dnsOpts, es.devDNS = d, d == devDNS
 		d.FallbackCounts = es.fallback
 		for i := range d.Tunnels {
 			d.Tunnels[i].Counts = es.dnsCounts[i]
@@ -1073,7 +1073,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			}
 			c, helperExited = r.c, r.c.HelperExited()
 			es.capt.Store(c)
-			es.routesOn(mp.activeSet(states))
+			es.routesOn(mp.activeSet(states), c.Routes())
 			// Below: catch up with what changed while it started.
 		case ev := <-events:
 			tl := logs[ev.i]
@@ -1081,8 +1081,11 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			states[ev.i], tried[ev.i] = ev.state, true
 			es.infos[ev.i].update(func(t *tunnelInfo) {
 				t.state, t.since = ev.state, time.Now()
-				if ev.state == stateUp {
+				switch ev.state {
+				case stateUp:
 					t.target, t.agent, t.attempt, t.nextTry = ev.carrier.Desc, ev.agent, 0, time.Time{}
+				case stateReconnecting:
+					t.lastErr = "connection to the agent lost"
 				}
 				if ev.err != nil {
 					t.lastErr = ev.err.Error()
@@ -1173,7 +1176,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			continue // one-shot helper: routes can't change (warned above)
 		}
 		err := applyLayout(c, mp, states, utun, rt)
-		es.routesOn(mp.activeSet(states))
+		es.routesOn(mp.activeSet(states), c.Routes())
 		if err != nil {
 			if err.Error() != lastErr {
 				log.Warn("updating the routes failed; trying again", "err", err, "in", retryWait)

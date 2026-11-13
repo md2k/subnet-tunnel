@@ -1,0 +1,6 @@
+# Test fixture: the control socket off for every run.
+control: off
+profiles:
+  p:
+    target: {docker: {container: c}}
+    socks: 127.0.0.1:1080
