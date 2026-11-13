@@ -65,17 +65,16 @@ func TestWatchLocalsReportsChangesOnly(t *testing.T) {
 func TestFollowLocalsUpdatesTheGuard(t *testing.T) {
 	final := mps("0.0.0.0/1", "128.0.0.0/1")
 	home, office := mps("192.168.1.0/24"), mps("10.20.0.0/16")
-	start, err := guardFor(final, home)
+	g, err := newGuardState(Guard{Base: final}, home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := &guardState{prefixes: start}
 	s := &seq{lists: [][]netip.Prefix{home, office}}
 	applied := make(chan []netip.Prefix, 4)
 	apply := func() error { applied <- g.get(); return nil }
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go followLocals(ctx, time.Millisecond, final, s.read, g, apply, slog.New(slog.DiscardHandler))
+	go followLocals(ctx, time.Millisecond, s.read, g, apply, slog.New(slog.DiscardHandler))
 
 	var now []netip.Prefix
 	select {
@@ -94,17 +93,58 @@ func TestFollowLocalsUpdatesTheGuard(t *testing.T) {
 // A failing apply or a guard that would be empty leaves things as they were.
 func TestFollowLocalsKeepsGuardOnEmpty(t *testing.T) {
 	final := mps("10.20.0.0/16")
-	g := &guardState{prefixes: final}
+	g, err := newGuardState(Guard{Base: final}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	s := &seq{lists: [][]netip.Prefix{nil, mps("10.0.0.0/8")}} // a local network now covers every route
 	var calls int
 	var mu sync.Mutex
 	apply := func() error { mu.Lock(); calls++; mu.Unlock(); return errors.New("unexpected") }
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	followLocals(ctx, time.Millisecond, final, s.read, g, apply, slog.New(slog.DiscardHandler))
+	followLocals(ctx, time.Millisecond, s.read, g, apply, slog.New(slog.DiscardHandler))
 	mu.Lock()
 	defer mu.Unlock()
 	if calls != 0 || !slices.Equal(g.get(), final) {
 		t.Fatalf("calls %d, guard %v", calls, g.get())
+	}
+}
+
+// Several tunnels: the base changes as profiles come and go, the local
+// networks stay out of it, and the lockdown part is tracked alongside.
+func TestGuardStateBaseAndLockdown(t *testing.T) {
+	lan := mps("10.1.0.0/24")
+	g, err := newGuardState(Guard{Base: mps("10.0.0.0/8"), Lockdown: mps("10.0.0.0/8")}, lan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	covers := func(ps []netip.Prefix, a string) bool {
+		return slices.ContainsFunc(ps, func(p netip.Prefix) bool { return p.Contains(netip.MustParseAddr(a)) })
+	}
+	if !covers(g.get(), "10.9.9.9") || covers(g.get(), "10.1.0.5") || !slices.Equal(g.get(), g.getLockdown()) {
+		t.Fatalf("start: %v / %v", g.get(), g.getLockdown())
+	}
+	// Another profile now owns 10.50.0.0/16 and isn't in lockdown.
+	changed, err := g.setBase(Guard{Base: mps("10.0.0.0/8", "172.16.0.0/12"), Lockdown: mps("10.0.0.0/8")})
+	if err != nil || !changed {
+		t.Fatalf("setBase: %v %v", changed, err)
+	}
+	if !covers(g.get(), "172.16.1.1") || covers(g.getLockdown(), "172.16.1.1") || covers(g.getLockdown(), "10.1.0.5") {
+		t.Fatalf("after setBase: %v / %v", g.get(), g.getLockdown())
+	}
+	if changed, _ := g.setBase(Guard{Base: mps("10.0.0.0/8", "172.16.0.0/12"), Lockdown: mps("10.0.0.0/8")}); changed {
+		t.Fatal("the same base reported as a change")
+	}
+	// Local networks change: the new base is kept.
+	if changed, err := g.setLocals(mps("172.16.5.0/24")); err != nil || !changed {
+		t.Fatalf("setLocals: %v %v", changed, err)
+	}
+	if covers(g.get(), "172.16.5.1") || !covers(g.get(), "10.1.0.5") || !covers(g.get(), "172.16.1.1") {
+		t.Fatalf("after setLocals: %v", g.get())
+	}
+	// A guard that would be empty is kept.
+	if _, err := g.setLocals(mps("10.0.0.0/8", "172.16.0.0/12")); !errors.Is(err, errEmptyGuard) || len(g.get()) == 0 {
+		t.Fatalf("empty guard: %v, %v", err, g.get())
 	}
 }

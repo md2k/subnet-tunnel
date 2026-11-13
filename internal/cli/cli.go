@@ -618,11 +618,16 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 			}
 		}
 		if gp.on() {
-			if opts.Guarded, err = guardPrefixes(final, localPrefixes()); err != nil {
+			guarded, err := guardPrefixes(final, localPrefixes())
+			if err != nil {
 				return err
 			}
-			if len(opts.Guarded) == 0 {
+			if len(guarded) == 0 {
 				log.Warn("kill switch has nothing to guard: every route is a local network")
+			}
+			opts.Guard = capture.Guard{Base: final}
+			if gp.killSwitch == "lockdown" {
+				opts.Guard.Lockdown = final
 			}
 			opts.Locals = localPrefixes
 		}
