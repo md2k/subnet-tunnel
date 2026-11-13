@@ -79,6 +79,9 @@ the words you meant (`mode: off`, `capture: off` work).
 | `subtun up --profile A,B` | run several profiles at once ([below](#several-profiles-at-once)) |
 | `subtun status` | what every running subtun is doing ([below](#status-and-logs)) |
 | `subtun logs [-f]` | a running subtun's recent log lines |
+| `subtun route add\|del CIDR...` | change a running subtun's routes ([below](#changes-while-running)) |
+| `subtun dns add\|del DOMAIN...` | change a running subtun's DNS names |
+| `subtun profile stop\|start\|reconnect [NAME]` | stop, start or reconnect one of its profiles |
 | `subtun cleanup` | remove firewall rules an earlier session left (a kill switch's blocks), without starting one |
 | `subtun import sshuttle FILE` | turn an sshuttle options file into a profile ([below](#importing-from-sshuttle)) |
 | `subtun version` | print the version |
@@ -490,7 +493,7 @@ subtun logs -f                   # then follow new ones (--pid N when several ru
 ```
 
 For each tunnel (one per profile): its state (connecting, up, reconnecting with the attempt and
-the next try, gave up) and the last error, the target and agent, its routes and whether they are in
+the next try, gave up, stopped) and the last error, the target and agent, its routes and whether they are in
 use, its DNS names, kill switch and SOCKS address, and counters: connections (open, total, failed,
 through SOCKS), bytes each way with the rate of the last second, the names it answered, and
 connections the loop guard refused. Then the shared DNS capture (the servers captured now, the
@@ -502,11 +505,63 @@ and every connection captured; `subtun logs` shows them only to your user, like 
 
 | Setting | Flag | Values |
 |---|---|---|
-| `control` (top level of the config file, next to `defaults:`) | `--control` | `status` (default), `off` (no socket) |
+| `control` (top level of the config file, next to `defaults:`) | `--control` | `status` (default), `full` (also [changes](#changes-while-running)), `off` (no socket) |
 
 `control` is set once for the whole run, never per profile; `subtun k8s` and `subtun docker` take
-the config file's key too (`--control` wins). Changing routes and DNS names while subtun runs
-(`control: full`) is planned.
+the config file's key too (`--control` wins).
+
+## Changes while running
+
+A subtun started with `control: full` (or `--control full`) takes changes through its control
+socket, without a restart: routes, DNS names, and stopping, starting or reconnecting one of its
+profiles while the others go on.
+
+```sh
+subtun up --profile work,dev --control full
+
+subtun route add --profile dev 10.70.0.0/16 10.71.0.5   # route these through dev's tunnel too
+subtun route add --profile work -x 10.1.0.0/16          # an exclude: never routed
+subtun route del --profile dev 10.70.0.0/16             # a route it has, configured or added
+subtun dns add --profile dev corp.example --pattern '^db[0-9]+\.'
+subtun dns del --profile dev corp.example
+subtun profile stop dev                                 # as Ctrl-C, for dev only
+subtun profile start dev                                # connect it again
+subtun profile start dev --reload                       # ... reading it from the config file again
+subtun profile reconnect work                           # drop its connection and connect again now
+subtun route add --profile dev 10.80.0.0/16 --dry-run   # only show what would change
+```
+
+- **Checked as at start.** Each change is planned like the profile was: the routes against the
+  machine's networks (the safety checks, the automatic excludes), subtun's own endpoints carved out,
+  the same CIDR or DNS domain (or `.`) in two profiles refused. A refused change changes nothing.
+  The utun's routes, the kill switch's guard, which tunnel carries an address and the DNS matcher
+  follow at once; the system's DNS cache is flushed after a DNS change.
+- **Which profile.** `--profile` (or the `NAME` of `subtun profile`) can be left out when the run
+  has one profile. With several running subtuns, choose one with `--pid`.
+- **Temporary.** Changes last until subtun stops; nothing is written to the config file.
+  `subtun status` lists them per profile ("changed while running").
+- **`profile stop`** is Ctrl-C for that profile: its routes and DNS names are removed, and its
+  traffic goes the normal way again. With `killSwitch.mode: on` its blocks are lifted too; with
+  `lockdown` its routes stay and its traffic is refused until it starts again. Its SOCKS proxy
+  refuses connections meanwhile. subtun goes on even with every profile stopped (Ctrl-C ends it).
+- **`profile start`** connects a stopped profile, or one that gave up, again, with the settings it
+  had: the ones it started with and the changes made since. With `--reload` it reads the profile
+  from the config file the run started with instead (command-line flags of `subtun up NAME` still
+  apply), dropping the changes made while running. A reload takes the target, agent, routes,
+  excludes, DNS domains and patterns, SOCKS address and reconnect settings; the settings the run
+  shares or set up at start (`tun.*`, `dns.capture`, `dns.servers`, `dns.fallback`, `dns.unrouted`,
+  `killSwitch.*`, `blockIPv6`) need a restart, and a reload that changes them is refused.
+- **`profile reconnect`** drops the profile's connection and connects again at once, then by its
+  reconnect settings; its routes stay meanwhile, as when a connection is lost.
+- **Limits for now.** Routes can be added to a profile that started with routes (not to a
+  SOCKS-only one), and a profile keeps at least one route (stop it instead). DNS names can be added
+  when the run captures DNS already (a profile had DNS names when it started). Starting a profile
+  that isn't part of the run is planned.
+
+With `control: full` the root helper stays up for the whole run, also for one profile with routes
+only (otherwise it exits after setup), so routes can change without a sudo prompt: any program
+running as your user can then change subtun's routes. The routes can only point into subtun's utun,
+and the helper checks each one.
 
 ## Importing from sshuttle
 
