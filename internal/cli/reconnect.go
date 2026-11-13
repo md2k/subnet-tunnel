@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/md2k/subnet-tunnel/internal/netstack"
 	"github.com/md2k/subnet-tunnel/internal/transport"
 	"github.com/md2k/subnet-tunnel/internal/tunnel"
 )
@@ -23,7 +24,7 @@ const (
 )
 
 // errReconnecting is what dials and DNS get while the tunnel is down.
-var errReconnecting = errors.New("the tunnel is down, reconnecting")
+var errReconnecting = fmt.Errorf("the tunnel is down, reconnecting (%w)", netstack.ErrNoTunnel)
 
 // liveTunnel is the tunnel client in use, swapped when subtun reconnects.
 // The capture, the SOCKS proxy and DNS all go through it. While

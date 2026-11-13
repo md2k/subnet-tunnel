@@ -56,6 +56,11 @@ type Dialer interface {
 	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
+// ErrNoTunnel is what a Dialer returns (wrapped) while it has no tunnel,
+// for example while reconnecting: the outage is reported once by whoever
+// knows about it, so the failed connects are logged at debug level only.
+var ErrNoTunnel = errors.New("no tunnel")
+
 // Options configures New.
 type Options struct {
 	Logger      *slog.Logger  // nil: discard
@@ -208,8 +213,9 @@ func (st *Stack) forward(r *tcp.ForwarderRequest) {
 	cancel()
 	st.guard.dialed(dst)
 	if err != nil {
-		// A loop unwinding, or the same destination failing again: debug.
-		if !st.guard.looping(dst) && st.guard.reportFailure(dst) {
+		// A loop unwinding, the tunnel being down, or the same destination
+		// failing again: debug.
+		if !errors.Is(err, ErrNoTunnel) && !st.guard.looping(dst) && st.guard.reportFailure(dst) {
 			log.Info("connect failed", "err", err)
 		} else {
 			log.Debug("connect failed", "err", err)
