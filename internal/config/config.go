@@ -24,8 +24,8 @@ import (
 
 // File is the whole config file.
 type File struct {
-	// Control is the control socket for every run (status, off): global,
-	// never per profile.
+	// Control is the control socket for every run (status, full, off):
+	// global, never per profile.
 	Control  Word               `json:"control,omitempty"`
 	Defaults Profile            `json:"defaults,omitempty"` // every key except target
 	Profiles map[string]Profile `json:"profiles"`
@@ -34,12 +34,10 @@ type File struct {
 // ValidControl checks a control mode (the setting and --control).
 func ValidControl(v string) error {
 	switch v {
-	case "", "status", "off":
+	case "", "status", "full", "off":
 		return nil
-	case "full":
-		return errors.New(`control "full" (changes while running) isn't there yet; use status or off`)
 	}
-	return fmt.Errorf("control %q: use status or off", v)
+	return fmt.Errorf("control %q: use status, full or off", v)
 }
 
 // Profile is one named setup, run with `subtun up NAME`.

@@ -217,16 +217,16 @@ profiles:
 	}
 }
 
-// control is global (top level), status or off; full isn't there yet.
+// control is global (top level): status, full or off.
 func TestControlKey(t *testing.T) {
 	base := "profiles:\n  p:\n    target: {docker: {container: c}}\n    socks: 127.0.0.1:1080\n"
-	for in, want := range map[string]string{"control: off\n": "off", "control: status\n": "status", "": ""} {
+	for in, want := range map[string]string{"control: off\n": "off", "control: status\n": "status", "control: full\n": "full", "": ""} {
 		f, err := Parse([]byte(in+base), "t")
 		if err != nil || string(f.Control) != want {
 			t.Errorf("%q: %v %q", in, err, f.Control)
 		}
 	}
-	for _, in := range []string{"control: full\n", "control: maybe\n"} {
+	for _, in := range []string{"control: maybe\n", "control: true\n"} {
 		if _, err := Parse([]byte(in+base), "t"); err == nil {
 			t.Errorf("%q accepted", in)
 		}
