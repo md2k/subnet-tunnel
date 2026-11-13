@@ -601,7 +601,13 @@ shaped as a list of tunnels: one in a single-profile run, several with `--profil
 - **Connections** (on request): one row per open connection: destination, profile, utun or SOCKS,
   bytes each way, age.
 - **Logs:** an in-memory ring buffer (5000 lines and 4 MB at most), fed by an extra log handler;
-  never written to disk. Slow readers lose lines; the tunnel never waits for them.
+  the log file (below) is separate. Slow readers lose lines; the tunnel never waits for them.
+- **Log files** (added later, for long runs and a daemon to come): one JSON file per start in
+  `~/.local/state/subtun/logs` (nix style: subtun is a command-line tool), rotated by size, pruned
+  by age (3 days) and total size; levels per component through a `component` attribute every part
+  logs with; optional masking of DNS names and destinations (keyed hashes, a new key per run). Global
+  for the run, like `control`. Masking is optional because full logs are what an investigation
+  needs.
 
 **Commands:**
 

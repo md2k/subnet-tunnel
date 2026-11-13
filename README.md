@@ -129,8 +129,10 @@ and each profile reconnects, or gives up, on its own. See
 [Several profiles at once](docs/config.md#several-profiles-at-once).
 
 **Status.** `subtun status` shows what every running subtun is doing: each tunnel's state, routes,
-DNS names, connections and traffic; `subtun logs -f` follows its log. See
-[Status and logs](docs/config.md#status-and-logs).
+DNS names, connections and traffic; `subtun logs -f` follows its log. Each run also writes a JSON
+log file (rotated, kept 3 days), with levels per component (`--log-level info,dns=debug`) and
+optional masking of names and addresses. See [Status and logs](docs/config.md#status-and-logs) and
+[Log files](docs/config.md#log-files).
 
 **Changes while running.** Started with `--control full`, a subtun takes `subtun route add|del`,
 `subtun dns add|del` and `subtun profile stop|start|reconnect` without a restart. See
@@ -151,7 +153,7 @@ turns an sshuttle options file into a profile ([details](docs/config.md#importin
 
 - [Configuration](docs/config.md): commands, profiles and defaults, several profiles at once,
   examples, routes and excludes, full tunnel, split DNS, kill switch, reconnect, IPv6, status and
-  logs, changes while running, safety checks, importing from sshuttle.
+  logs, log files, changes while running, safety checks, importing from sshuttle.
 - [Design](docs/design.md): measurements, architecture and open questions.
 - [Development](docs/development.md): tests, code layout, the local test setup, and trying a full
   tunnel or the kill switch safely.
