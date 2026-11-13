@@ -127,6 +127,10 @@ type settings struct {
 	blockIPv6     string
 
 	maxDuration time.Duration // testing: stop by itself after this long
+
+	reconnectAttempts int
+	reconnectDelay    time.Duration
+	reconnectMaxDelay time.Duration
 }
 
 func (s *settings) register(cmd *cobra.Command) {
@@ -154,6 +158,9 @@ func (s *settings) register(cmd *cobra.Command) {
 	f.StringVar(&s.killSwitchDNS, "kill-switch-dns", "", "while the kill switch holds, DNS to the captured servers is: block (default) or allow")
 	f.StringVar(&s.blockIPv6, "block-ipv6", "", "block outgoing IPv6: auto (default: in a full tunnel), true or false")
 	f.DurationVar(&s.maxDuration, "max-duration", 0, "stop by itself after this long, as on Ctrl-C (testing: a way back if the network is cut)")
+	f.IntVar(&s.reconnectAttempts, "reconnect-attempts", defaultReconnectAttempts, "when the connection to the agent is lost, try this many times to reconnect (0: exit instead)")
+	f.DurationVar(&s.reconnectDelay, "reconnect-delay", defaultReconnectDelay, "wait before the first reconnect attempt; it doubles after each one")
+	f.DurationVar(&s.reconnectMaxDelay, "reconnect-max-delay", defaultReconnectMaxDelay, "longest wait between reconnect attempts")
 	_ = f.MarkHidden("max-duration")
 }
 
@@ -200,6 +207,15 @@ func (s *settings) applyProfile(p config.Profile, flags *pflag.FlagSet) {
 	}
 	if !set("block-ipv6") {
 		s.blockIPv6 = string(p.BlockIPv6)
+	}
+	if !set("reconnect-attempts") && p.Reconnect.Attempts != nil {
+		s.reconnectAttempts = *p.Reconnect.Attempts
+	}
+	if d, err := time.ParseDuration(p.Reconnect.Delay); !set("reconnect-delay") && err == nil {
+		s.reconnectDelay = d // the config checked it
+	}
+	if d, err := time.ParseDuration(p.Reconnect.MaxDelay); !set("reconnect-max-delay") && err == nil {
+		s.reconnectMaxDelay = d
 	}
 }
 
@@ -426,6 +442,10 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 	if s.maxDuration < 0 {
 		return errors.New("--max-duration must be positive")
 	}
+	policy := reconnectPolicy{attempts: s.reconnectAttempts, delay: s.reconnectDelay, maxDelay: s.reconnectMaxDelay}
+	if err := policy.validate(); err != nil {
+		return err
+	}
 	rp, warns, err := planRoutes(s)
 	var dnsOpts *capture.DNSOptions
 	var gp *guardPlan
@@ -451,6 +471,7 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 				fmt.Fprintf(out, "warning: %s\n", wn)
 			}
 			fmt.Fprintln(out, "no routes: SOCKS only")
+			fmt.Fprintf(out, "reconnect: %s\n", policy)
 			return nil
 		}
 		printPlan(out, rp, warns)
@@ -464,6 +485,7 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 			}
 			printGuardPlan(out, gp, len(guarded), dnsOpts != nil)
 		}
+		fmt.Fprintf(out, "reconnect: %s\n", policy)
 		return nil
 	}
 	if err != nil {
@@ -527,28 +549,34 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		}
 	}
 
+	// One connection to the agent; the first one, and each reconnect.
+	try := func(ctx context.Context) (*session, error) {
+		carrier, err := connect(ctx, agents, log)
+		if err != nil {
+			return nil, err
+		}
+		hctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		client, err := tunnel.NewClient(hctx, carrier, tunnel.Options{ExpectSHA256: carrier.SHA256, Logger: log})
+		cancel()
+		if err != nil { // NewClient closed the carrier
+			return nil, fmt.Errorf("starting agent in %s: %w", carrier.Desc, err)
+		}
+		return &session{carrier: carrier, client: client}, nil
+	}
 	start := time.Now()
-	carrier, err := connect(ctx, agents, log)
+	cur, err := try(ctx)
 	if err != nil {
 		return startErr(ctx, err)
 	}
-	hctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	client, err := tunnel.NewClient(hctx, carrier, tunnel.Options{ExpectSHA256: carrier.SHA256, Logger: log})
-	cancel()
-	if err != nil {
-		return startErr(ctx, fmt.Errorf("starting agent in %s: %w", carrier.Desc, err))
-	}
-	defer func() {
-		_ = client.Close()
-		_ = carrier.Close()
-	}()
-
-	log.Info("tunnel up", "via", carrier.Desc, "agent", client.Agent().Version,
+	defer func() { cur.close() }()
+	live := &liveTunnel{}
+	live.set(cur.client)
+	log.Info("tunnel up", "via", cur.carrier.Desc, "agent", cur.client.Agent().Version,
 		"took", time.Since(start).Round(time.Millisecond))
 
 	errc := make(chan error, 1)
 	if s.dnsListen != "" && dnsOpts != nil {
-		dnsOpts.Tunnel = dns.UpstreamFunc(client.ExchangeDNS)
+		dnsOpts.Tunnel = dns.UpstreamFunc(live.ExchangeDNS)
 		if rp != nil {
 			dnsOpts.Unreachable = unreachable(rp.plan.Routes)
 		}
@@ -560,30 +588,31 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		dnsOpts = nil // not captured
 	}
 	if ln != nil {
-		srv := &socks.Server{Dialer: client, Logger: log}
+		srv := &socks.Server{Dialer: live, Logger: log}
 		go func() { errc <- srv.Serve(ctx, ln) }()
 		log.Info("SOCKS5 proxy ready", "addr", ln.Addr().String())
 	}
 
 	var helperExited <-chan struct{}
+	var final []netip.Prefix
 	deliberate := false // the user stopped subtun (signal), as opposed to a failure
 	if rp != nil {
-		final, err := excludeEndpoints(rp, carrier.Endpoints, log)
+		final, err = excludeEndpoints(rp, cur.carrier.Endpoints, log)
 		if err != nil {
 			return err
 		}
-		if carrier.Local && routesInternet(final) {
+		if cur.carrier.Local && routesInternet(final) {
 			log.Warn(localLoopWarning)
 		}
 		opts := rp.opts
 		if dnsOpts != nil {
-			dnsOpts.Tunnel = dns.UpstreamFunc(client.ExchangeDNS)
+			dnsOpts.Tunnel = dns.UpstreamFunc(live.ExchangeDNS)
 			dnsOpts.Unreachable = unreachable(final)
 			opts.DNS = dnsOpts
 		}
 		opts.KillSwitch, opts.AllowDNS, opts.BlockIPv6 = gp.killSwitch, gp.allowDNS, gp.blockIPv6
 		if opts.BlockIPv6 {
-			if a, ok := ipv6Endpoint(carrier.Endpoints); ok {
+			if a, ok := ipv6Endpoint(cur.carrier.Endpoints); ok {
 				log.Warn("not blocking IPv6: subtun's own connection may use it", "endpoint", a)
 				opts.BlockIPv6, gp.blockIPv6 = false, false
 			}
@@ -602,7 +631,7 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 			// Firewall rules may outlive this process; the next run looks.
 			marker.firewall()
 		}
-		c, err := capture.Start(ctx, final, opts, client, log)
+		c, err := capture.Start(ctx, final, opts, live, log)
 		if err != nil {
 			marker.startFailed()
 			return startErr(ctx, fmt.Errorf("utun capture: %w", err))
@@ -619,17 +648,9 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		helperExited = c.HelperExited()
 	}
 
-	select {
-	case <-ctx.Done():
-		deliberate = true
-		logShutdown(ctx, log)
-		return nil
-	case <-client.Done():
-		return errors.New("connection to the agent was lost")
-	case err := <-errc:
-		return fmt.Errorf("SOCKS listener: %w", err)
-	case <-helperExited:
-		// Ctrl-C reaches the helper too; that's a normal shutdown.
+	// helperGone decides what the root helper exiting means: Ctrl-C reaches
+	// it too, which is a normal shutdown.
+	helperGone := func() error {
 		select {
 		case <-ctx.Done():
 			deliberate = true
@@ -638,6 +659,46 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, s settings, connect 
 		case <-time.After(300 * time.Millisecond):
 		}
 		return errors.New("the root helper exited unexpectedly; its firewall rules may still be in place: the next subtun run takes them over, or remove them with: subtun cleanup")
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			deliberate = true
+			logShutdown(ctx, log)
+			return nil
+		case <-cur.client.Done():
+			if policy.attempts == 0 {
+				return errors.New("connection to the agent was lost")
+			}
+			// Routes, firewall rules and listeners stay; new connections and
+			// DNS fail at once meanwhile.
+			live.set(nil)
+			cur.close()
+			lost := time.Now()
+			log.Warn("connection to the agent lost; reconnecting", "policy", policy.String())
+			next, err := reconnect(ctx, policy, helperExited, try, log)
+			switch {
+			case err == nil:
+			case ctx.Err() != nil:
+				deliberate = true
+				logShutdown(ctx, log)
+				return nil
+			case errors.Is(err, errHelperGone):
+				return helperGone()
+			default:
+				return err
+			}
+			cur = next
+			if hit := routedEndpoints(final, cur.carrier.Endpoints); len(hit) > 0 {
+				log.Warn("after reconnecting, subtun's own connection goes to an address the routes cover, which may cut it; restart subtun to exclude it", "addrs", hit)
+			}
+			live.set(cur.client)
+			log.Info("reconnected", "via", cur.carrier.Desc, "after", time.Since(lost).Round(100*time.Millisecond))
+		case err := <-errc:
+			return fmt.Errorf("SOCKS listener: %w", err)
+		case <-helperExited:
+			return helperGone()
+		}
 	}
 }
 

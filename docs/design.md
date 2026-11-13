@@ -172,7 +172,11 @@ app ──► SOCKS5 proxy  ───┘   smux streams    exec stdio   in the t
   DNS engine, which resolves matching names through the tunnel and everything else through a
   fallback resolver. See [DNS](#dns).
 - **Lifecycle.** Closing subtun sends EOF on the agent's stdin and the agent exits. If the carrier
-  drops (pod deleted, network lost), subtun notices within seconds and exits with an error.
+  drops (pod deleted, network lost), subtun notices within seconds (smux keepalive: 30 s at most)
+  and reconnects: the capture, the SOCKS proxy and DNS reach the agent through one swappable
+  client, which fails dials and DNS at once while it's down; utun, routes and firewall rules stay.
+  Tries per outage, the first wait and the longest wait are settings (`reconnect`); waits double
+  with ±20 % jitter, and after the last try subtun exits with an error (a kill switch then holds).
 
 ## Privileges
 
@@ -447,8 +451,10 @@ captured. What stays behind has no `pass` rule and blocks DNS with
   start: after joining another network, the old LAN's range stays outside the tunnel, and an
   exclude that splits the routes inside the new LAN would put parts of it into the tunnel. Needs
   runtime route changes in the session helper.
-- **Reconnecting:** when the carrier drops (pod restarted, laptop asleep, network change), subtun
-  exits. It should reconnect, with the kill switch holding the blocks meanwhile.
+- **Reconnecting to a recreated pod:** subtun reconnects to the same pod name. A Deployment's new pod
+  has another name; selecting the target by label or by its owner would find it. Also, routes
+  don't change while running, so if the API server's address moves inside the routes after a
+  reconnect, subtun only warns (restart to exclude it).
 - **Targets with neither a shell nor Python** (distroless static, scratch): an ephemeral debug
   container (Kubernetes) or a helper container in the target's network namespace (Docker).
 - **Aborted streams:** smux has no reset. When the laptop side closes a stream abruptly, an agent

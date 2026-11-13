@@ -186,6 +186,19 @@ decides whether DNS stays blocked meanwhile. `cat /var/run/subtun/state.json` (a
 helper holds the rules.
 
 
+### Reconnect
+
+```sh
+build/subtun -v k8s -n subtun-dev target --socks 127.0.0.1:1080 --reconnect-delay 2s
+kubectl -n subtun-dev exec target -- pkill -f subtun-agent     # the agent dies: subtun reconnects
+curl --socks5-hostname 127.0.0.1:1080 http://web.subtun-dev.svc.cluster.local:8080/
+```
+
+The log shows `connection to the agent lost; reconnecting`, `reconnecting attempt=1 ...` and
+`reconnected ... after`. Deleting the pod and applying `test/dev` again does the same once the pod is
+back; without it, subtun gives up after the attempts. No root is needed for this with SOCKS; with
+routes, `netstat -rn -f inet | grep utun` shows the routes staying throughout.
+
 ### Loop guard (needs sudo, run by hand)
 
 Docker Desktop's pods reach the internet through the Mac, so routing an internet address through one

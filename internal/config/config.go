@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/yaml"
 
@@ -40,6 +41,7 @@ type Profile struct {
 
 	KillSwitch KillSwitch `json:"killSwitch,omitempty"`
 	BlockIPv6  Toggle     `json:"blockIPv6,omitempty"` // auto (default: in a full tunnel), true, false
+	Reconnect  Reconnect  `json:"reconnect,omitempty"`
 }
 
 // KillSwitch keeps traffic for the routed CIDRs from leaving any other way
@@ -81,6 +83,13 @@ func (m *Mode) UnmarshalJSON(b []byte) error {
 		return errors.New("killSwitch.mode: use off, on or lockdown")
 	}
 	return nil
+}
+
+// Reconnect is what subtun does when the connection to the agent is lost.
+type Reconnect struct {
+	Attempts *int   `json:"attempts,omitempty"` // per outage (default 10); 0: exit instead
+	Delay    string `json:"delay,omitempty"`    // before the first attempt (default 1s), doubling
+	MaxDelay string `json:"maxDelay,omitempty"` // longest wait (default 1m)
 }
 
 // Word is a setting with words for values (dns.capture: firewall, off).
@@ -274,6 +283,11 @@ func merge(d, p Profile) Profile {
 	out.DNS.Capture = Word(pick(string(p.DNS.Capture), string(d.DNS.Capture)))
 	out.DNS.Fallback = pick(p.DNS.Fallback, d.DNS.Fallback)
 	out.DNS.Unrouted = pick(p.DNS.Unrouted, d.DNS.Unrouted)
+	if out.Reconnect.Attempts == nil {
+		out.Reconnect.Attempts = d.Reconnect.Attempts
+	}
+	out.Reconnect.Delay = pick(p.Reconnect.Delay, d.Reconnect.Delay)
+	out.Reconnect.MaxDelay = pick(p.Reconnect.MaxDelay, d.Reconnect.MaxDelay)
 	if len(out.DNS.Servers) == 0 {
 		out.DNS.Servers = d.DNS.Servers
 	}
@@ -358,6 +372,17 @@ func (p Profile) validateSettings() error {
 	case "", "off", "on", "lockdown":
 	default:
 		return fmt.Errorf("killSwitch.mode %q: use off, on or lockdown", p.KillSwitch.Mode)
+	}
+	if a := p.Reconnect.Attempts; a != nil && *a < 0 {
+		return fmt.Errorf("reconnect.attempts %d: 0 or more (0: no reconnect)", *a)
+	}
+	for key, v := range map[string]string{"reconnect.delay": p.Reconnect.Delay, "reconnect.maxDelay": p.Reconnect.MaxDelay} {
+		if v == "" {
+			continue
+		}
+		if d, err := time.ParseDuration(v); err != nil || d <= 0 {
+			return fmt.Errorf("%s %q: a positive duration, like 1s or 2m", key, v)
+		}
 	}
 	switch p.KillSwitch.DNS {
 	case "", "block", "allow":
