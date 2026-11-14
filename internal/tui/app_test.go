@@ -101,7 +101,7 @@ func (f *fake) Change(_ context.Context, c control.Change) (control.Result, erro
 	if c.Profile == "prod" {
 		return control.Result{}, errors.New("route 10.0.0.0/8 is work's")
 	}
-	what := strings.TrimSpace(fmt.Sprint(c.Op, " ", strings.Join(append(append(c.CIDRs, c.Domains...), c.Patterns...), " ")))
+	what := strings.TrimSpace(fmt.Sprint(c.Op, " ", strings.Join(append(append(append(c.CIDRs, c.Domains...), c.Patterns...), c.Level), " ")))
 	if c.DryRun {
 		f.dry = append(f.dry, c)
 		return control.Result{Profile: c.Profile, DryRun: true, Message: "would " + what}, nil
@@ -692,17 +692,17 @@ func TestLogLevelDialog(t *testing.T) {
 	u := start(t, f, Options{})
 	u.wait("Profiles (3)")
 	u.press("V")
-	u.wait("Log levels of subtun", "default", "dns", "transport", "Dry run: would set")
-	u.key(tcell.KeyEnter) // open the default's list
-	u.key(tcell.KeyUp)    // debug
-	u.key(tcell.KeyEnter)
-	for range 9 { // down to Apply: past the 8 components
-		u.key(tcell.KeyDown)
-	}
-	time.Sleep(200 * time.Millisecond) // the dry run of "debug"
+	u.wait("Log levels of subtun", "what it logs", "every query and its answer", "transport", "Dry run: would set")
+	u.key(tcell.KeyDown) // tunnel
+	u.key(tcell.KeyDown) // dns
+	u.key(tcell.KeyLeft) // its debug column
+	u.press(" ")
+	u.waitLine("DNS: at debug", "(•)")
+	u.wait("Dry run: would set info,dns=debug") // its dry run first
+	u.key(tcell.KeyTab)                         // the buttons: Apply
 	u.key(tcell.KeyEnter)
 	c := waitChange(t, f, 1)
-	if c.Kind != control.KindLog || c.Op != "set" || c.Level != "debug" {
+	if c.Kind != control.KindLog || c.Op != "set" || c.Level != "info,dns=debug" {
 		t.Fatalf("change: %+v", c)
 	}
 	u.gone("Log levels of subtun")

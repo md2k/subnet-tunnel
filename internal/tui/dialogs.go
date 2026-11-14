@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -24,6 +23,10 @@ type dlg struct {
 	gen    int  // the dry run asked last; older answers are dropped
 	shown  int  // the dry run on show
 	busy   bool // the change is on its way
+	// extra goes between the explanation and the form (extraRows high).
+	extra     tview.Primitive
+	extraRows int
+	width     int // 0: dialogWidth
 }
 
 const (
@@ -65,16 +68,22 @@ func (a *app) fit(w, h int) (int, int) {
 
 // showDlg opens the dialog; formRows is the form's height.
 func (a *app) showDlg(d *dlg, formRows int) {
-	w, _ := a.fit(dialogWidth, 0)
+	if d.width == 0 {
+		d.width = dialogWidth
+	}
+	w, _ := a.fit(d.width, 0)
 	textRows := 0
 	if d.text.GetText(false) != "" {
 		textRows = textHeight(d.text.GetText(false), w-4)
 		d.flex.AddItem(d.text, textRows, 0, false)
 	}
-	d.flex.AddItem(d.form, formRows, 0, true)
+	if d.extra != nil {
+		d.flex.AddItem(d.extra, d.extraRows, 0, true)
+	}
+	d.flex.AddItem(d.form, formRows, 0, d.extra == nil)
 	d.flex.AddItem(d.result, resultRows, 0, false)
 	d.flex.SetBorderPadding(0, 0, 1, 1)
-	a.openDialog(d.flex, dialogWidth, textRows+formRows+resultRows+2, d.form) // the size wanted: fitted again on a resize
+	a.openDialog(d.flex, d.width, textRows+d.extraRows+formRows+resultRows+2, d.form) // the size wanted: fitted again on a resize
 }
 
 // textHeight is how many rows text takes wrapped to width.
@@ -517,20 +526,34 @@ func (a *app) addProfileDialog() {
 	}()
 }
 
+// componentWhat says what each part of subtun logs, for the log levels
+// dialog (as logx.Components lists them).
+var componentWhat = map[string]string{
+	"tunnel":    "connecting, reconnecting, changes while running",
+	"dns":       "DNS: at debug every query and its answer",
+	"conn":      "at debug every captured connection",
+	"capture":   "the utun, routes, firewall, kill switch",
+	"helper":    "the root helper's lines",
+	"control":   "the control socket (status, changes)",
+	"socks":     "the SOCKS proxy; at debug every connection",
+	"transport": "reaching the target (Kubernetes, Docker), the agent",
+}
+
 // logLevelDialog changes subtun's own log levels: the default and each
-// component's, with the dry run first.
+// component's, picked in a grid (a row each, a column a level), with the
+// dry run first.
 func (a *app) logLevelDialog() {
 	spec, err := logx.ParseSpec(a.st.LogLevel)
 	if err != nil {
 		spec, _ = logx.ParseSpec("info")
 	}
-	d := a.newDlg("Log levels of subtun", "What subtun logs, everywhere: its terminal, the log file, this TUI; until it stops. A component's own level wins over the default.")
-	d.form.SetItemPadding(0)
-	index := func(lv slog.Level) int { return levelIndex(lv) }
-	def := index(spec.Default)
+	d := a.newDlg("Log levels of subtun", "What subtun itself logs, everywhere (its terminal, the log file, every TUI) until it stops. "+
+		"Each part logs at its own level, or the default's. [gray]debug[-]: everything, every query and connection; "+
+		"[gray]info[-]: what happens; [gray]warn[-]: problems only; [gray]error[-]: failures only.")
+	def := levelIndex(spec.Default)
 	comps := map[string]int{} // a component's level (index); none: the default
 	for c, lv := range spec.By {
-		comps[c] = index(lv)
+		comps[c] = levelIndex(lv)
 	}
 	build := func() (control.Change, bool) {
 		parts := []string{levelNames[def]}
@@ -541,28 +564,92 @@ func (a *app) logLevelDialog() {
 		}
 		return control.Change{Kind: control.KindLog, Op: "set", Level: strings.Join(parts, ",")}, true
 	}
-	style := func(dd *tview.DropDown) { dd.SetListStyles(fieldStyle, focusedStyle) }
-	d.form.AddDropDown("default", levelNames, def, func(_ string, i int) {
-		def = i
-		a.dryRun(d, 0, build)
-	})
-	style(d.form.GetFormItem(0).(*tview.DropDown))
-	for _, c := range logx.Components {
-		initial := 0
-		if i, ok := comps[c]; ok {
-			initial = i + 1
+	// The grid: column 1 is "the default" (components only), 2-5 the levels.
+	grid := tview.NewTable().SetSelectable(true, true).SetSelectedStyle(focusedStyle)
+	rows := append([]string{"default"}, logx.Components...)
+	render := func() {
+		for c, h := range []string{"", "default", "debug", "info", "warn", "error", "what it logs"} {
+			grid.SetCell(0, c, tview.NewTableCell(h+"  ").SetTextColor(tcell.ColorGray).SetSelectable(false))
 		}
-		d.form.AddDropDown(c, append([]string{"default"}, levelNames...), initial, func(_ string, i int) {
-			if i == 0 {
-				delete(comps, c)
-			} else {
-				comps[c] = i - 1
+		for r, name := range rows {
+			chosen := def // the default row: its level
+			if r > 0 {
+				chosen = -1 // the default
+				if i, ok := comps[name]; ok {
+					chosen = i
+				}
 			}
-			a.dryRun(d, 0, build)
-		})
-		style(d.form.GetFormItem(d.form.GetFormItemCount() - 1).(*tview.DropDown))
+			grid.SetCell(r+1, 0, tview.NewTableCell(name+"  ").SetSelectable(false))
+			for col := 1; col <= 5; col++ {
+				mark := "( )"
+				if col-2 == chosen {
+					mark = "(•)"
+				}
+				cell := tview.NewTableCell(" " + mark + " ")
+				if r == 0 && col == 1 {
+					cell = tview.NewTableCell("").SetSelectable(false) // the default has no default
+				}
+				grid.SetCell(r+1, col, cell)
+			}
+			what := "[gray]the level of every part without its own[-]"
+			if r > 0 {
+				what = "[gray]" + componentWhat[name] + "[-]"
+			}
+			grid.SetCell(r+1, 6, tview.NewTableCell(what).SetSelectable(false).SetExpansion(1))
+		}
 	}
+	pick := func(row, col int) {
+		if row < 1 || row > len(rows) || col < 1 || col > 5 || row == 1 && col == 1 {
+			return
+		}
+		if row == 1 {
+			def = col - 2
+		} else if col == 1 {
+			delete(comps, rows[row-1])
+		} else {
+			comps[rows[row-1]] = col - 2
+		}
+		render()
+		a.dryRun(d, 0, build)
+	}
+	render()
+	grid.Select(1, def+2)
+	grid.SetSelectedFunc(pick) // enter
+	grid.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
+		switch {
+		case ev.Key() == tcell.KeyRune && ev.Rune() == ' ':
+			pick(grid.GetSelection())
+			return nil
+		case ev.Key() == tcell.KeyTab:
+			a.tv.SetFocus(d.form) // the buttons
+			return nil
+		case ev.Key() == tcell.KeyEscape:
+			a.closeDlg(d)
+			return nil
+		}
+		return ev
+	})
+	grid.SetMouseCapture(func(action tview.MouseAction, ev *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		if action == tview.MouseLeftClick {
+			if row, col := grid.CellAt(ev.Position()); row >= 0 {
+				grid.Select(row, col)
+				pick(row, col)
+				return action, nil
+			}
+		}
+		return action, ev
+	})
 	d.form.AddButton("Apply", func() { a.submit(d, build) }).AddButton("Cancel", func() { a.closeDlg(d) })
-	a.showDlg(d, d.form.GetFormItemCount()+3)
+	formKeys := d.form.GetInputCapture()
+	d.form.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
+		if _, b := d.form.GetFocusedItemIndex(); b == 0 && (ev.Key() == tcell.KeyBacktab || ev.Key() == tcell.KeyUp) {
+			a.tv.SetFocus(grid) // back to the grid
+			return nil
+		}
+		return formKeys(ev)
+	})
+	d.extra, d.extraRows, d.width = grid, len(rows)+2, 116
+	a.showDlg(d, 3)
+	a.tv.SetFocus(grid)
 	a.dryRun(d, 0, build)
 }
