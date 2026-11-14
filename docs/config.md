@@ -659,12 +659,18 @@ subtun up --profile work,dev --tui
 ```
 
 - It is the same TUI, with what subtun logs in its log views instead of on the terminal (the log
-  file is written as always).
+  file is written as always). What else would write to the terminal meanwhile, such as a kubeconfig
+  login plugin's messages, shows in the log views too (`stderr: …`).
+- A kubeconfig login plugin can't ask you anything meanwhile (the TUI has the keyboard): one that
+  needs to (a password, say) fails, saying so. Log in first (`kubectl get pods`, say), then start
+  subtun. A browser login still works.
 - It makes changes whatever `control` says: it is your own terminal. `control` still decides what
   other terminals can do through the socket.
 - When sudo needs the password for the root helper (at the start, or when a profile with routes is
   added), the TUI steps aside: the terminal shows sudo's prompt (or Touch ID asks), and the TUI
-  comes back once the helper runs. It doesn't when sudo needs no password then.
+  comes back once the helper runs. It doesn't when sudo needs no password then (checked with `sudo
+  -n -v`, which may leave a "password required" line in the system log, and which with a sudoers
+  rule for subtun alone still says a password is needed: the TUI then steps aside for nothing).
 - `q` (or Ctrl-C) asks before stopping subtun, saying what each profile's kill switch then does; a
   second Ctrl-C stops at once. The TUI shows the stop until the routes and firewall rules are off.
   A signal (`kill`) stops subtun as without the TUI.

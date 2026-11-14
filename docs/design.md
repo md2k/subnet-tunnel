@@ -737,16 +737,24 @@ second and follows `/v1/logs`.
   run); the socket keeps following `control`. A one-profile run then keeps the root helper as a
   session, as with `control: full`, so routes can change.
 - **The terminal:** subtun's own log output to the terminal is off while the TUI runs (the ring and
-  the log file get everything). sudo asks on the terminal (or through Touch ID), so starting the
-  root helper lends the terminal (`privhelper.Lend`): the TUI suspends (tview `Suspend`, tcell
-  leaves raw mode and the alternate screen) while sudo may ask, and comes back once the helper has
-  connected. `sudo -n -v` first: with a cached ticket (or no password needed) it doesn't step aside.
-  The suspend runs on the UI goroutine; the log stream keeps buffering meanwhile.
+  the log file get everything; before and after, the terminal does). Standard error (fd 2) points
+  at a pipe into the log meanwhile, so a kubeconfig login plugin or a library writing there doesn't
+  scribble over the screen (a crash still reaches the terminal: `debug.SetCrashOutput`); login
+  plugins get no stdin (`ExecProvider.StdinUnavailable`), since tcell reads the keyboard.
+- **sudo:** sudo asks on the terminal (or through Touch ID), so starting the root helper lends the
+  terminal (`privhelper.Lend`): the TUI suspends (tview `Suspend`, tcell leaves raw mode and the
+  alternate screen) while sudo may ask, and comes back once the helper has connected. The suspend
+  runs on the UI goroutine; the log stream keeps buffering meanwhile. A lend waits while the TUI is
+  still starting, so sudo never asks while tcell takes the terminal over. `sudo -n -v` first: with
+  a cached ticket (or no password needed) it doesn't step aside. Trade-offs: `verifypw` makes a
+  sudoers rule for subtun alone fail the check (the TUI steps aside for nothing), and the failed
+  check may be logged.
 - **Stopping:** `q` and Ctrl-C ask; confirmed, the TUI cancels the engine's context, which the
   engine takes as a deliberate stop, like a signal. The TUI shows the stop and is closed by the
   engine after the capture and tunnels are down; the log lines from the stop (or the last 20, when
-  the engine ended by itself) are then printed to the terminal. A TUI that fails to start stops the
-  run: nothing would show it or stop it.
+  the engine ended by itself, the TUI having shown the stop) are then printed to the terminal. A
+  TUI that fails to start stops the run, which then exits with its error: nothing would show the
+  run or stop it. The `--max-duration` watchdog gives the terminal back before it exits.
 
 A daemon (subtun in the background, its log in the log file, attached to with `subtun tui`) is
 deferred: started in the foreground for sudo, then detached.
