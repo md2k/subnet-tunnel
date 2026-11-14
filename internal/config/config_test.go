@@ -259,3 +259,17 @@ func TestLogKey(t *testing.T) {
 		t.Error("log in defaults accepted: it is global only")
 	}
 }
+
+func TestTUIKey(t *testing.T) {
+	base := "profiles:\n  p:\n    target: {docker: {container: c}}\n    socks: 127.0.0.1:1080\n"
+	f, err := Parse([]byte("tui: {layout: detail}\n"+base), "t")
+	if err != nil || f.TUI.Layout != LayoutDetail {
+		t.Fatalf("tui: %+v %v", f.TUI, err)
+	}
+	if _, err := Parse([]byte("tui: {layout: grid}\n"+base), "t"); err == nil || !strings.Contains(err.Error(), `tui.layout "grid"`) {
+		t.Errorf("bad layout: %v", err)
+	}
+	if _, err := Parse([]byte("defaults:\n  tui: {layout: table}\n"+base), "t"); err == nil {
+		t.Error("tui in defaults accepted: it is global only")
+	}
+}
