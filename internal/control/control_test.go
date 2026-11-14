@@ -212,28 +212,21 @@ func TestChange(t *testing.T) {
 	}
 }
 
-// Samples come whole, or newer than ?since=; the config profiles as the
-// Config function reads them (none without one).
+// Samples as the Samples function gives them (none without one); the
+// config profiles as the Config function reads them (none without one).
 func TestSamplesAndConfig(t *testing.T) {
 	srv := testServer()
 	c := &Client{hc: &http.Client{Transport: handlerTransport{srv.Handler()}}}
 	var ts []TunnelSamples
-	if err := c.Get(context.Background(), "/v1/samples", &ts); err != nil || len(ts) != 0 {
+	if err := c.Get(context.Background(), "/v1/samples", &ts); err != nil || ts == nil || len(ts) != 0 {
 		t.Fatalf("no samples func: %v %v", ts, err)
 	}
 	t0 := time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC)
 	srv.Samples = func() []TunnelSamples {
-		return []TunnelSamples{{Name: "work", Samples: []meter.Sample{{Time: t0, Up: 1}, {Time: t0.Add(time.Second), Up: 2}, {Time: t0.Add(2 * time.Second), Up: 3}}}}
+		return []TunnelSamples{{Name: "work", Samples: []meter.Sample{{Time: t0, Up: 1}, {Time: t0.Add(time.Second), Up: 2}}}}
 	}
-	if err := c.Get(context.Background(), "/v1/samples", &ts); err != nil || len(ts) != 1 || len(ts[0].Samples) != 3 {
-		t.Fatalf("all: %+v %v", ts, err)
-	}
-	since := t0.Add(time.Second).Format(time.RFC3339Nano)
-	if err := c.Get(context.Background(), "/v1/samples?since="+since, &ts); err != nil || len(ts[0].Samples) != 1 || ts[0].Samples[0].Up != 3 {
-		t.Fatalf("since: %+v %v", ts, err)
-	}
-	if err := c.Get(context.Background(), "/v1/samples?since=yesterday", &ts); err == nil || !strings.Contains(err.Error(), "since") {
-		t.Fatalf("bad since: %v", err)
+	if err := c.Get(context.Background(), "/v1/samples", &ts); err != nil || len(ts) != 1 || len(ts[0].Samples) != 2 || ts[0].Samples[1].Up != 2 {
+		t.Fatalf("samples: %+v %v", ts, err)
 	}
 
 	var cp ConfigProfiles

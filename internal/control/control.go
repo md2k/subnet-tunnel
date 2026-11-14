@@ -197,7 +197,13 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.Status()) })
 	mux.HandleFunc("GET /v1/connections", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.Conns()) })
-	mux.HandleFunc("GET /v1/samples", s.samples)
+	mux.HandleFunc("GET /v1/samples", func(w http.ResponseWriter, _ *http.Request) {
+		out := []TunnelSamples{}
+		if s.Samples != nil {
+			out = s.Samples()
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
 	mux.HandleFunc("GET /v1/config", func(w http.ResponseWriter, _ *http.Request) {
 		cp := ConfigProfiles{Profiles: []ConfigProfile{}}
 		if s.Config != nil {
@@ -242,34 +248,6 @@ func (s *Server) change(kind string) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, res)
 	}
-}
-
-// samples returns each tunnel's samples; with ?since=TIME (RFC 3339) only
-// the newer ones.
-func (s *Server) samples(w http.ResponseWriter, r *http.Request) {
-	var since time.Time
-	if v := r.URL.Query().Get("since"); v != "" {
-		t, err := time.Parse(time.RFC3339Nano, v)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, apiError{"since: " + err.Error()})
-			return
-		}
-		since = t
-	}
-	var out []TunnelSamples
-	if s.Samples != nil {
-		out = s.Samples()
-	}
-	for i := range out {
-		out[i].Samples = slices.DeleteFunc(out[i].Samples, func(x meter.Sample) bool { return !x.Time.After(since) })
-		if out[i].Samples == nil {
-			out[i].Samples = []meter.Sample{}
-		}
-	}
-	if out == nil {
-		out = []TunnelSamples{}
-	}
-	writeJSON(w, http.StatusOK, out)
 }
 
 // logs returns the ring buffer as newline-delimited JSON; with ?follow=1

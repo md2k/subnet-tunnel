@@ -266,10 +266,7 @@ func (es *engineStatus) configProfiles(path string) control.ConfigProfiles {
 	}
 	es.mp.smu.RUnlock()
 	for _, name := range f.Names() {
-		p, err := f.Profile(name)
-		if err != nil {
-			continue
-		}
+		p, _ := f.Profile(name) // fails only for a name the file doesn't have
 		c := control.ConfigProfile{Name: name, Target: configTarget(p.Target), Routes: p.Routes, Exclude: p.Exclude,
 			Domains: p.DNS.Domains, Patterns: p.DNS.Patterns, SOCKS: p.Socks, InRun: slices.Contains(running, name)}
 		if m := string(p.KillSwitch.Mode); m != "" && m != "off" {

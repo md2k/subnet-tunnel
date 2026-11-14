@@ -21,6 +21,7 @@ const (
 // Line is one log line as the terminal shows it, with its level and the
 // profile it is about (for filtering in a UI).
 type Line struct {
+	Seq    uint64    `json:"seq"` // 1, 2, ... in the order added: says which lines a reader has seen
 	Time   time.Time `json:"time"`
 	Text   string    `json:"text"`
 	Level  string    `json:"level,omitempty"`  // DEBUG, INFO, WARN, ERROR
@@ -41,6 +42,7 @@ type Ring struct {
 	bytes    int
 	subs     map[chan Line]struct{}
 	dropped  uint64 // lines followers lost
+	seq      uint64 // the last line's Seq
 }
 
 // New returns a ring holding at most maxLines lines and maxBytes bytes of
@@ -55,11 +57,13 @@ func New(maxLines, maxBytes int) *Ring {
 	return &Ring{maxLines: maxLines, maxBytes: maxBytes, buf: make([]Line, maxLines), subs: map[chan Line]struct{}{}}
 }
 
-// Add appends a line, dropping the oldest ones over the caps, and hands it
-// to the followers.
+// Add appends a line (numbering it), dropping the oldest ones over the
+// caps, and hands it to the followers.
 func (r *Ring) Add(l Line) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.seq++
+	l.Seq = r.seq
 	if r.n == r.maxLines {
 		r.dropOldest()
 	}
