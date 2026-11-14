@@ -36,7 +36,7 @@ func (a *app) newDlg(title, text string) *dlg {
 		form:   tview.NewForm().SetButtonsAlign(tview.AlignCenter),
 		result: tview.NewTextView().SetDynamicColors(true).SetWordWrap(true),
 	}
-	d.flex.SetBorder(true).SetTitle(" " + tview.Escape(title) + " ")
+	boxed(d.flex.Box, tview.Escape(title))
 	d.form.SetCancelFunc(func() { a.closeDlg(d) })
 	return d
 }
@@ -326,7 +326,8 @@ func (a *app) addProfileDialog() {
 		AddItem(table, 0, 1, true).
 		AddItem(result, 3, 0, false).
 		AddItem(hint, 1, 0, false)
-	flex.SetBorder(true).SetBorderPadding(0, 0, 1, 1).SetTitle(" Add a profile from the config file ")
+	boxed(flex.Box, "Add a profile from the config file")
+	flex.SetBorderPadding(0, 0, 1, 1)
 
 	var cands []control.ConfigProfile
 	answers := map[string]string{} // dry run answers by name
@@ -398,7 +399,7 @@ func (a *app) addProfileDialog() {
 				result.SetText("every profile of " + tview.Escape(cp.Path) + " is in this run already")
 				return
 			}
-			flex.SetTitle(" Add a profile from " + tview.Escape(cp.Path) + " ")
+			flex.SetTitle(boxTitle("Add a profile from " + tview.Escape(cp.Path)))
 			for c, h := range []string{"NAME", "TARGET", "ROUTES", "NOTES"} {
 				table.SetCell(0, c, tview.NewTableCell(h).SetTextColor(tcell.ColorGray).SetSelectable(false))
 			}

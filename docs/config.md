@@ -649,15 +649,19 @@ subtun tui --layout detail
 
 - **Dashboard:** every profile with its state, target, routes, DNS names, kill switch, the rate each
   way and a gauge of its traffic now (against the scale of its last 5 minutes); below, the log lines
-  of every profile. Two layouts, switched with `v`: `table` (the profiles above the logs) and
-  `detail` (a list, and the selected profile's detail with its traffic graph next to it).
-- **Profile screen** (`enter`): its stats next to its traffic graph of the last 5 minutes (upload
-  above a zero line, download below, each against its own round scale, coloured by height), what it
-  asks for (routes, excludes, DNS domains and patterns, marked when added or removed while
-  running) and its open connections.
+  of every profile (a line no profile logged names its source, such as `helper`). Two layouts,
+  switched with `v`: `table` (the profiles above the logs) and `detail` (a list, and the selected
+  profile's detail with its traffic graph next to it; the logs follow the selected profile).
+- **Profile screen** (`enter`): a card with what the profile asks for, in sections: its routes (each
+  marked configured, or added or removed while running with the time, with what of it another
+  profile carries or subtun's own endpoint taken out), excludes, DNS names (with the unrouted-answers
+  mode), and its traffic; next to it (below it on a narrow terminal) its traffic graph of the last 5
+  minutes, upload above a zero line and download below, each against its own round scale, coloured
+  by height. Under the card its open connections and its log lines, each shown or hidden with `c`
+  and `l` (`L`: its log lines full screen).
 - **Units:** `u` switches the rates between bytes and bits a second (`MB/s`, `Mb/s`).
-- **Logs** (`l`, or `/` to search them): full screen, filtered by profile (`p`), lowest level (`v`)
-  and text (`/`); `f` follows or pauses. They are the lines `subtun logs` shows; the TUI saves
+- **Logs** (`l`, or `/` to search them): full screen, filtered by profile (`p`), lowest level (`v`,
+  `info` to start with) and text (`/`); `f` follows or pauses. They are the lines `subtun logs` shows; the TUI saves
   nothing.
 - **Changes** (a run with `control: full`): `s` stop (the confirm says what the profile's kill switch
   then does), `S` start, `r` reconnect, and on the profile screen `R` reload from the config file,

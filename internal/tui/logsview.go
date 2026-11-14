@@ -8,6 +8,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
+	"github.com/md2k/subnet-tunnel/internal/config"
 	"github.com/md2k/subnet-tunnel/internal/logring"
 )
 
@@ -56,13 +57,29 @@ func (a *app) startSearch() {
 
 // logView is the log view on screen; nil: none.
 func (a *app) logView() *tview.TextView {
-	switch a.screen {
-	case scrDash:
+	switch {
+	case a.screen == scrDash:
 		return a.dashLogs
-	case scrLogs:
+	case a.screen == scrLogs:
 		return a.fullLogs
+	case a.screen == scrProfile && a.showLogs:
+		return a.profLogs
 	}
 	return nil
+}
+
+// viewFilter is the filter of the log view on screen: the profile screen's
+// shows its profile; in layout detail the dashboard's follows the selected
+// profile.
+func (a *app) viewFilter() logFilter {
+	f := a.filter
+	switch {
+	case a.screen == scrProfile && a.open >= 0 && a.open < len(a.st.Tunnels):
+		f.profile = a.st.Tunnels[a.open].Name
+	case a.screen == scrDash && a.layout == config.LayoutDetail && a.sel < len(a.st.Tunnels):
+		f.profile = a.st.Tunnels[a.sel].Name
+	}
+	return f
 }
 
 // scrollsBack reports whether a key scrolls a log view away from its end.
@@ -152,16 +169,17 @@ func (a *app) pause() {
 	}
 }
 
-func (a *app) formatLine(l logring.Line) string {
-	return formatLine(l, a.filter, a.nameWidth(), a.profileColor)
+func (a *app) formatLine(l logring.Line, f logFilter) string {
+	return formatLine(l, f, max(a.nameWidth(), 7), a.profileColor)
 }
 
 // addLines keeps new log lines, and shows them if following.
 func (a *app) addLines(batch []logring.Line) {
 	var shown []string
+	f := a.viewFilter()
 	for _, l := range batch {
-		if a.logs.add(l) && a.filter.match(l) {
-			shown = append(shown, a.formatLine(l))
+		if a.logs.add(l) && f.match(l) {
+			shown = append(shown, a.formatLine(l, f))
 		}
 	}
 	if len(shown) == 0 {
@@ -194,9 +212,10 @@ func (a *app) rebuildLogs() {
 		return
 	}
 	var shown []string
+	f := a.viewFilter()
 	for _, l := range a.logs.lines {
-		if a.filter.match(l) {
-			shown = append(shown, a.formatLine(l))
+		if f.match(l) {
+			shown = append(shown, a.formatLine(l, f))
 		}
 	}
 	a.logText = len(shown) > 0
@@ -205,5 +224,9 @@ func (a *app) rebuildLogs() {
 }
 
 func (a *app) renderLogTitles() {
-	a.dashLogs.SetTitle(" Logs · " + tview.Escape(a.filter.describe()) + " · " + a.followText() + " ")
+	f := a.filter
+	if a.layout == config.LayoutDetail && a.sel < len(a.st.Tunnels) {
+		f.profile = a.st.Tunnels[a.sel].Name
+	}
+	a.dashLogs.SetTitle(boxTitle("Logs · " + tview.Escape(f.describe()) + " · " + a.followText()))
 }

@@ -7,6 +7,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -55,6 +56,9 @@ const (
 	scrHelp    = "help"
 )
 
+// keyBarColor is the key bar's shade.
+var keyBarColor = tcell.PaletteColor(236)
+
 const readOnlyText = "read only: this subtun runs with control: status; start it with --control full (or control: full in the config file) to change it here"
 
 type app struct {
@@ -64,7 +68,7 @@ type app struct {
 	tv    *tview.Application
 	pages *tview.Pages
 
-	header, msg, keys *tview.TextView
+	header, headerRight, msg, keys *tview.TextView
 
 	// The dashboard.
 	body     *tview.Flex
@@ -76,13 +80,19 @@ type app struct {
 	dashLogs *tview.TextView
 
 	// The profile screen.
-	profInfo  *tview.TextView
-	profItems *tview.Table
-	profConns *tview.Table
-	profGraph *tview.TextView
-	profCard  *tview.Flex
-	profFlex  *tview.Flex
-	itemRows  []item
+	profInfo    *tview.TextView
+	profItems   *tview.Table
+	profConns   *tview.Table
+	profLogs    *tview.TextView
+	profTraffic *tview.TextView
+	profLeft    *tview.Flex
+	trafficRows int
+	cardLines   []cardLine
+	showConns   bool // the profile screen's panes
+	showLogs    bool
+	profGraph   *tview.TextView
+	profCard    *tview.Flex
+	profFlex    *tview.Flex
 
 	// The logs screen.
 	logsFlex *tview.Flex
@@ -213,27 +223,33 @@ func newApp(ctx context.Context, quit context.CancelFunc, o Options) *app {
 	a := &app{o: o, ctx: ctx, quit: quit, tv: tview.NewApplication(), pages: tview.NewPages(), samples: map[string][]meter.Sample{},
 		conns: map[string][]meter.ConnInfo{}, following: true, screen: scrDash, open: -1, pollNow: make(chan struct{}, 1),
 		ui: make(chan func(), 64), started: make(chan struct{})}
-	a.filter.level = levels[0]
+	a.filter.level = slog.LevelInfo
 	a.bits = o.Units == config.UnitsBits
 
-	a.header = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
-	a.header.SetBackgroundColor(tcell.ColorNavy)
-	a.header.SetTextColor(tcell.ColorWhite)
+	bar := func(bg tcell.Color) *tview.TextView {
+		tv := tview.NewTextView().SetDynamicColors(true).SetWrap(false)
+		tv.SetBackgroundColor(bg)
+		tv.SetTextColor(tcell.ColorWhite)
+		return tv
+	}
+	a.header, a.headerRight = bar(tcell.ColorNavy), bar(tcell.ColorNavy)
+	a.headerRight.SetTextAlign(tview.AlignRight)
 	a.msg = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
-	a.keys = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
+	a.keys = bar(keyBarColor)
 
 	a.buildDash()
 	a.buildProfile()
 	a.buildLogs()
 	a.helpView = tview.NewTextView().SetDynamicColors(true).SetText(helpText)
-	a.helpView.SetBorder(true).SetTitle(" Keys ")
+	boxed(a.helpView.Box, "Keys")
 
 	a.pages.AddPage(scrDash, a.body, true, true)
 	a.pages.AddPage(scrProfile, a.profilePage(), true, false)
 	a.pages.AddPage(scrLogs, a.logsFlex, true, false)
 	a.pages.AddPage(scrHelp, a.helpView, true, false)
+	head := tview.NewFlex().AddItem(a.header, 0, 1, false).AddItem(a.headerRight, 22, 0, false)
 	root := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(a.header, 1, 0, false).
+		AddItem(head, 1, 0, false).
 		AddItem(a.pages, 0, 1, true).
 		AddItem(a.msg, 1, 0, false).
 		AddItem(a.keys, 1, 0, false)
@@ -360,7 +376,7 @@ func (a *app) goTo(s string) {
 	case scrLogs:
 		a.tv.SetFocus(a.fullLogs)
 	}
-	if s == scrDash || s == scrLogs {
+	if s != scrHelp {
 		a.follow() // a log view comes on screen: fresh, following
 	}
 	a.refresh()
@@ -407,10 +423,15 @@ func (a *app) renderHeader() {
 			s += " · control " + st.Control + " (read only)"
 		}
 	}
-	if a.gone != nil && a.have {
-		s += " · [red]no answer: subtun stopped?[-]"
+	if a.gone != nil && a.have { // first: a long header is cut at the end
+		s = strings.Replace(s, " subtun ", " subtun · [red]no answer: subtun stopped?[-] ", 1)
 	}
 	a.header.SetText(s)
+	right := "esc back · ? help "
+	if a.screen == scrDash {
+		right = "? help · q quit "
+	}
+	a.headerRight.SetText(right)
 }
 
 func (a *app) followText() string {
@@ -426,7 +447,7 @@ func (a *app) followText() string {
 // key is a key for the key bar; an action greyed out in a read-only run.
 func (a *app) key(k, what string, action bool) string {
 	if action && (a.st.Control != "full" || a.gone != nil) {
-		return "[gray]" + k + " " + what + "[-]"
+		return "[darkgray]" + k + " " + what + "[-]"
 	}
 	return "[yellow]" + k + "[-] " + what
 }
@@ -437,18 +458,18 @@ func (a *app) renderKeys() {
 	var ks []string
 	switch a.screen {
 	case scrDash:
-		ks = []string{a.key("?", "help", false), a.key("q", "quit", false), a.key("↑↓", "select", false), a.key("enter", "open", false),
+		ks = []string{a.key("↑↓", "select", false), a.key("enter", "open", false),
 			a.key("v", "layout", false), a.key("s", "stop", true), a.key("S", "start", true), a.key("r", "reconnect", true),
 			a.key("a", "add profile", true), a.key("l", "logs", false), a.key("u", "units", false), a.key("tab", "focus", false), a.key("f", "follow", false)}
 	case scrProfile:
-		ks = []string{a.key("esc", "back", false), a.key("?", "help", false), a.key("s", "stop", true), a.key("S", "start", true),
-			a.key("r", "reconnect", true), a.key("R", "reload", true), a.key("a/x", "add route/exclude", true), a.key("A", "add DNS", true),
-			a.key("d", "delete", true), a.key("l", "logs", false), a.key("u", "units", false), a.key("tab", "focus", false)}
+		ks = []string{a.key("esc", "back", false), a.key("s", "stop", true), a.key("S", "start", true),
+			a.key("r", "reconnect", true), a.key("R", "reload from config", true), a.key("a/x/d", "routes", true), a.key("A/D", "DNS", true),
+			a.key("c", "connections", false), a.key("l", "logs", false), a.key("L", "logs full screen", false), a.key("u", "units", false), a.key("tab", "focus", false)}
 	case scrLogs:
 		ks = []string{a.key("esc", "back", false), a.key("f", "follow", false), a.key("p", "profile", false), a.key("v", "level", false),
 			a.key("/", "search", false), a.key("g/G", "top/bottom", false)}
 	case scrHelp:
-		ks = []string{a.key("esc", "back", false), a.key("q", "quit", false)}
+		ks = []string{a.key("esc", "back", false)}
 	}
 	a.keys.SetText(" " + strings.Join(ks, "  "))
 }
@@ -604,11 +625,12 @@ const helpText = `
  [yellow]Profile screen[-]
    a x         add a route, an exclude
    A           add DNS domains or patterns
-   d           delete the selected route, exclude, domain or pattern
+   d D         delete the selected route, exclude, domain or pattern
    s S r       stop, start, reconnect
    R           read the profile from the config file again
-   l           its logs
-   tab         move between its routes and its connections
+   c l         show or hide its open connections, its log lines
+   L           its log lines full screen
+   tab         move between the card, the connections and the logs
    esc         back
 
  [yellow]Logs[-]

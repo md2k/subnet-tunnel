@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -9,49 +10,112 @@ import (
 	"github.com/rivo/tview"
 
 	"github.com/md2k/subnet-tunnel/internal/control"
+	"github.com/md2k/subnet-tunnel/internal/dns"
 	"github.com/md2k/subnet-tunnel/internal/meter"
+	"github.com/md2k/subnet-tunnel/internal/routes"
 )
 
-// statsShare is the stats' share of the profile card's width; the traffic
-// graph has the rest.
-const statsShare = 0.4
+// The profile screen: a card (what the profile asks for, in sections, and
+// its traffic graph next to it), then its open connections and its log
+// lines, each shown or hidden (c, l).
 
 func (a *app) buildProfile() {
-	a.profInfo = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
-	a.profInfo.SetBorder(true)
-	a.profGraph = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
-	a.profGraph.SetBorder(true).SetTitle(" Traffic · 5 min ")
 	sel := tcell.StyleDefault.Reverse(true)
-	a.profItems = tview.NewTable().SetSelectable(true, false).SetFixed(1, 0).SetSelectedStyle(sel)
-	a.profItems.SetBorder(true).SetTitle(" Routes and DNS names ")
-	a.profConns = tview.NewTable().SetFixed(1, 0)
-	a.profConns.SetBorder(true)
+	a.profItems = tview.NewTable().SetSelectable(true, false).SetSelectedStyle(sel)
+	a.profTraffic = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
+	a.profLeft = tview.NewFlex().SetDirection(tview.FlexRow)
+	boxed(a.profLeft.Box, "")
+	a.profGraph = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
+	boxed(a.profGraph.Box, "Traffic · 5 min")
+	a.profConns = tview.NewTable()
+	boxed(a.profConns.Box, "")
+	a.profLogs = newLogView()
+	a.showConns, a.showLogs = true, true
 }
 
-// The profile card: its stats next to its traffic graph.
+// boxed gives a box a border and a title at the top left, as "─ title ─".
+func boxed(b *tview.Box, title string) {
+	b.SetBorder(true).SetTitleAlign(tview.AlignLeft).SetTitle(boxTitle(title))
+}
+
+func boxTitle(title string) string {
+	if title == "" {
+		return ""
+	}
+	return "─ " + title + " "
+}
+
 func (a *app) profilePage() tview.Primitive {
+	a.profLeft.AddItem(a.profItems, 0, 1, true).AddItem(a.profTraffic, 4, 0, false)
 	a.profCard = tview.NewFlex().
-		AddItem(a.profInfo, 0, 2, false).
-		AddItem(a.profGraph, 0, 3, false)
-	a.profFlex = tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(a.profCard, a.cardRows(), 0, false).
-		AddItem(a.profItems, 0, 1, true).
-		AddItem(a.profConns, 0, 1, false)
+		AddItem(a.profLeft, 0, 3, true).
+		AddItem(a.profGraph, 0, 2, false)
+	a.profFlex = tview.NewFlex().SetDirection(tview.FlexRow)
+	a.layoutProfile()
 	return a.profFlex
 }
 
-// cardRows is the profile card's height: its stats (8 lines) or its graph
-// (both sides and their lines), and the borders.
-func (a *app) cardRows() int { return max(8, 2*a.graphRows()+2) + 2 }
+// layoutProfile puts the profile screen together: the card, then the panes
+// shown.
+func (a *app) layoutProfile() {
+	a.profFlex.Clear()
+	rows := a.cardRows()
+	if !a.showConns && !a.showLogs {
+		a.profFlex.AddItem(a.profCard, 0, 1, true)
+		return
+	}
+	a.profFlex.AddItem(a.profCard, rows, 0, true)
+	if a.showConns {
+		a.profFlex.AddItem(a.profConns, 0, 1, false)
+	}
+	if a.showLogs {
+		a.profFlex.AddItem(a.profLogs, 0, 2, false)
+	}
+}
+
+// sideBySide reports whether the card's graph goes next to its sections
+// (wide screens) or below them.
+func (a *app) sideBySide() bool { return a.scrW == 0 || a.scrW >= 140 }
+
+// cardRows is the card's height: its sections and traffic lines next to
+// its graph (both sides and their lines), or the two stacked; borders
+// included.
+func (a *app) cardRows() int {
+	left, graph := len(a.cardLines)+a.trafficRows+2, 2*a.graphRows()+2+2
+	if a.sideBySide() {
+		return max(left, graph)
+	}
+	return left + graph
+}
+
+// arrangeCard puts the graph next to the sections or below them.
+func (a *app) arrangeCard() {
+	if a.sideBySide() {
+		a.profCard.SetDirection(tview.FlexColumn)
+		a.profCard.ResizeItem(a.profLeft, 0, 3)
+		a.profCard.ResizeItem(a.profGraph, 0, 2)
+		return
+	}
+	a.profCard.SetDirection(tview.FlexRow)
+	a.profCard.ResizeItem(a.profLeft, len(a.cardLines)+a.trafficRows+2, 0)
+	a.profCard.ResizeItem(a.profGraph, 2*a.graphRows()+2+2, 0)
+}
 
 func (a *app) openProfile(i int) {
 	if !a.have || i < 0 || i >= len(a.st.Tunnels) {
 		return
 	}
 	a.open = i
-	a.profItems.Select(1, 0)
+	a.profItems.Select(0, 0)
 	a.goTo(scrProfile)
 	a.pollSoon()
+}
+
+// cardLine is a row of the card: a section's heading, an item, or a line of
+// text; item rows can be selected (d deletes one).
+type cardLine struct {
+	cells []string // tview-tagged
+	item  *item
 }
 
 func (a *app) renderProfile(now time.Time) {
@@ -59,98 +123,224 @@ func (a *app) renderProfile(now time.Time) {
 		return
 	}
 	t := a.st.Tunnels[a.open]
-	a.profFlex.ResizeItem(a.profCard, a.cardRows(), 0)
-	a.profInfo.SetTitle(" " + tview.Escape(nameOf(t)) + " ")
-	a.profInfo.SetText(a.profileText(t, now))
+	a.cardLines = a.card(t)
+	traffic := a.trafficText(t)
+	a.trafficRows = strings.Count(traffic, "\n") + 1
+	a.profLeft.ResizeItem(a.profTraffic, a.trafficRows, 0)
+	a.profTraffic.SetText(traffic)
+	a.arrangeCard()
+	if h := a.cardRows(); a.showConns || a.showLogs {
+		a.profFlex.ResizeItem(a.profCard, h, 0)
+	}
+	a.profLeft.SetTitle(boxTitle(a.cardTitle(t, now)))
+	row, _ := a.profItems.GetSelection()
+	a.profItems.Clear()
+	for r, l := range a.cardLines {
+		for c, text := range l.cells {
+			cell := tview.NewTableCell(text).SetSelectable(l.item != nil)
+			if c == len(l.cells)-1 {
+				cell.SetExpansion(1)
+			}
+			a.profItems.SetCell(r, c, cell)
+		}
+	}
+	a.profItems.Select(a.selectableRow(row), 0)
+
 	w := 120 // before the first draw
 	if a.scrW > 0 {
 		w = a.scrW
 	}
-	gw := w - int(float64(w)*statsShare) - 2 // the graph's part, less its borders
+	gw := w - 2 // the graph's part, less its borders
+	if a.sideBySide() {
+		gw = w - w*3/5 - 2
+	}
 	a.profGraph.SetText(strings.Join(a.trafficGraph(t, max(gw, 10), a.graphRows()), "\n"))
-
-	// What it asks for, as rows to act on.
-	row, col := a.profItems.GetSelection()
-	a.profItems.Clear()
-	for c, h := range []string{"KIND", "VALUE", "NOTE"} {
-		a.profItems.SetCell(0, c, tview.NewTableCell(h).SetTextColor(tcell.ColorGray).SetSelectable(false))
-	}
-	a.itemRows = items(t)
-	for i, it := range a.itemRows {
-		note := "configured"
-		switch {
-		case it.added:
-			note = "[green]added while running[-]"
-		case it.removed:
-			note = "[gray]removed while running[-]"
-		}
-		a.profItems.SetCell(i+1, 0, tview.NewTableCell(it.kind))
-		a.profItems.SetCell(i+1, 1, tview.NewTableCell(itemText(it)))
-		a.profItems.SetCell(i+1, 2, tview.NewTableCell(note).SetExpansion(1))
-	}
-	if len(a.itemRows) == 0 {
-		a.profItems.SetCell(1, 1, tview.NewTableCell("[gray]no routes or DNS names: SOCKS only[-]").SetSelectable(false))
-	}
-	a.profItems.Select(min(max(row, 1), max(len(a.itemRows), 1)), col)
 
 	conns := a.conns[t.Name]
 	a.profConns.Clear()
-	a.profConns.SetTitle(fmt.Sprintf(" Open connections (%d) ", len(conns)))
+	a.profConns.SetTitle(boxTitle(fmt.Sprintf("Open connections (%d)", len(conns))))
 	for c, h := range []string{"DESTINATION", "VIA", "AGE", "UP", "DOWN"} {
-		cell := tview.NewTableCell(h).SetTextColor(tcell.ColorGray)
-		if c >= 2 {
-			cell.SetAlign(tview.AlignRight)
-		}
-		a.profConns.SetCell(0, c, cell)
+		a.profConns.SetCell(0, c, tview.NewTableCell(h+"   ").SetTextColor(tcell.ColorGray))
 	}
 	for i, c := range conns {
-		a.profConns.SetCell(i+1, 0, tview.NewTableCell(tview.Escape(c.Dst)).SetExpansion(1))
-		a.profConns.SetCell(i+1, 1, tview.NewTableCell(c.Via))
-		a.profConns.SetCell(i+1, 2, tview.NewTableCell(short(now.Sub(c.Opened))).SetAlign(tview.AlignRight))
-		a.profConns.SetCell(i+1, 3, tview.NewTableCell(meter.Bytes(c.Up)).SetAlign(tview.AlignRight))
-		a.profConns.SetCell(i+1, 4, tview.NewTableCell(meter.Bytes(c.Down)).SetAlign(tview.AlignRight))
+		for col, text := range []string{tview.Escape(c.Dst), c.Via, short(now.Sub(c.Opened)), meter.Bytes(c.Up), meter.Bytes(c.Down)} {
+			a.profConns.SetCell(i+1, col, tview.NewTableCell(text+"   "))
+		}
 	}
+	a.profLogs.SetTitle(boxTitle("Logs · " + tview.Escape(nameOf(t)) + " · level: " + strings.ToLower(a.filter.level.String()) + " · " + a.followText()))
 }
 
-// profileText is the profile card's stats.
-func (a *app) profileText(t control.Tunnel, now time.Time) string {
-	var b strings.Builder
-	line := func(label, format string, args ...any) {
-		fmt.Fprintf(&b, "[gray]%-8s[-] "+format+"\n", append([]any{label}, args...)...)
+// selectableRow is row if it can be selected, else the nearest item row
+// after it (or before); 0 when there is none.
+func (a *app) selectableRow(row int) int {
+	for r := max(row, 0); r < len(a.cardLines); r++ {
+		if a.cardLines[r].item != nil {
+			return r
+		}
 	}
-	line("state", "[%s]%s[-]", stateColor(t.State), stateText(t, now))
+	for r := min(row, len(a.cardLines)-1); r >= 0; r-- {
+		if a.cardLines[r].item != nil {
+			return r
+		}
+	}
+	return 0
+}
+
+// cardTitle is "work · up 1h12m · pod ops/toolbox (binary agent 0.4.1) ·
+// kill switch on".
+func (a *app) cardTitle(t control.Tunnel, now time.Time) string {
+	parts := []string{tview.Escape(nameOf(t)), stateText(t, now)}
 	if t.Target != "" {
-		line("target", "%s", tview.Escape(t.Target))
+		target := targetShort(t.Target)
+		if ag := agentText(t); ag != "" {
+			target += " (" + ag + ")"
+		}
+		parts = append(parts, tview.Escape(target))
 	}
-	var guard []string
 	if t.KillSwitch != "" {
-		guard = append(guard, "kill switch "+ksText(t.KillSwitch))
+		parts = append(parts, "kill switch "+t.KillSwitch)
 	}
 	if t.SOCKS != "" {
-		guard = append(guard, "SOCKS "+tview.Escape(t.SOCKS))
+		parts = append(parts, "SOCKS "+tview.Escape(t.SOCKS))
 	}
-	if len(guard) > 0 {
-		line("", "%s", strings.Join(guard, " · "))
-	}
-	if len(t.Routes) > 0 {
-		on := "[gray](not on the utun)[-]"
-		if t.RoutesOn {
-			on = "[gray](on the utun)[-]"
+	return strings.Join(parts, " · ")
+}
+
+// card is the profile card's rows: routes, excludes, DNS names, each with
+// its keys and notes.
+func (a *app) card(t control.Tunnel) []cardLine {
+	var out []cardLine
+	text := func(cells ...string) { out = append(out, cardLine{cells: cells}) }
+	heading := func(title, keys string) { text("[gray]"+title+"[-]", "", "[gray]"+tview.Escape(keys)+"[-]") }
+	its := items(t)
+	when := func(it item) string {
+		sign := "+"
+		if it.removed {
+			sign = "-"
 		}
-		line("carries", "%s %s", tview.Escape(summary(t.Routes, 4)), on)
+		at := t.ChangedAt[sign+it.kind+" "+normalizedValue(it)] // the change texts carry normalized values
+		switch {
+		case it.added && !at.IsZero():
+			return "[green]added " + at.Local().Format("15:04") + "[-]"
+		case it.added:
+			return "[green]added[-]"
+		case it.removed && !at.IsZero():
+			return "[gray]removed " + at.Local().Format("15:04") + "[-]"
+		case it.removed:
+			return "[gray]removed[-]"
+		}
+		return "configured"
 	}
+	// row adds an item: label before its value, note after.
+	row := func(it item, label, after, note string) {
+		value := tview.Escape(it.value)
+		switch {
+		case it.added:
+			value = "[green]" + value + "[-]"
+		case it.removed:
+			value = "[gray]" + value + "[-]"
+		}
+		out = append(out, cardLine{cells: []string{"  " + label + value + after, when(it), "[gray]" + tview.Escape(note) + "[-]"}, item: &it})
+	}
+
+	heading("Routes on the utun", "[a] add  [d] delete  [x] exclude")
+	n := 0
+	for _, it := range its {
+		if it.kind == "route" {
+			row(it, "", "", t.RouteNotes[it.value])
+			n++
+		}
+	}
+	if n == 0 {
+		text("  [gray]none: SOCKS only[-]", "", "")
+	}
+	if slices.ContainsFunc(its, func(it item) bool { return it.kind == "exclude" }) {
+		heading("Excludes", "")
+		for _, it := range its {
+			if it.kind == "exclude" {
+				row(it, "", "", "")
+			}
+		}
+	}
+	text("", "", "")
+	heading("DNS names through this tunnel", "[A] add  [D] delete")
+	first := true
+	for _, it := range its {
+		if it.kind != "dns" && it.kind != "pattern" {
+			continue
+		}
+		note := ""
+		if first && t.Unrouted != "" {
+			note = "unrouted answers: " + t.Unrouted
+		}
+		first = false
+		switch {
+		case it.kind == "pattern":
+			row(it, "pattern ", "", note)
+		case it.value == ".":
+			row(it, "", "  [gray](all, except local names)[-]", note)
+		default:
+			row(it, "", "", note)
+		}
+	}
+	if first {
+		text("  [gray]none[-]", "", "")
+	}
+	text("", "", "")
+	return out
+}
+
+// trafficText is the card's traffic lines.
+func (a *app) trafficText(t control.Tunnel) string {
 	c := t.Counts
 	via := ""
 	if c.ViaSOCKS > 0 {
 		via = fmt.Sprintf(" (%d through SOCKS)", c.ViaSOCKS)
 	}
-	line("conns", "%d open / %d total / %d failed%s", c.Open, c.Total, c.Failed, via)
-	line("bytes", "↑ %s  ↓ %s", meter.Bytes(c.Up), meter.Bytes(c.Down))
-	line("DNS", "%d answered, %d failed · loop guard refused %d", t.DNSCounts.Answered, t.DNSCounts.Failed, c.Refused)
-	if t.LastError != "" && t.State != "up" {
-		line("[red]error[-]", "%s", tview.Escape(t.LastError))
+	lines := []string{
+		fmt.Sprintf("[gray]Traffic[-]  conns %d open / %d total / %d failed%s · loop guard refused %d", c.Open, c.Total, c.Failed, via, c.Refused),
+		fmt.Sprintf("         ↑ %s (%s)  ↓ %s (%s) · DNS %d answered, %d failed", meter.Bytes(c.Up), a.rate(c.UpRate), meter.Bytes(c.Down), a.rate(c.DownRate),
+			t.DNSCounts.Answered, t.DNSCounts.Failed),
 	}
-	return strings.TrimSuffix(b.String(), "\n")
+	if len(t.Routes) > 0 {
+		on := "not on the utun"
+		if t.RoutesOn {
+			on = "on the utun"
+		}
+		lines = append(lines, fmt.Sprintf("         carries %s [gray](%s)[-]", tview.Escape(summary(t.Routes, 4)), on))
+	}
+	if t.LastError != "" && t.State != "up" {
+		lines = append(lines, "[red]Error[-]    "+tview.Escape(t.LastError))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// normalizedValue is an item's value as the runtime changes write it.
+func normalizedValue(it item) string {
+	switch it.kind {
+	case "route":
+		return normalized(routes.ParseRoute)(it.value)
+	case "exclude":
+		return normalized(routes.ParsePrefix)(it.value)
+	case "dns":
+		if n, err := dns.NormalizeDomain(it.value); err == nil {
+			return n
+		}
+	}
+	return it.value
+}
+
+// agentText is the agent from a target's description: "binary agent 0.4.1".
+func agentText(t control.Tunnel) string {
+	i := strings.LastIndex(t.Target, ", ")
+	if i < 0 {
+		return ""
+	}
+	kind := t.Target[i+2:]
+	if t.Agent != "" && strings.HasSuffix(kind, "agent") {
+		kind += " " + t.Agent
+	}
+	return kind
 }
 
 // summary lists up to n items, then how many more.
@@ -164,10 +354,10 @@ func summary(list []string, n int) string {
 // selectedItem is the item selected on the profile screen.
 func (a *app) selectedItem() (item, bool) {
 	row, _ := a.profItems.GetSelection()
-	if row < 1 || row > len(a.itemRows) {
+	if row < 0 || row >= len(a.cardLines) || a.cardLines[row].item == nil {
 		return item{}, false
 	}
-	return a.itemRows[row-1], true
+	return *a.cardLines[row].item, true
 }
 
 func (a *app) profileKey(ev *tcell.EventKey) *tcell.EventKey {
@@ -176,12 +366,19 @@ func (a *app) profileKey(ev *tcell.EventKey) *tcell.EventKey {
 		a.open = -1
 		a.goTo(scrDash)
 		return nil
-	case tcell.KeyTab, tcell.KeyBacktab:
-		if a.tv.GetFocus() == a.profConns {
-			a.tv.SetFocus(a.profItems)
-		} else {
-			a.tv.SetFocus(a.profConns)
+	case tcell.KeyTab, tcell.KeyBacktab: // the card, the connections, the logs
+		order := []tview.Primitive{a.profItems}
+		if a.showConns {
+			order = append(order, a.profConns)
 		}
+		if a.showLogs {
+			order = append(order, a.profLogs)
+		}
+		i := slices.Index(order, a.tv.GetFocus())
+		a.tv.SetFocus(order[(i+1)%len(order)])
+		return nil
+	}
+	if a.tv.GetFocus() == a.profLogs && a.logScrollKey(ev) {
 		return nil
 	}
 	t, _, ok := a.current()
@@ -215,7 +412,16 @@ func (a *app) profileKey(ev *tcell.EventKey) *tcell.EventKey {
 				a.confirmDelete(t, it)
 			}
 		})
+	case 'c':
+		a.showConns = !a.showConns
+		a.layoutProfile()
+		a.tv.SetFocus(a.profItems)
 	case 'l':
+		a.showLogs = !a.showLogs
+		a.layoutProfile()
+		a.tv.SetFocus(a.profItems)
+		a.follow()
+	case 'L':
 		a.filter.profile = t.Name
 		a.openLogs()
 	default:

@@ -75,21 +75,33 @@ func (f logFilter) describe() string {
 }
 
 // logMessage is a line's text without what the TUI shows in columns: the
-// time, the level, the profile; the message unquoted.
+// time, the level, the profile; the message unquoted. A relayed line
+// ("helper: level=INFO msg=...") shows the relayed message.
 func logMessage(l logring.Line) string {
 	s := l.Text
-	for _, key := range []string{"time=", "level="} {
-		if strings.HasPrefix(s, key) {
-			_, rest, _ := strings.Cut(s, " ")
-			s = rest
-		}
-	}
-	if rest, ok := strings.CutPrefix(s, "msg="); ok {
-		s = rest
-		if q, err := strconv.QuotedPrefix(rest); err == nil {
-			if m, err := strconv.Unquote(q); err == nil {
-				s = m + rest[len(q):]
+	for range 2 { // the line, then a relayed line inside it
+		for _, key := range []string{"time=", "level="} {
+			if strings.HasPrefix(s, key) {
+				_, rest, _ := strings.Cut(s, " ")
+				s = rest
 			}
+		}
+		if rest, ok := strings.CutPrefix(s, "msg="); ok {
+			s = rest
+			if q, err := strconv.QuotedPrefix(rest); err == nil {
+				if m, err := strconv.Unquote(q); err == nil {
+					s = m + rest[len(q):]
+				}
+			}
+		}
+		relayed := false
+		for _, prefix := range []string{"helper: ", "agent: "} {
+			if rest, ok := strings.CutPrefix(s, prefix); ok && (strings.HasPrefix(rest, "level=") || strings.HasPrefix(rest, "msg=")) {
+				s, relayed = rest, true
+			}
+		}
+		if !relayed {
+			break
 		}
 	}
 	if l.Tunnel != "" {
@@ -140,11 +152,17 @@ func levelText(lv slog.Level) string {
 // profileColors colour the profiles' names in the logs, in status order.
 var profileColors = []string{"green", "aqua", "fuchsia", "yellow", "blue", "orange", "lime", "purple"}
 
-// formatLine is one log line for a log view: time, profile, level, text.
+// formatLine is one log line for a log view: time, profile (or, without
+// one, the part of subtun that logged it, grey), level, text.
 func formatLine(l logring.Line, f logFilter, width int, color func(string) string) string {
-	who := fmt.Sprintf("%-*s", width, l.Tunnel)
-	if l.Tunnel != "" {
-		who = "[" + color(l.Tunnel) + "]" + tview.Escape(who) + "[-]"
+	var who string
+	switch {
+	case l.Tunnel != "":
+		who = "[" + color(l.Tunnel) + "]" + tview.Escape(fmt.Sprintf("%-*s", width, l.Tunnel)) + "[-]"
+	case l.Component != "" && l.Component != "tunnel":
+		who = "[gray]" + tview.Escape(fmt.Sprintf("%-*s", width, cut(l.Component, width))) + "[-]"
+	default:
+		who = strings.Repeat(" ", width)
 	}
 	return fmt.Sprintf("[gray]%s[-] %s %s %s", l.Time.Local().Format("15:04:05.000"), who, levelText(lineLevel(l)), highlight(logMessage(l), f.search))
 }

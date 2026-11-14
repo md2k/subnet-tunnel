@@ -25,29 +25,47 @@ const (
 func (a *app) buildDash() {
 	sel := tcell.StyleDefault.Reverse(true)
 	a.table = tview.NewTable().SetSelectable(true, false).SetFixed(1, 0).SetSelectedStyle(sel)
-	a.table.SetBorder(true)
+	boxed(a.table.Box, "Profiles")
 	a.table.SetSelectionChangedFunc(func(row, _ int) {
 		if row >= 1 {
 			a.sel = row - 1
+			a.markSelected(a.table, 1)
 		}
 	})
 	a.list = tview.NewTable().SetSelectable(true, false).SetSelectedStyle(sel)
-	a.list.SetBorder(true).SetTitle(" Profiles ")
+	boxed(a.list.Box, "Profiles")
 	a.list.SetSelectionChangedFunc(func(row, _ int) {
+		if row >= len(a.st.Tunnels) || row == a.sel {
+			return // a render selecting the same row again
+		}
 		a.sel = row
+		a.markSelected(a.list, 0)
 		if a.have {
 			a.renderDetail(time.Now())
+			if a.screen == scrDash {
+				a.rebuildLogs() // the logs follow the selected profile
+			}
 		}
 	})
 	a.detail = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
-	a.detail.SetBorder(true)
+	boxed(a.detail.Box, "")
 	a.dashLogs = newLogView()
 	a.body = tview.NewFlex().SetDirection(tview.FlexRow)
 }
 
+// markSelected puts ▶ before the selected profile's row (the first row
+// after skip is the first profile's).
+func (a *app) markSelected(t *tview.Table, skip int) {
+	for i := range a.st.Tunnels {
+		if c := t.GetCell(i+skip, 0); c != nil {
+			c.SetText(map[bool]string{true: "▶", false: " "}[i == a.sel])
+		}
+	}
+}
+
 func newLogView() *tview.TextView {
 	tv := tview.NewTextView().SetDynamicColors(true).SetWrap(false).SetMaxLines(maxLines)
-	tv.SetBorder(true)
+	boxed(tv.Box, "Logs")
 	return tv
 }
 
@@ -75,7 +93,7 @@ func (a *app) topHeight() int {
 	if a.layout == config.LayoutDetail {
 		// state, routes, exclude, DNS, kill switch, two graphs with their
 		// headers, connections, last error; and the borders
-		return min(max(n+2, 7+2*a.graphRows()+2+2), limit)
+		return min(max(n+4, 8+2*a.graphRows()+2+2), limit)
 	}
 	return min(n+3, limit)
 }
@@ -88,8 +106,10 @@ func (a *app) graphRows() int {
 	return min(max((a.scrH-16)/6, 2), 5)
 }
 
-// rate is a rate in the units chosen (u).
-func (a *app) rate(n uint64) string { return rateText(n, a.bits) }
+// rate is a rate in the units chosen (u); rateCell without the "/s" (the
+// table's heading says it).
+func (a *app) rate(n uint64) string     { return rateText(n, a.bits) }
+func (a *app) rateCell(n uint64) string { return strings.TrimSuffix(a.rate(n), "/s") }
 
 func (a *app) renderDash(now time.Time) {
 	if a.sel >= len(a.st.Tunnels) {
@@ -111,7 +131,7 @@ func (a *app) renderDash(now time.Time) {
 // The table's columns, in order; the flexible ones shrink to flexMin when
 // the terminal is narrow, then columns go in dropOrder.
 var (
-	tableHeads = []string{"", "NAME", "STATE", "TARGET", "ROUTES", "DNS", "KS", "↑/s", "↓/s", "TRAFFIC"}
+	tableHeads = []string{"▶", "●", "NAME", "STATE", "TARGET", "ROUTES", "DNS", "KS", "↑/s", "↓/s", "TRAFFIC"}
 	flexCols   = []string{"TARGET", "ROUTES", "DNS"}
 	flexCap    = map[string]int{"TARGET": 40, "ROUTES": 32, "DNS": 32}
 	dropOrder  = []string{"TARGET", "DNS", "TRAFFIC", "KS"}
@@ -167,18 +187,17 @@ func fitColumns(width int, want map[string]int) map[string]int {
 func (a *app) renderTable(now time.Time) {
 	t := a.table
 	t.Clear()
-	t.SetTitle(fmt.Sprintf(" Profiles (%d) ", len(a.st.Tunnels)))
+	t.SetTitle(boxTitle(fmt.Sprintf("Profiles (%d)", len(a.st.Tunnels))))
 	// The plain texts, to measure; colours come after cutting.
 	rows := make([]map[string]string, len(a.st.Tunnels))
 	want := map[string]int{}
 	for _, h := range tableHeads {
 		want[h] = utf8.RuneCountInString(h)
 	}
-	want[""] = 1
 	for i, tn := range a.st.Tunnels {
 		up, down := "-", "-"
 		if tn.State == "up" {
-			up, down = a.rate(tn.Counts.UpRate), a.rate(tn.Counts.DownRate)
+			up, down = a.rateCell(tn.Counts.UpRate), a.rateCell(tn.Counts.DownRate)
 		}
 		ks := tn.KillSwitch
 		if ks == "" {
@@ -213,7 +232,11 @@ func (a *app) renderTable(now time.Time) {
 			continue
 		}
 		right := h == "↑/s" || h == "↓/s"
-		head := tview.NewTableCell(h).SetTextColor(tcell.ColorGray).SetSelectable(false)
+		title := h
+		if h == "▶" || h == "●" {
+			title = ""
+		}
+		head := tview.NewTableCell(title).SetTextColor(tcell.ColorGray).SetSelectable(false)
 		if right {
 			head.SetAlign(tview.AlignRight)
 		}
@@ -221,7 +244,9 @@ func (a *app) renderTable(now time.Time) {
 		for i, tn := range a.st.Tunnels {
 			var text string
 			switch h {
-			case "":
+			case "▶":
+				text = map[bool]string{true: "▶", false: " "}[i == a.sel]
+			case "●":
 				text = glyph(tn.State)
 			case "STATE":
 				text = tview.Escape(cut(rows[i][h], cw))
@@ -312,13 +337,21 @@ func (a *app) renderList(now time.Time) {
 	l.Clear()
 	for i, tn := range a.st.Tunnels {
 		state := stateText(tn, now)
+		if tn.State == "reconnecting" && tn.Attempts > 0 {
+			state = fmt.Sprintf("reconn %d/%d", tn.Attempt, tn.Attempts)
+		}
 		if tn.State != "up" {
 			state = "[" + stateColor(tn.State) + "]" + state + "[-]"
 		}
-		l.SetCell(i, 0, tview.NewTableCell(glyph(tn.State)))
-		l.SetCell(i, 1, tview.NewTableCell(tview.Escape(cut(nameOf(tn), 12))))
-		l.SetCell(i, 2, tview.NewTableCell(state).SetExpansion(1))
+		l.SetCell(i, 0, tview.NewTableCell(map[bool]string{true: "▶", false: " "}[i == a.sel]))
+		l.SetCell(i, 1, tview.NewTableCell(glyph(tn.State)))
+		l.SetCell(i, 2, tview.NewTableCell(tview.Escape(cut(nameOf(tn), 12))))
+		l.SetCell(i, 3, tview.NewTableCell(state).SetExpansion(1))
 	}
+	n := len(a.st.Tunnels)
+	l.SetCell(n, 0, tview.NewTableCell("").SetSelectable(false))
+	l.SetCell(n+1, 1, tview.NewTableCell("[gray]a[-]").SetSelectable(false))
+	l.SetCell(n+1, 2, tview.NewTableCell("[gray]add from config[-]").SetSelectable(false))
 	l.Select(a.sel, 0)
 }
 
@@ -329,7 +362,7 @@ func (a *app) renderDetail(now time.Time) {
 		return
 	}
 	t := a.st.Tunnels[a.sel]
-	a.detail.SetTitle(" " + tview.Escape(nameOf(t)) + " ")
+	a.detail.SetTitle(boxTitle(tview.Escape(nameOf(t))))
 	w := 84 // before the first draw
 	if a.scrW > 0 {
 		w = a.scrW - listWidth - 2 // next to the list, less its borders
@@ -341,33 +374,37 @@ func (a *app) renderDetail(now time.Time) {
 func (a *app) detailText(t control.Tunnel, now time.Time, sparkW int) string {
 	var b strings.Builder
 	line := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
-	head := []string{"[" + stateColor(t.State) + "]" + stateText(t, now) + "[-]"}
+	var head []string
 	if t.Target != "" {
-		head = append(head, tview.Escape(t.Target))
+		head = append(head, tview.Escape(targetShort(t.Target)))
+		if ag := agentText(t); ag != "" {
+			head = append(head, tview.Escape(ag))
+		}
 	}
+	head = append(head, "["+stateColor(t.State)+"]"+stateText(t, now)+"[-]")
 	line("%s", strings.Join(head, " · "))
 	its := items(t)
 	if s := listOf(its, "route"); s != "" {
 		line("[gray]routes [-]  %s", s)
 	} else if t.SOCKS != "" {
-		line("[gray]routes [-]  none: SOCKS only")
+		line("[gray]routes [-]  none: SOCKS only (%s)", tview.Escape(t.SOCKS))
 	}
 	if s := listOf(its, "exclude"); s != "" {
 		line("[gray]exclude[-]  %s", s)
 	}
-	if s := listOf(its, "dns", "pattern"); s != "" {
-		line("[gray]DNS    [-]  %s", s)
-	}
-	var extra []string
+	ks := ""
 	if t.KillSwitch != "" {
-		extra = append(extra, "kill switch "+ksText(t.KillSwitch))
+		ks = "kill switch " + ksText(t.KillSwitch)
 	}
-	if t.SOCKS != "" {
-		extra = append(extra, "SOCKS "+tview.Escape(t.SOCKS))
+	if s := listOf(its, "dns", "pattern"); s != "" {
+		if ks != "" {
+			s += "        " + ks
+		}
+		line("[gray]DNS    [-]  %s", s)
+	} else if ks != "" {
+		line("%s", ks)
 	}
-	if len(extra) > 0 {
-		line("%s", strings.Join(extra, " · "))
-	}
+	line("")
 	c := t.Counts
 	for _, l := range a.trafficGraph(t, sparkW, a.graphRows()) {
 		line("%s", l)

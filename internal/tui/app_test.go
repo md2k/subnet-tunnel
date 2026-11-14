@@ -36,7 +36,9 @@ func newFake(controlMode string) *fake {
 		Tunnels: []control.Tunnel{
 			{Name: "work", State: "up", Since: now.Add(-72 * time.Minute), Target: "pod ops/toolbox, container c, linux/arm64, binary agent",
 				Include: []string{"10.0.0.0/8", "10.70.0.0/16"}, Routes: []string{"10.0.0.0/8"}, RoutesOn: true,
-				Domains: []string{".", "corp.example"}, KillSwitch: "on", Changes: []string{"+route 10.70.0.0/16"},
+				Domains: []string{".", "corp.example"}, KillSwitch: "on", Changes: []string{"+route 10.70.0.0/16"}, Agent: "0.4.1",
+				ChangedAt:  map[string]time.Time{"+route 10.70.0.0/16": time.Date(2026, 11, 14, 15, 2, 0, 0, time.Local)},
+				RouteNotes: map[string]string{"10.0.0.0/8": "parts carried by dev (more specific)"}, Unrouted: "warn",
 				Counts: meter.Counts{Open: 3, Total: 120, UpRate: 120_000, DownRate: 3_100_000}},
 			{Name: "dev", State: "reconnecting", Attempt: 2, Attempts: 10, Include: []string{"10.50.0.0/16"}, Domains: []string{"cluster.local"},
 				LastError: "pod dev/debug: not found"},
@@ -50,6 +52,7 @@ func newFake(controlMode string) *fake {
 		{Seq: 1, Time: now.Add(-3 * time.Second), Text: `time=15:01:02.114 level=INFO msg=reconnected tunnel=work via="pod ops/toolbox"`, Level: "INFO", Tunnel: "work"},
 		{Seq: 2, Time: now.Add(-2 * time.Second), Text: `time=15:01:05.551 level=WARN msg="connection to the agent lost; reconnecting" tunnel=dev`, Level: "WARN", Tunnel: "dev"},
 		{Seq: 3, Time: now.Add(-time.Second), Text: `time=15:01:06.000 level=DEBUG msg="dns query" tunnel=dev name=api.dev.example`, Level: "DEBUG", Tunnel: "dev"},
+		{Seq: 4, Time: now.Add(-time.Second), Text: `time=15:01:07.000 level=INFO msg="helper: level=INFO msg=\"route removed\" cidr=10.60.0.0/16"`, Level: "INFO", Component: "helper"},
 	}, more: make(chan logring.Line, 8)}
 }
 
@@ -265,8 +268,15 @@ func TestDashboard(t *testing.T) {
 	f := newFake("full")
 	layouts := make(chan string, 4)
 	u := start(t, f, Options{OnLayout: func(l string) { layouts <- l }})
-	u.wait("Profiles (3)", "up 1h12m", "reconnecting 2/10", "pod ops/toolbox", "10.0.0.0/8 +1", "lockdown",
-		"120.0 kB/s", "3.1 MB/s", "reconnected", "connection to the agent lost; reconnecting", "control full")
+	u.wait("─ Profiles (3)", "▶ ● work", "up 1h12m", "reconnecting 2/10", "pod ops/toolbox", "10.0.0.0/8 +1", "lockdown",
+		"120.0 kB", "3.1 MB", "reconnected", "connection to the agent lost; reconnecting", "control full", "? help · q quit",
+		"helper  INFO  route removed cidr=10.60.0.0/16") // a relayed line: its source, its own message
+	if strings.Contains(u.text(), "dns query") {
+		t.Error("a debug line at the default level info")
+	}
+	u.key(tcell.KeyDown)
+	u.wait("▶ ◐ dev")
+	u.key(tcell.KeyUp)
 	// The traffic gauge takes the table's spare width: work fills part of it.
 	for _, l := range strings.Split(u.text(), "\n") {
 		if strings.Contains(l, "● work") && (!strings.Contains(l, "·") || !strings.ContainsAny(l, "▏▎▍▌▋▊▉█")) {
@@ -275,9 +285,9 @@ func TestDashboard(t *testing.T) {
 	}
 	// u: rates in bits a second, and back.
 	u.press("u")
-	u.wait("24.8 Mb/s", "960.0 kb/s")
+	u.wait("24.8 Mb", "960.0 kb")
 	u.press("u")
-	u.wait("3.1 MB/s")
+	u.wait("3.1 MB")
 	next := func() string {
 		select {
 		case l := <-layouts:
@@ -287,13 +297,14 @@ func TestDashboard(t *testing.T) {
 		}
 	}
 	u.press("v")
-	u.wait("routes", "+10.70.0.0/16", "kill switch on", "conns 3 open")
+	u.wait("routes", "+10.70.0.0/16", "kill switch on", "conns 3 open", "pod ops/toolbox · binary agent 0.4.1 · up 1h12m", "add from config")
 	if l := next(); l != config.LayoutDetail {
 		t.Errorf("remembered %q", l)
 	}
-	// The list moves the detail with it.
+	// The list moves the detail, and the logs, with it.
 	u.key(tcell.KeyDown)
-	u.wait("last error: pod dev/debug: not found")
+	u.wait("last error: pod dev/debug: not found", "Logs · profile: dev")
+	u.gone("reconnected via")
 	u.press("v")
 	u.wait("Profiles (3)")
 	if l := next(); l != config.LayoutTable {
@@ -351,8 +362,21 @@ func TestProfileScreen(t *testing.T) {
 	u := start(t, f, Options{})
 	u.wait("Profiles (3)")
 	u.key(tcell.KeyEnter)
-	u.wait("subtun › work", "Routes and DNS names", "10.0.0.0/8", "added while running", "configured", "corp.example",
-		"Open connections (1)", "10.0.4.17:5432", "carries", "(on the utun)", "Traffic · 5 min", "· peak ", "· scale ")
+	u.wait("subtun › work", "work · up 1h12m · pod ops/toolbox (binary agent 0.4.1)", "Routes on the utun",
+		"[a] add  [d] delete  [x] exclude", "10.0.0.0/8", "parts carried by dev (more specific)", "added 15:02", "configured",
+		"DNS names through this tunnel", "(all, except local names)", "unrouted answers: warn", "corp.example",
+		"Open connections (1)", "10.0.4.17:5432", "(on the utun)", "Traffic · 5 min", "· peak ", "· scale ", "esc back · ? help",
+		"Logs · work", "reconnected via")
+	if strings.Contains(u.text(), "connection to the agent lost") {
+		t.Fatal("the profile's log pane shows another profile's lines")
+	}
+	// c and l hide and show its connections and logs.
+	u.press("c")
+	u.gone("Open connections (1)")
+	u.press("l")
+	u.gone("Logs · work")
+	u.press("cl")
+	u.wait("Open connections (1)", "Logs · work")
 	u.press("a")
 	u.wait("Add a route to work", "CIDRs or IPs")
 	u.press("10.80.0.0/16")
@@ -363,7 +387,7 @@ func TestProfileScreen(t *testing.T) {
 	}
 	u.gone("Add a route to work")
 	u.wait("profile work: did add 10.80.0.0/16")
-	// The first row is selected: 10.0.0.0/8.
+	// The first route is selected: 10.0.0.0/8.
 	u.press("d")
 	u.wait("Delete route 10.0.0.0/8?", "Dry run: would del 10.0.0.0/8")
 	u.key(tcell.KeyEnter)
@@ -389,9 +413,11 @@ func TestProfileScreen(t *testing.T) {
 func TestLogs(t *testing.T) {
 	f := newFake("full")
 	u := start(t, f, Options{})
-	u.wait("dns query")
+	u.wait("reconnected")
 	u.press("l")
-	u.wait("subtun › logs · profile: all · level: debug", "reconnected", "dns query")
+	u.wait("subtun › logs · profile: all · level: info", "reconnected")
+	u.press("vvv") // warn, error, debug
+	u.wait("level: debug", "dns query")
 	u.press("p") // work
 	u.wait("profile: work")
 	u.gone("dns query")
@@ -443,10 +469,10 @@ func TestNoAnswer(t *testing.T) {
 func TestPause(t *testing.T) {
 	f := newFake("full")
 	u := start(t, f, Options{})
-	u.wait("dns query", "following")
+	u.wait("reconnected", "following")
 	u.press("f")
 	u.wait("paused")
-	f.more <- logring.Line{Seq: 4, Time: time.Now(), Text: "time=1 level=INFO msg=later tunnel=work", Level: "INFO", Tunnel: "work"}
+	f.more <- logring.Line{Seq: 5, Time: time.Now(), Text: "time=1 level=INFO msg=later tunnel=work", Level: "INFO", Tunnel: "work"}
 	u.wait("paused (1 new)")
 	if strings.Contains(u.text(), "later") {
 		t.Fatal("a paused view got a new line")
@@ -454,8 +480,8 @@ func TestPause(t *testing.T) {
 	u.press("f")
 	u.wait("later", "following")
 	// A repeat (a stream that reconnected) isn't shown twice.
-	f.more <- logring.Line{Seq: 4, Time: time.Now(), Text: "time=1 level=INFO msg=later tunnel=work", Level: "INFO", Tunnel: "work"}
-	f.more <- logring.Line{Seq: 5, Time: time.Now(), Text: "time=1 level=INFO msg=latest tunnel=work", Level: "INFO", Tunnel: "work"}
+	f.more <- logring.Line{Seq: 5, Time: time.Now(), Text: "time=1 level=INFO msg=later tunnel=work", Level: "INFO", Tunnel: "work"}
+	f.more <- logring.Line{Seq: 6, Time: time.Now(), Text: "time=1 level=INFO msg=latest tunnel=work", Level: "INFO", Tunnel: "work"}
 	u.wait("latest")
 	if n := strings.Count(u.text(), "later"); n != 1 {
 		t.Fatalf("the repeat shown: %d times", n)
@@ -469,7 +495,7 @@ func TestHelpReturns(t *testing.T) {
 	u.wait("Profiles (3)")
 	u.key(tcell.KeyEnter)
 	u.wait("subtun › work")
-	u.press("l")
+	u.press("L")
 	u.wait("subtun › logs")
 	u.press("?")
 	u.wait("subtun › keys")
@@ -484,7 +510,7 @@ func TestHelpReturns(t *testing.T) {
 func TestNarrow(t *testing.T) {
 	f := newFake("full")
 	u := startSized(t, f, Options{}, 80, 24)
-	u.wait("Profiles (3)", "120.0 kB/s", "3.1 MB/s", "reconnecting 2/10", "? help  q quit")
+	u.wait("Profiles (3)", "120.0 kB", "3.1 MB", "reconnecting 2/10", "? help · q quit")
 	u.press("a")
 	u.wait("staging", "can't join")
 	for _, l := range strings.Split(u.text(), "\n") {
@@ -511,7 +537,7 @@ func TestResize(t *testing.T) {
 	u.wait("Add a profile from", "can join")
 	u.sim.SetSize(80, 24)
 	u.sim.PostEvent(tcell.NewEventResize(80, 24))
-	u.wait("? help  q quit")
+	u.wait("? help · q quit")
 	u.gone("pod ops/toolbox") // the table's TARGET column went; the dialog has its own
 	for _, l := range strings.Split(u.text(), "\n") {
 		if strings.Contains(l, "staging") && !strings.Contains(l, "│ staging") && !strings.Contains(l, "║ staging") {
