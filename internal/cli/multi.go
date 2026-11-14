@@ -967,12 +967,6 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	if eo.control != controlOff && eo.control != "" { // "": tests, internal callers
 		startControl(sctx, es, ring, log.With(logx.ComponentKey, "control"))
 	}
-	markStop := func() {}
-	if eo.tui {
-		ui := startUpTUI(es.server(ring, log.With(logx.ComponentKey, "control"), true), ring, es.configPath, stopAsked, ctx.Done())
-		defer ui.end() // after the capture and the tunnels have stopped: the TUI shows it
-		mp.lend, markStop = ui.lend(), ui.stopping
-	}
 
 	// Listen before connecting, so a busy port fails fast. A listener is
 	// replaced when a reloaded profile moves its SOCKS address.
@@ -1017,6 +1011,13 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			return fmt.Errorf("profile %s: SOCKS listener: %w", sp.name, err)
 		}
 		socksLns[i] = l
+	}
+
+	markStop := func() {}
+	if eo.tui { // after the listeners: a busy port fails before the TUI shows
+		ui := startUpTUI(es.server(ring, log.With(logx.ComponentKey, "control"), true), ring, es.configPath, stopAsked, ctx.Done())
+		defer ui.end() // after the capture and the tunnels have stopped: the TUI shows it
+		mp.lend, markStop = ui.lend(), ui.stopping
 	}
 
 	// Rules an earlier session may have left (kill switch, a killed helper)
