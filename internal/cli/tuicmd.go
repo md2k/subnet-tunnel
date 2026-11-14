@@ -18,7 +18,7 @@ import (
 
 func newTUICmd(g *globalOpts) *cobra.Command {
 	var pid int
-	var layout, units string
+	var layout, units, mouse string
 	cmd := &cobra.Command{
 		Use:   "tui",
 		Short: "Watch and change a running subtun in a terminal UI",
@@ -43,6 +43,9 @@ else as used last.`,
 			if err := config.ValidUnits(units); err != nil {
 				return fmt.Errorf("--%w", err)
 			}
+			if mouse != "" && mouse != "on" && mouse != "off" {
+				return fmt.Errorf("--mouse %q: use on or off", mouse)
+			}
 			in, err := oneInstance(pid)
 			if err != nil {
 				return err
@@ -53,12 +56,17 @@ else as used last.`,
 				Source: tui.Socket(in.Path),
 				Layout: firstSet(layout, fromFile.Layout, last.Layout), OnLayout: func(l string) { saveTUIState(func(s *tuiState) { s.Layout = l }) },
 				Units: firstSet(units, fromFile.Units, last.Units), OnUnits: func(u string) { saveTUIState(func(s *tuiState) { s.Units = u }) },
+				Mouse: firstSet(mouse, string(fromFile.Mouse), last.Mouse) != "off",
+				OnMouse: func(on bool) {
+					saveTUIState(func(s *tuiState) { s.Mouse = map[bool]string{true: "on", false: "off"}[on] })
+				},
 			})
 		},
 	}
 	cmd.Flags().IntVar(&pid, "pid", 0, "the subtun with this process id (needed when several run)")
 	cmd.Flags().StringVar(&layout, "layout", "", "the dashboard's layout: table or detail (default: tui.layout, else the one used last)")
 	cmd.Flags().StringVar(&units, "units", "", "rates in bytes or bits a second: bytes or bits (default: tui.units, else the ones used last)")
+	cmd.Flags().StringVar(&mouse, "mouse", "", "mouse on or off (default: tui.mouse, else as used last, else on)")
 	return cmd
 }
 
@@ -89,6 +97,7 @@ func tuiFromConfig(path string, warn io.Writer) config.TUI {
 type tuiState struct {
 	Layout string `json:"layout,omitempty"`
 	Units  string `json:"units,omitempty"`
+	Mouse  string `json:"mouse,omitempty"`
 }
 
 func tuiStatePath() (string, error) {
@@ -115,6 +124,9 @@ func loadTUIState() tuiState {
 	}
 	if config.ValidUnits(s.Units) != nil {
 		s.Units = ""
+	}
+	if s.Mouse != "on" && s.Mouse != "off" {
+		s.Mouse = ""
 	}
 	return s
 }

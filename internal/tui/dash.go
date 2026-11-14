@@ -32,7 +32,9 @@ func (a *app) buildDash() {
 			a.markSelected(a.table, 1)
 		}
 	})
+	a.table.SetMouseCapture(onDoubleClick(a.table, func(row int) { a.openProfile(row - 1) }))
 	a.list = tview.NewTable().SetSelectable(true, false).SetSelectedStyle(sel)
+	a.list.SetMouseCapture(onDoubleClick(a.list, func(row int) { a.openProfile(row) }))
 	boxed(a.list.Box, "Profiles")
 	a.list.SetSelectionChangedFunc(func(row, _ int) {
 		if row >= len(a.st.Tunnels) || row == a.sel {
@@ -49,8 +51,22 @@ func (a *app) buildDash() {
 	})
 	a.detail = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
 	boxed(a.detail.Box, "")
-	a.dashLogs = newLogView()
+	a.dashLogs = a.newLogView()
 	a.body = tview.NewFlex().SetDirection(tview.FlexRow)
+}
+
+// onDoubleClick calls open with the row of a table double-clicked (tview's
+// Table selects on a click and has nothing for a double-click).
+func onDoubleClick(t *tview.Table, open func(row int)) func(tview.MouseAction, *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+	return func(action tview.MouseAction, ev *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		if action == tview.MouseLeftDoubleClick {
+			if row, _ := t.CellAt(ev.Position()); row >= 0 {
+				open(row)
+				return action, nil
+			}
+		}
+		return action, ev
+	}
 }
 
 // markSelected puts ▶ before the selected profile's row (the first row
@@ -63,9 +79,15 @@ func (a *app) markSelected(t *tview.Table, skip int) {
 	}
 }
 
-func newLogView() *tview.TextView {
+func (a *app) newLogView() *tview.TextView {
 	tv := tview.NewTextView().SetDynamicColors(true).SetWrap(false).SetMaxLines(maxLines)
 	boxed(tv.Box, "Logs")
+	tv.SetMouseCapture(func(action tview.MouseAction, ev *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		if action == tview.MouseScrollUp {
+			a.pause() // the wheel scrolling back pauses, as the keys do
+		}
+		return action, ev
+	})
 	return tv
 }
 

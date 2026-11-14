@@ -370,13 +370,17 @@ func TestProfileScreen(t *testing.T) {
 	if strings.Contains(u.text(), "connection to the agent lost") {
 		t.Fatal("the profile's log pane shows another profile's lines")
 	}
-	// c and l hide and show its connections and logs.
+	// 1-4 (c, l) hide and show its panes.
 	u.press("c")
 	u.gone("Open connections (1)")
 	u.press("l")
 	u.gone("Logs · work")
-	u.press("cl")
-	u.wait("Open connections (1)", "Logs · work")
+	u.press("1")
+	u.gone("Routes on the utun")
+	u.press("2")
+	u.gone("Traffic · 5 min")
+	u.press("1234")
+	u.wait("Open connections (1)", "Logs · work", "Routes on the utun", "Traffic · 5 min")
 	u.press("a")
 	u.wait("Add a route to work", "CIDRs or IPs")
 	u.press("10.80.0.0/16")
@@ -561,7 +565,7 @@ func TestProfileNothingToSelect(t *testing.T) {
 		u.key(tcell.KeyDown)
 	}
 	u.key(tcell.KeyEnter)
-	u.wait("subtun › socks", "none: SOCKS only")
+	u.wait("subtun › socks", "none: SOCKS only (routes can't be added")
 	u.key(tcell.KeyDown)
 	u.key(tcell.KeyUp)
 	u.press("d")
@@ -570,4 +574,55 @@ func TestProfileNothingToSelect(t *testing.T) {
 	u.gone("Open connections")
 	u.key(tcell.KeyEscape)
 	u.wait("Profiles (4)")
+}
+
+// In a dialog the arrow keys move between the buttons: right, enter is
+// Cancel, and nothing changes.
+func TestDialogArrows(t *testing.T) {
+	f := newFake("full")
+	u := start(t, f, Options{})
+	u.wait("Profiles (3)")
+	u.press("s")
+	u.wait("Stop work?", "Dry run: would stop")
+	u.key(tcell.KeyRight)
+	u.key(tcell.KeyEnter)
+	u.gone("Stop work?")
+	u.key(tcell.KeyDown)
+	u.wait("▶ ◐ dev") // the keys reach the dashboard again
+	if n := len(f.made()); n != 0 {
+		t.Fatalf("cancel made %d changes", n)
+	}
+	// And in the route dialog, down from the field reaches the checkbox.
+	u.key(tcell.KeyUp)
+	u.key(tcell.KeyEnter)
+	u.wait("subtun › work")
+	u.press("a")
+	u.wait("Add a route to work", "[ ]")
+	u.key(tcell.KeyDown)
+	u.press(" ")
+	u.wait("[x]")
+	u.key(tcell.KeyEscape)
+	u.gone("Add a route to work")
+}
+
+// With the mouse on, a click selects a profile and a double-click opens it.
+func TestMouse(t *testing.T) {
+	f := newFake("full")
+	u := start(t, f, Options{Mouse: true})
+	u.wait("Profiles (3)", "▶ ● work")
+	row := -1
+	for y, l := range strings.Split(u.text(), "\n") {
+		if strings.Contains(l, "◐ dev") {
+			row = y
+		}
+	}
+	if row < 0 {
+		t.Fatal("no dev row")
+	}
+	u.sim.InjectMouse(10, row, tcell.Button1, tcell.ModNone)
+	u.sim.InjectMouse(10, row, tcell.ButtonNone, tcell.ModNone)
+	u.wait("▶ ◐ dev")
+	u.sim.InjectMouse(10, row, tcell.Button1, tcell.ModNone)
+	u.sim.InjectMouse(10, row, tcell.ButtonNone, tcell.ModNone)
+	u.wait("subtun › dev")
 }

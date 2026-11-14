@@ -29,6 +29,14 @@ const (
 	resultRows  = 4
 )
 
+// The dialogs' look: fields and buttons in grey, the focused button bright,
+// so it is plain which one enter takes.
+var (
+	fieldStyle   = tcell.StyleDefault.Background(tcell.PaletteColor(238)).Foreground(tcell.ColorWhite)
+	buttonStyle  = tcell.StyleDefault.Background(tcell.PaletteColor(238)).Foreground(tcell.ColorWhite)
+	focusedStyle = tcell.StyleDefault.Background(tcell.ColorYellow).Foreground(tcell.ColorBlack).Bold(true)
+)
+
 func (a *app) newDlg(title, text string) *dlg {
 	d := &dlg{
 		flex:   tview.NewFlex().SetDirection(tview.FlexRow),
@@ -36,6 +44,9 @@ func (a *app) newDlg(title, text string) *dlg {
 		form:   tview.NewForm().SetButtonsAlign(tview.AlignCenter),
 		result: tview.NewTextView().SetDynamicColors(true).SetWordWrap(true),
 	}
+	d.form.SetLabelColor(tcell.ColorDefault).SetFieldStyle(fieldStyle).
+		SetButtonStyle(buttonStyle).SetButtonActivatedStyle(focusedStyle)
+	d.form.SetInputCapture(a.formArrows(d.form))
 	boxed(d.flex.Box, tview.Escape(title))
 	d.form.SetCancelFunc(func() { a.closeDlg(d) })
 	return d
@@ -88,6 +99,13 @@ func (a *app) openDialog(p tview.Primitive, w, h int, focus tview.Primitive) {
 		AddItem(nil, 0, 1, false).
 		AddItem(a.dlgCell, w, 0, true).
 		AddItem(nil, 0, 1, false)
+	a.dlgCol.SetMouseCapture(func(action tview.MouseAction, ev *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		bx, by, bw, bh := a.dlgBox.GetRect()
+		if x, y := ev.Position(); x < bx || x >= bx+bw || y < by || y >= by+bh {
+			return action, nil // a click beside the dialog doesn't reach the screen behind it
+		}
+		return action, ev
+	})
 	a.pages.AddPage("dialog", a.dlgCol, true, true)
 	a.tv.SetFocus(focus)
 }
@@ -268,10 +286,11 @@ func (a *app) routeDialog(t control.Tunnel, exclude bool) {
 		cidrs = s
 		a.dryRun(d, dryRunDelay, build)
 	})
-	d.form.AddCheckbox("exclude (never route them)", exclude, func(on bool) {
+	placeholder(d.form, "10.80.0.0/16 10.81.0.5")
+	d.form.AddFormItem(checkbox("exclude (never route them)", exclude, func(on bool) {
 		exclude = on
 		a.dryRun(d, 0, build)
-	})
+	}))
 	d.form.AddButton("Add", func() { a.submit(d, build) }).AddButton("Cancel", func() { a.closeDlg(d) })
 	enterSubmits(d.form, func() { a.submit(d, build) })
 	a.showDlg(d, 7)
@@ -289,13 +308,68 @@ func (a *app) dnsDialog(t control.Tunnel) {
 		domains = s
 		a.dryRun(d, dryRunDelay, build)
 	})
+	placeholder(d.form, "corp.example svc.cluster.local")
 	d.form.AddInputField("Patterns", "", 50, nil, func(s string) {
 		patterns = s
 		a.dryRun(d, dryRunDelay, build)
 	})
+	placeholder(d.form, `^db[0-9]+\.`)
 	d.form.AddButton("Add", func() { a.submit(d, build) }).AddButton("Cancel", func() { a.closeDlg(d) })
 	enterSubmits(d.form, func() { a.submit(d, build) })
 	a.showDlg(d, 7)
+}
+
+// formArrows moves through a form with the arrow keys: left and right
+// between its buttons, up and down between its fields and buttons (left
+// and right in an input field still move its cursor).
+func (a *app) formArrows(f *tview.Form) func(*tcell.EventKey) *tcell.EventKey {
+	return func(ev *tcell.EventKey) *tcell.EventKey {
+		item, button := f.GetFocusedItemIndex()
+		n, nb := f.GetFormItemCount(), f.GetButtonCount()
+		at := item
+		if button >= 0 {
+			at = n + button
+		}
+		move := 0
+		switch ev.Key() {
+		case tcell.KeyLeft:
+			if button >= 0 {
+				move = -1
+			}
+		case tcell.KeyRight:
+			if button >= 0 {
+				move = 1
+			}
+		case tcell.KeyUp:
+			move = -1
+		case tcell.KeyDown:
+			move = 1
+		}
+		if move == 0 || at < 0 {
+			return ev
+		}
+		next := min(max(at+move, 0), n+nb-1)
+		if next < n {
+			a.tv.SetFocus(f.GetFormItem(next))
+		} else {
+			a.tv.SetFocus(f.GetButton(next - n))
+		}
+		return nil
+	}
+}
+
+// checkbox is a form checkbox drawn as [ ] / [x].
+func checkbox(label string, checked bool, changed func(bool)) *tview.Checkbox {
+	return tview.NewCheckbox().SetLabel(label).SetChecked(checked).SetChangedFunc(changed).
+		SetCheckedString("[x]").SetUncheckedString("[ ]").
+		SetCheckedStyle(tcell.StyleDefault).SetUncheckedStyle(tcell.StyleDefault).SetActivatedStyle(focusedStyle)
+}
+
+// placeholder gives the form's last input field a grey example.
+func placeholder(f *tview.Form, text string) {
+	if in, ok := f.GetFormItem(f.GetFormItemCount() - 1).(*tview.InputField); ok {
+		in.SetPlaceholder(text).SetPlaceholderStyle(fieldStyle.Foreground(tcell.ColorGray))
+	}
 }
 
 // enterSubmits makes enter in the form's input fields submit it.
@@ -349,7 +423,7 @@ func (a *app) addProfileDialog() {
 			a.closeDialog(flex)
 		}
 	})
-	table.SetSelectedFunc(func(row, _ int) {
+	add := func(row int) {
 		if busy || row < 1 || row > len(cands) {
 			return
 		}
@@ -372,7 +446,9 @@ func (a *app) addProfileDialog() {
 			a.closeDialog(flex)
 			a.flashAnswer(res, nil)
 		})
-	})
+	}
+	table.SetSelectedFunc(func(row, _ int) { add(row) })
+	table.SetMouseCapture(onDoubleClick(table, add))
 	a.openDialog(flex, 110, 16, table)
 
 	go func() {

@@ -272,6 +272,12 @@ func TestTUIKey(t *testing.T) {
 	if _, err := Parse([]byte("tui: {units: furlongs}\n"+base), "t"); err == nil || !strings.Contains(err.Error(), `tui.units "furlongs"`) {
 		t.Errorf("bad units: %v", err)
 	}
+	if f, err := Parse([]byte("tui: {mouse: off}\n"+base), "t"); err != nil || f.TUI.Mouse != "off" {
+		t.Errorf("bare off: %+v %v", f, err)
+	}
+	if _, err := Parse([]byte("tui: {mouse: sometimes}\n"+base), "t"); err == nil || !strings.Contains(err.Error(), `tui.mouse "sometimes"`) {
+		t.Errorf("bad mouse: %v", err)
+	}
 	if _, err := Parse([]byte("defaults:\n  tui: {layout: table}\n"+base), "t"); err == nil {
 		t.Error("tui in defaults accepted: it is global only")
 	}

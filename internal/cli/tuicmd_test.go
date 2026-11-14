@@ -17,6 +17,9 @@ func TestTUICmd(t *testing.T) {
 	if _, err := runCLI(t, "tui", "--units", "furlongs"); err == nil || err.Error() != `--units "furlongs": use bytes or bits` {
 		t.Errorf("bad units: %v", err)
 	}
+	if _, err := runCLI(t, "tui", "--mouse", "maybe"); err == nil || err.Error() != `--mouse "maybe": use on or off` {
+		t.Errorf("bad mouse: %v", err)
+	}
 	if _, err := runCLI(t, "tui"); err == nil || err.Error() != "no subtun running" {
 		t.Errorf("nothing running: %v", err)
 	}
@@ -54,7 +57,8 @@ func TestTUISettings(t *testing.T) {
 	}
 	saveTUIState(func(s *tuiState) { s.Layout = "detail" })
 	saveTUIState(func(s *tuiState) { s.Units = "bits" })
-	if s := loadTUIState(); s.Layout != "detail" || s.Units != "bits" {
+	saveTUIState(func(s *tuiState) { s.Mouse = "off" })
+	if s := loadTUIState(); s.Layout != "detail" || s.Units != "bits" || s.Mouse != "off" {
 		t.Errorf("remembered: %+v", s)
 	}
 	if fi, err := os.Stat(filepath.Join(dir, "subtun", "tui.json")); err != nil || fi.Mode().Perm() != 0o600 {

@@ -19,7 +19,7 @@ import (
 // that came are counted.
 
 func (a *app) buildLogs() {
-	a.fullLogs = newLogView()
+	a.fullLogs = a.newLogView()
 	a.search = tview.NewInputField().SetLabel(" / ")
 	a.search.SetDoneFunc(func(key tcell.Key) {
 		switch key {
@@ -62,7 +62,7 @@ func (a *app) logView() *tview.TextView {
 		return a.dashLogs
 	case a.screen == scrLogs:
 		return a.fullLogs
-	case a.screen == scrProfile && a.showLogs:
+	case a.screen == scrProfile && a.panes[paneLogs]:
 		return a.profLogs
 	}
 	return nil

@@ -35,6 +35,10 @@ type Options struct {
 	// config.UnitsBits; OnUnits is called when u switches them.
 	Units   string
 	OnUnits func(string)
+	// Mouse: clicks select, a double-click opens, the wheel scrolls; off,
+	// the terminal selects text. OnMouse is called when m switches it.
+	Mouse   bool
+	OnMouse func(bool)
 	// Screen is the terminal; nil: this one. Tests pass a simulation.
 	Screen tcell.Screen
 	// Interval between status polls; 0: a second.
@@ -88,8 +92,7 @@ type app struct {
 	profLeft    *tview.Flex
 	trafficRows int
 	cardLines   []cardLine
-	showConns   bool // the profile screen's panes
-	showLogs    bool
+	panes       [4]bool // the profile screen's panes shown (paneConfig...)
 	profGraph   *tview.TextView
 	profCard    *tview.Flex
 	profFlex    *tview.Flex
@@ -114,8 +117,9 @@ type app struct {
 	unseen     int // lines that came while paused
 	layout     string
 	bits       bool // rates in bits a second (u), not bytes
-	sel        int  // the selected profile (index in st.Tunnels: a run never drops one)
-	open       int  // the profile screen's profile; -1: none
+	mouse      bool
+	sel        int // the selected profile (index in st.Tunnels: a run never drops one)
+	open       int // the profile screen's profile; -1: none
 	screen     string
 	logsBack   string          // the screen esc on the logs returns to
 	helpBack   string          // the screen the key list returns to
@@ -225,6 +229,8 @@ func newApp(ctx context.Context, quit context.CancelFunc, o Options) *app {
 		ui: make(chan func(), 64), started: make(chan struct{})}
 	a.filter.level = slog.LevelInfo
 	a.bits = o.Units == config.UnitsBits
+	a.mouse = o.Mouse
+	a.tv.EnableMouse(a.mouse)
 
 	bar := func(bg tcell.Color) *tview.TextView {
 		tv := tview.NewTextView().SetDynamicColors(true).SetWrap(false)
@@ -460,11 +466,11 @@ func (a *app) renderKeys() {
 	case scrDash:
 		ks = []string{a.key("↑↓", "select", false), a.key("enter", "open", false),
 			a.key("v", "layout", false), a.key("s", "stop", true), a.key("S", "start", true), a.key("r", "reconnect", true),
-			a.key("a", "add profile", true), a.key("l", "logs", false), a.key("u", "units", false), a.key("tab", "focus", false), a.key("f", "follow", false)}
+			a.key("a", "add profile", true), a.key("l", "logs", false), a.key("u", "units", false), a.key("m", "mouse", false), a.key("tab", "focus", false), a.key("f", "follow", false)}
 	case scrProfile:
 		ks = []string{a.key("esc", "back", false), a.key("s", "stop", true), a.key("S", "start", true),
 			a.key("r", "reconnect", true), a.key("R", "reload from config", true), a.key("a/x/d", "routes", true), a.key("A/D", "DNS", true),
-			a.key("c", "connections", false), a.key("l", "logs", false), a.key("L", "logs full screen", false), a.key("u", "units", false), a.key("tab", "focus", false)}
+			a.key("1-4", "panes", false), a.key("L", "logs full screen", false), a.key("u", "units", false), a.key("tab", "focus", false)}
 	case scrLogs:
 		ks = []string{a.key("esc", "back", false), a.key("f", "follow", false), a.key("p", "profile", false), a.key("v", "level", false),
 			a.key("/", "search", false), a.key("g/G", "top/bottom", false)}
@@ -510,6 +516,19 @@ func (a *app) onKey(ev *tcell.EventKey) *tcell.EventKey {
 			a.helpBack = a.screen
 			a.goTo(scrHelp)
 		}
+		return nil
+	case 'm':
+		a.mouse = !a.mouse
+		a.tv.EnableMouse(a.mouse)
+		if a.o.OnMouse != nil {
+			a.o.OnMouse(a.mouse)
+		}
+		if a.mouse {
+			a.flash("green", "mouse on: click to select, double-click to open, the wheel scrolls")
+		} else {
+			a.flash("green", "mouse off: the terminal selects text again")
+		}
+		a.refresh()
 		return nil
 	case 'u':
 		a.bits = !a.bits
@@ -621,6 +640,8 @@ const helpText = `
    tab         move between the profiles and the logs
    f           follow the logs, or pause them
    u           rates in bytes or bits a second (MB/s, Mb/s)
+   m           mouse on or off (off: the terminal selects text; with it on,
+               most terminals select with shift or option held)
 
  [yellow]Profile screen[-]
    a x         add a route, an exclude
@@ -628,9 +649,10 @@ const helpText = `
    d D         delete the selected route, exclude, domain or pattern
    s S r       stop, start, reconnect
    R           read the profile from the config file again
-   c l         show or hide its open connections, its log lines
+   1 2 3 4     show or hide its panes: routes and DNS names, traffic graph,
+               connections (c), log lines (l)
    L           its log lines full screen
-   tab         move between the card, the connections and the logs
+   tab         move between the panes shown
    esc         back
 
  [yellow]Logs[-]

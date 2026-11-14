@@ -657,9 +657,14 @@ subtun tui --layout detail
   profile carries or subtun's own endpoint taken out), excludes, DNS names (with the unrouted-answers
   mode), and its traffic; next to it (below it on a narrow terminal) its traffic graph of the last 5
   minutes, upload above a zero line and download below, each against its own round scale, coloured
-  by height. Under the card its open connections and its log lines, each shown or hidden with `c`
-  and `l` (`L`: its log lines full screen).
+  by height. Under the card its open connections and its log lines. Each of the four panes is
+  shown or hidden with `1` to `4` (`c`, `l` for the last two; `L`: its log lines full screen).
 - **Units:** `u` switches the rates between bytes and bits a second (`MB/s`, `Mb/s`).
+- **Mouse:** a click selects, a double-click opens a profile, the wheel scrolls (scrolling the logs
+  back pauses them). `m` turns it off, for the terminal to select text again (most terminals also
+  select with shift or option held).
+- **Dialogs:** tab or the arrow keys move between the fields and buttons; the focused button is
+  highlighted.
 - **Logs** (`l`, or `/` to search them): full screen, filtered by profile (`p`), lowest level (`v`,
   `info` to start with) and text (`/`); `f` follows or pauses. They are the lines `subtun logs` shows; the TUI saves
   nothing.
@@ -677,6 +682,7 @@ subtun tui --layout detail
 |---|---|---|
 | `tui.layout` (top level of the config file) | `--layout` | `table` or `detail`; unset: the layout used last (kept in `~/.local/state/subtun/tui.json`), else `table` |
 | `tui.units` | `--units` | `bytes` or `bits`; unset: the units used last, else `bytes` |
+| `tui.mouse` | `--mouse` | `on` or `off`; unset: as used last, else `on` |
 
 `tui` is read by `subtun tui` only, never per profile.
 

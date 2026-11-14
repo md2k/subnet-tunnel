@@ -29,8 +29,8 @@ func (a *app) buildProfile() {
 	boxed(a.profGraph.Box, "Traffic · 5 min")
 	a.profConns = tview.NewTable()
 	boxed(a.profConns.Box, "")
-	a.profLogs = newLogView()
-	a.showConns, a.showLogs = true, true
+	a.profLogs = a.newLogView()
+	a.panes = [4]bool{true, true, true, true}
 }
 
 // boxed gives a box a border and a title at the top left, as "─ title ─".
@@ -47,41 +47,90 @@ func boxTitle(title string) string {
 
 func (a *app) profilePage() tview.Primitive {
 	a.profLeft.AddItem(a.profItems, 0, 1, true).AddItem(a.profTraffic, 4, 0, false)
-	a.profCard = tview.NewFlex().
-		AddItem(a.profLeft, 0, 3, true).
-		AddItem(a.profGraph, 0, 2, false)
+	a.profCard = tview.NewFlex()
 	a.profFlex = tview.NewFlex().SetDirection(tview.FlexRow)
 	a.layoutProfile()
 	return a.profFlex
 }
 
-// layoutProfile puts the profile screen together: the card, then the panes
-// shown.
+// The profile screen's panes, each shown or hidden with its number key
+// (btop style): what it asks for, its traffic graph, its connections, its
+// logs. On a wide terminal the first two sit side by side.
+const (
+	paneConfig = iota
+	paneGraph
+	paneConns
+	paneLogs
+)
+
+var paneNames = []string{"routes and DNS", "traffic graph", "connections", "logs"}
+
+// layoutProfile puts the profile screen together from the panes shown:
+// the card (sections, graph), then the connections and the logs, which
+// share what is left.
 func (a *app) layoutProfile() {
 	a.profFlex.Clear()
-	rows := a.cardRows()
-	if !a.showConns && !a.showLogs {
-		a.profFlex.AddItem(a.profCard, 0, 1, true)
-		return
+	a.profCard.Clear()
+	if a.panes[paneConfig] {
+		a.profCard.AddItem(a.profLeft, 0, 3, true)
 	}
-	a.profFlex.AddItem(a.profCard, rows, 0, true)
-	if a.showConns {
+	if a.panes[paneGraph] {
+		a.profCard.AddItem(a.profGraph, 0, 2, false)
+	}
+	a.arrangeCard()
+	card := a.panes[paneConfig] || a.panes[paneGraph]
+	rest := a.panes[paneConns] || a.panes[paneLogs]
+	switch {
+	case card && rest:
+		a.profFlex.AddItem(a.profCard, a.cardRows(), 0, true)
+	case card:
+		a.profFlex.AddItem(a.profCard, 0, 1, true)
+	}
+	if a.panes[paneConns] {
 		a.profFlex.AddItem(a.profConns, 0, 1, false)
 	}
-	if a.showLogs {
+	if a.panes[paneLogs] {
 		a.profFlex.AddItem(a.profLogs, 0, 2, false)
 	}
+	if a.screen == scrProfile && a.dialog == nil {
+		a.tv.SetFocus(a.profFocusable()[0])
+	}
+}
+
+// profFocusable are the profile screen's panes tab moves through, the
+// first the one that takes the focus.
+func (a *app) profFocusable() []tview.Primitive {
+	var out []tview.Primitive
+	if a.panes[paneConfig] {
+		out = append(out, a.profItems)
+	}
+	if a.panes[paneConns] {
+		out = append(out, a.profConns)
+	}
+	if a.panes[paneLogs] {
+		out = append(out, a.profLogs)
+	}
+	if len(out) == 0 {
+		out = append(out, a.profFlex)
+	}
+	return out
 }
 
 // sideBySide reports whether the card's graph goes next to its sections
 // (wide screens) or below them.
 func (a *app) sideBySide() bool { return a.scrW == 0 || a.scrW >= 140 }
 
-// cardRows is the card's height: its sections and traffic lines next to
-// its graph (both sides and their lines), or the two stacked; borders
-// included.
+// cardRows is the card's height: the sections and traffic lines next to
+// the graph (both sides and their lines), or the two stacked, as shown;
+// borders included.
 func (a *app) cardRows() int {
-	left, graph := len(a.cardLines)+a.trafficRows+2, 2*a.graphRows()+2+2
+	left, graph := 0, 0
+	if a.panes[paneConfig] {
+		left = len(a.cardLines) + a.trafficRows + 2
+	}
+	if a.panes[paneGraph] {
+		graph = 2*a.graphRows() + 2 + 2
+	}
 	if a.sideBySide() {
 		return max(left, graph)
 	}
@@ -99,6 +148,21 @@ func (a *app) arrangeCard() {
 	a.profCard.SetDirection(tview.FlexRow)
 	a.profCard.ResizeItem(a.profLeft, len(a.cardLines)+a.trafficRows+2, 0)
 	a.profCard.ResizeItem(a.profGraph, 2*a.graphRows()+2+2, 0)
+}
+
+// togglePane shows or hides one of the profile screen's panes.
+func (a *app) togglePane(p int) {
+	a.panes[p] = !a.panes[p]
+	a.layoutProfile()
+	if p == paneLogs && a.panes[p] {
+		a.follow()
+	}
+	state := "hidden"
+	if a.panes[p] {
+		state = "shown"
+	}
+	a.flash("green", fmt.Sprintf("%s %s (%d)", paneNames[p], state, p+1))
+	a.refresh()
 }
 
 func (a *app) openProfile(i int) {
@@ -129,8 +193,8 @@ func (a *app) renderProfile(now time.Time) {
 	a.profLeft.ResizeItem(a.profTraffic, a.trafficRows, 0)
 	a.profTraffic.SetText(traffic)
 	a.arrangeCard()
-	if h := a.cardRows(); a.showConns || a.showLogs {
-		a.profFlex.ResizeItem(a.profCard, h, 0)
+	if a.panes[paneConns] || a.panes[paneLogs] {
+		a.profFlex.ResizeItem(a.profCard, a.cardRows(), 0)
 	}
 	a.profLeft.SetTitle(boxTitle(a.cardTitle(t, now)))
 	row, _ := a.profItems.GetSelection()
@@ -217,7 +281,16 @@ func (a *app) cardTitle(t control.Tunnel, now time.Time) string {
 func (a *app) card(t control.Tunnel) []cardLine {
 	var out []cardLine
 	text := func(cells ...string) { out = append(out, cardLine{cells: cells}) }
-	heading := func(title, keys string) { text("[gray]"+title+"[-]", "", "[gray]"+tview.Escape(keys)+"[-]") }
+	// heading starts a section, with its keys: yellow when they work here.
+	heading := func(title, keys string, works bool) {
+		color := "[yellow]"
+		if !works || a.st.Control != "full" {
+			color = "[darkgray]"
+		}
+		text("[gray]"+title+"[-]", "", color+tview.Escape(keys)+"[-]")
+	}
+	routed := len(t.Include) > 0
+	dnsCaptured := a.st.DNS != nil && !a.st.DNS.Development
 	its := items(t)
 	when := func(it item) string {
 		sign := "+"
@@ -249,7 +322,7 @@ func (a *app) card(t control.Tunnel) []cardLine {
 		out = append(out, cardLine{cells: []string{"  " + label + value + after, when(it), "[gray]" + tview.Escape(note) + "[-]"}, item: &it})
 	}
 
-	heading("Routes on the utun", "[a] add  [d] delete  [x] exclude")
+	heading("Routes on the utun", "[a] add  [d] delete  [x] exclude", routed)
 	n := 0
 	for _, it := range its {
 		if it.kind == "route" {
@@ -258,10 +331,10 @@ func (a *app) card(t control.Tunnel) []cardLine {
 		}
 	}
 	if n == 0 {
-		text("  [gray]none: SOCKS only[-]", "", "")
+		text("  [gray]none: SOCKS only (routes can't be added to a profile that started without)[-]", "", "")
 	}
 	if slices.ContainsFunc(its, func(it item) bool { return it.kind == "exclude" }) {
-		heading("Excludes", "")
+		heading("Excludes", "", true)
 		for _, it := range its {
 			if it.kind == "exclude" {
 				row(it, "", "", "")
@@ -269,7 +342,7 @@ func (a *app) card(t control.Tunnel) []cardLine {
 		}
 	}
 	text("", "", "")
-	heading("DNS names through this tunnel", "[A] add  [D] delete")
+	heading("DNS names through this tunnel", "[A] add  [D] delete", dnsCaptured)
 	first := true
 	for _, it := range its {
 		if it.kind != "dns" && it.kind != "pattern" {
@@ -289,7 +362,10 @@ func (a *app) card(t control.Tunnel) []cardLine {
 			row(it, "", "", note)
 		}
 	}
-	if first {
+	switch {
+	case first && !dnsCaptured:
+		text("  [gray]none (this run doesn't capture DNS, so names can't be added)[-]", "", "")
+	case first:
 		text("  [gray]none[-]", "", "")
 	}
 	text("", "", "")
@@ -372,14 +448,8 @@ func (a *app) profileKey(ev *tcell.EventKey) *tcell.EventKey {
 		a.open = -1
 		a.goTo(scrDash)
 		return nil
-	case tcell.KeyTab, tcell.KeyBacktab: // the card, the connections, the logs
-		order := []tview.Primitive{a.profItems}
-		if a.showConns {
-			order = append(order, a.profConns)
-		}
-		if a.showLogs {
-			order = append(order, a.profLogs)
-		}
+	case tcell.KeyTab, tcell.KeyBacktab: // the panes shown
+		order := a.profFocusable()
 		i := slices.Index(order, a.tv.GetFocus())
 		a.tv.SetFocus(order[(i+1)%len(order)])
 		return nil
@@ -410,6 +480,8 @@ func (a *app) profileKey(ev *tcell.EventKey) *tcell.EventKey {
 		a.act(func() {
 			it, ok := a.selectedItem()
 			switch {
+			case !a.panes[paneConfig]:
+				a.flash("yellow", "show the routes and DNS names first (1)")
 			case !ok:
 				a.flash("yellow", "select a route, exclude, domain or pattern to delete")
 			case it.removed:
@@ -418,15 +490,12 @@ func (a *app) profileKey(ev *tcell.EventKey) *tcell.EventKey {
 				a.confirmDelete(t, it)
 			}
 		})
+	case '1', '2', '3', '4':
+		a.togglePane(int(ev.Rune() - '1'))
 	case 'c':
-		a.showConns = !a.showConns
-		a.layoutProfile()
-		a.tv.SetFocus(a.profItems)
+		a.togglePane(paneConns)
 	case 'l':
-		a.showLogs = !a.showLogs
-		a.layoutProfile()
-		a.tv.SetFocus(a.profItems)
-		a.follow()
+		a.togglePane(paneLogs)
 	case 'L':
 		a.filter.profile = t.Name
 		a.openLogs()
