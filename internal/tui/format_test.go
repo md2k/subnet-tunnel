@@ -196,6 +196,15 @@ func TestLogFilter(t *testing.T) {
 	if !f.match(warn) || f.match(dbg) {
 		t.Error("search")
 	}
+	// The level and the profile are searched too, as the view shows them.
+	f.search = "warn"
+	if !f.match(warn) || f.match(dbg) {
+		t.Error("search by level")
+	}
+	f.search = "helper"
+	if f.match(warn) || !f.match(logring.Line{Text: "msg=x", Component: "helper"}) {
+		t.Error("search by source")
+	}
 	if got := highlight("a [x] Reconnect", "reconnect"); got != "a [x[] [black:yellow]Reconnect[-:-]" {
 		t.Errorf("highlight: %q", got)
 	}

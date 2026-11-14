@@ -58,7 +58,17 @@ func (f logFilter) match(l logring.Line) bool {
 	if lineLevel(l) < f.level {
 		return false
 	}
-	return f.search == "" || strings.Contains(strings.ToLower(logMessage(l)), strings.ToLower(f.search))
+	return f.search == "" || strings.Contains(strings.ToLower(searchText(l)), strings.ToLower(f.search))
+}
+
+// searchText is what a search looks in: the line as a log view shows it,
+// time, profile (or source), level and message.
+func searchText(l logring.Line) string {
+	who := l.Tunnel
+	if who == "" && l.Component != "tunnel" {
+		who = l.Component
+	}
+	return strings.Join([]string{l.Time.Local().Format("15:04:05.000"), who, lineLevel(l).String(), logMessage(l)}, " ")
 }
 
 // describe is the filter for a title: "profile: all · level: debug".
@@ -164,5 +174,9 @@ func formatLine(l logring.Line, f logFilter, width int, color func(string) strin
 	default:
 		who = strings.Repeat(" ", width)
 	}
-	return fmt.Sprintf("[gray]%s[-] %s %s %s", l.Time.Local().Format("15:04:05.000"), who, levelText(lineLevel(l)), highlight(logMessage(l), f.search))
+	level := levelText(lineLevel(l))
+	if f.search != "" && strings.EqualFold(strings.TrimSpace(lineLevel(l).String()), strings.TrimSpace(f.search)) {
+		level = "[black:yellow]" + fmt.Sprintf("%-5s", lineLevel(l).String()) + "[-:-]" // found by its level
+	}
+	return fmt.Sprintf("[gray]%s[-] %s %s %s", l.Time.Local().Format("15:04:05.000"), who, level, highlight(logMessage(l), f.search))
 }
