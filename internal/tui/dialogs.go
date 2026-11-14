@@ -361,7 +361,7 @@ func (a *app) formArrows(f *tview.Form) func(*tcell.EventKey) *tcell.EventKey {
 // checkbox is a form checkbox drawn as [ ] / [x].
 func checkbox(label string, checked bool, changed func(bool)) *tview.Checkbox {
 	return tview.NewCheckbox().SetLabel(label).SetChecked(checked).SetChangedFunc(changed).
-		SetCheckedString("[x]").SetUncheckedString("[ ]").
+		SetCheckedString(tview.Escape("[x]")).SetUncheckedString(tview.Escape("[ ]")). // [x] would be a style tag
 		SetCheckedStyle(tcell.StyleDefault).SetUncheckedStyle(tcell.StyleDefault).SetActivatedStyle(focusedStyle)
 }
 

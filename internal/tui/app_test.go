@@ -597,12 +597,35 @@ func TestDialogArrows(t *testing.T) {
 	u.key(tcell.KeyEnter)
 	u.wait("subtun › work")
 	u.press("a")
-	u.wait("Add a route to work", "[ ]")
+	u.wait("Add a route to work")
+	u.waitLine("exclude (never route them)", "[ ]")
 	u.key(tcell.KeyDown)
 	u.press(" ")
-	u.wait("[x]")
+	u.waitLine("exclude (never route them)", "[x]")
 	u.key(tcell.KeyEscape)
 	u.gone("Add a route to work")
+	// x opens it checked.
+	u.press("x")
+	u.wait("Add an exclude to work")
+	u.waitLine("exclude (never route them)", "[x]")
+	u.key(tcell.KeyEscape)
+}
+
+// waitLine waits until the screen line with marker also has text.
+func (u *ui) waitLine(marker, text string) {
+	u.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		for _, l := range strings.Split(u.text(), "\n") {
+			if strings.Contains(l, marker) && strings.Contains(l, text) {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			u.t.Fatalf("no line with %q and %q:\n%s", marker, text, u.text())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // With the mouse on, a click selects a profile and a double-click opens it.
