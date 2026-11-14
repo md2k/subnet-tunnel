@@ -91,6 +91,10 @@ type multiPlan struct {
 	blockIPv6 bool
 	ipv6Why   string
 	warns     []string
+
+	// lend has the terminal while sudo may ask (up --tui: the TUI steps
+	// aside); nil: sudo asks on the terminal as it is.
+	lend privhelper.Lend
 }
 
 // newFinals returns n empty final route lists.
@@ -826,6 +830,11 @@ func runMulti(ctx context.Context, out io.Writer, g *globalOpts, specs []*tunnel
 	if eo.maxDuration < 0 {
 		return errors.New("--max-duration must be positive")
 	}
+	if eo.tui {
+		if err := checkTUI(dryRun); err != nil {
+			return err
+		}
+	}
 	mp, err := planMulti(specs)
 	if err != nil {
 		return err
@@ -849,6 +858,7 @@ type engineOpts struct {
 	dnsListen   string     // development: answer DNS here instead of capturing it (one profile)
 	control     string     // status (default), full or off: the control socket
 	log         config.Log // logging
+	tui         bool       // the terminal UI in this terminal (up --tui)
 }
 
 // runEngine runs a plan: one utun, helper and rule set, each profile's
@@ -857,7 +867,11 @@ type engineOpts struct {
 // when every profile has given up. With control: full, changes through the
 // control socket (routes, DNS names, profiles) are made by its loop.
 func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts) error {
-	rl, logWarn := newRunLog(g.verbose, eo.log, mp.dnsDomains, os.Stderr)
+	termLog := io.Writer(os.Stderr)
+	if eo.tui {
+		termLog = io.Discard // the TUI shows the log lines
+	}
+	rl, logWarn := newRunLog(g.verbose, eo.log, mp.dnsDomains, termLog)
 	defer rl.close() // last: after the capture has stopped
 	log, ring := rl.log, rl.ring
 	if logWarn != "" {
@@ -865,6 +879,8 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	} else if rl.file != nil {
 		log.Debug("log file", "path", rl.file.Path())
 	}
+	ctx, stopAsked := context.WithCancel(ctx) // q in the TUI (up --tui), as a signal
+	defer stopAsked()
 	ctx, done := withMaxDuration(ctx, eo.maxDuration, log)
 	defer done() // last: the watchdog covers stopping
 
@@ -918,11 +934,13 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			d.Tunnels[i].Counts = es.dnsCounts[i]
 		}
 	}
-	// Changes (control: full) are made by the loop below, one at a time.
+	// Changes (control: full, or the TUI in this terminal) are made by the
+	// loop below, one at a time.
 	changes := make(chan changeRequest)
 	loopDone := make(chan struct{})
 	defer close(loopDone)
-	if eo.control == controlFull {
+	canChange := eo.control == controlFull || eo.tui
+	if canChange {
 		es.change = func(rctx context.Context, ch control.Change) (control.Result, error) {
 			if ch.Kind == control.KindLog { // no plan to change: at once
 				return setLogLevel(rl.levels, ch, log)
@@ -948,6 +966,12 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	go es.sample(sctx)
 	if eo.control != controlOff && eo.control != "" { // "": tests, internal callers
 		startControl(sctx, es, ring, log.With(logx.ComponentKey, "control"))
+	}
+	markStop := func() {}
+	if eo.tui {
+		ui := startUpTUI(es.server(ring, log.With(logx.ComponentKey, "control"), true), ring, es.configPath, stopAsked, ctx.Done())
+		defer ui.end() // after the capture and the tunnels have stopped: the TUI shows it
+		mp.lend, markStop = ui.lend(), ui.stopping
 	}
 
 	// Listen before connecting, so a busy port fails fast. A listener is
@@ -1005,7 +1029,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			log.Warn("firewall rules from another subtun session may be in place; if networking misbehaves and none is running, run: subtun cleanup")
 		} else {
 			log.Info("firewall rules from another subtun session may be in place; checking with the root helper before connecting")
-			if early, err = privhelper.Start(ctx, &transport.LineLog{Log: log.With(logx.ComponentKey, "helper"), Prefix: "helper: "}, log); err != nil {
+			if early, err = privhelper.Start(ctx, &transport.LineLog{Log: log.With(logx.ComponentKey, "helper"), Prefix: "helper: "}, log, mp.lend); err != nil {
 				return startErr(ctx, err)
 			}
 			res, err := early.Adopt()
@@ -1162,6 +1186,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	// says so as an error.
 	stop := func() error {
 		deliberate = true
+		markStop()
 		logShutdown(ctx, log)
 		up := anyUp || c != nil // several profiles: a tunnel was up
 		if single && mp.hasRoutes() {
@@ -1650,9 +1675,12 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 					return ev.err // as subtun has always ended (a kill switch holds)
 				}
 				what, until := "its routes and names are removed", "subtun restarts"
-				if eo.control == controlFull {
+				switch {
+				case eo.control == controlFull:
 					_, arg := profileWords(mp.specs[ev.i].name)
 					until = "it starts again (subtun profile start" + arg + ")"
+				case eo.tui:
+					until = "it starts again (S in the terminal UI)"
 				}
 				switch {
 				case mp.rps[ev.i] == nil:
@@ -1682,7 +1710,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 					}
 				}
 			}
-			session := !single || eo.control == controlFull // routes can change while running
+			session := !single || canChange // routes can change while running
 			go func() {
 				c, err := startCapture(ctx, mp, active, lives, utun, rt, e, marker, session, onRefuse, log)
 				starting <- startResult{c, err}
@@ -1742,7 +1770,7 @@ func startMultiCapture(ctx context.Context, mp *multiPlan, active []bool, lives 
 		return nil, err
 	}
 	rt.set(entries)
-	opts := capture.Options{TunAddr: mp.tunAddr, MTU: mp.mtu, Session: session, Helper: early,
+	opts := capture.Options{TunAddr: mp.tunAddr, MTU: mp.mtu, Session: session, Helper: early, Lend: mp.lend,
 		KillSwitch: mp.ksMode(), Guard: guard, AllowDNS: mp.allowDNS, BlockIPv6: mp.blockIPv6, Locals: localPrefixes,
 		OnRefuse: onRefuse}
 	if opts.KillSwitch != "off" {

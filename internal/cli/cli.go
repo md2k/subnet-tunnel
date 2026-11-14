@@ -113,6 +113,7 @@ type settings struct {
 	tunAddr   string
 	mtu       int
 	dryRun    bool
+	tui       bool // the terminal UI in this terminal
 
 	dnsCapture  string
 	dnsListen   string // development: answer DNS here, no capture
@@ -143,6 +144,7 @@ func (s *settings) register(cmd *cobra.Command) {
 	f.StringVar(&s.tunAddr, "tun-addr", capture.DefaultTunAddr, "subtun's own utun address")
 	f.IntVar(&s.mtu, "mtu", capture.DefaultMTU, "utun MTU")
 	f.BoolVar(&s.dryRun, "dry-run", false, "show the routes that would be installed and exit")
+	f.BoolVar(&s.tui, "tui", false, "run with the terminal UI (as subtun tui) in this terminal; q stops subtun, after asking")
 	f.StringVar(&s.agent, "agent", transport.AgentAuto,
 		"agent to run in the target: auto (binary if it can run, else Python), binary, or python (python3 3.6+, writes nothing)")
 	f.StringVar(&s.agentDir, "agent-dir", "",
@@ -308,7 +310,7 @@ func upSeveral(cmd *cobra.Command, g *globalOpts, f *config.File, path string, n
 	var refused []string
 	cmd.Flags().Visit(func(fl *pflag.Flag) {
 		switch fl.Name {
-		case "profile", "dry-run", "max-duration", "verbose", "config", "control":
+		case "profile", "dry-run", "tui", "max-duration", "verbose", "config", "control":
 		default:
 			if slices.Contains(logFlags, fl.Name) {
 				return // global for the run
@@ -330,7 +332,8 @@ func upSeveral(cmd *cobra.Command, g *globalOpts, f *config.File, path string, n
 	if err := config.ValidControl(defaults.control); err != nil {
 		return err
 	}
-	return runMulti(cmd.Context(), cmd.OutOrStdout(), g, specs, defaults.dryRun, engineOpts{maxDuration: defaults.maxDuration, control: defaults.control, log: defaults.log})
+	return runMulti(cmd.Context(), cmd.OutOrStdout(), g, specs, defaults.dryRun,
+		engineOpts{maxDuration: defaults.maxDuration, control: defaults.control, log: defaults.log, tui: defaults.tui})
 }
 
 // profileSpec builds a profile of the config file at path: base settings
@@ -606,6 +609,11 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, sp *tunnelSpec) erro
 	if err := config.ValidControl(s.control); err != nil {
 		return err
 	}
+	if s.tui {
+		if err := checkTUI(s.dryRun); err != nil {
+			return err
+		}
+	}
 	policy := reconnectPolicy{attempts: s.reconnectAttempts, delay: s.reconnectDelay, maxDelay: s.reconnectMaxDelay}
 	if err := policy.validate(); err != nil {
 		return err
@@ -657,7 +665,7 @@ func run(ctx context.Context, out io.Writer, g *globalOpts, sp *tunnelSpec) erro
 	}
 	mp := singlePlan(sp, policy, rp, dnsOpts, gp, warns)
 	return runEngine(ctx, g, mp, engineOpts{single: true, maxDuration: s.maxDuration, agentFile: s.agentFile, dnsListen: s.dnsListen,
-		control: s.control, log: s.log})
+		control: s.control, log: s.log, tui: s.tui})
 }
 
 // singlePlan turns one profile's checked plan into the engine's plan.
