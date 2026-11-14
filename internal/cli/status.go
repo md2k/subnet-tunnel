@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net/netip"
@@ -17,6 +18,7 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/control"
 	"github.com/md2k/subnet-tunnel/internal/dns"
 	"github.com/md2k/subnet-tunnel/internal/logring"
+	"github.com/md2k/subnet-tunnel/internal/logx"
 	"github.com/md2k/subnet-tunnel/internal/meter"
 	"github.com/md2k/subnet-tunnel/internal/routes"
 	"github.com/md2k/subnet-tunnel/internal/version"
@@ -89,6 +91,8 @@ type engineStatus struct {
 	change func(context.Context, control.Change) (control.Result, error)
 	// configPath is the config file profiles are added from.
 	configPath string
+	// levels are the run's log levels (nil: tests).
+	levels *logx.Levels
 }
 
 // matcher is the run's DNS matcher; nil: no DNS.
@@ -157,6 +161,9 @@ func (es *engineStatus) sample(ctx context.Context) {
 func (es *engineStatus) status() control.Status {
 	mp := es.mp
 	st := control.Status{PID: os.Getpid(), Version: version.String(), Started: es.start, Control: es.control}
+	if es.levels != nil {
+		st.LogLevel = es.levels.Get().String()
+	}
 	c := es.capt.Load()
 	if c != nil {
 		st.BlockIPv6 = c.BlockingIPv6()
@@ -241,6 +248,31 @@ func (es *engineStatus) status() control.Status {
 		st.KillSwitch = ks
 	}
 	return st
+}
+
+// setLogLevel changes the run's log levels (subtun log level): until the
+// run ends, as every change.
+func setLogLevel(levels *logx.Levels, ch control.Change, log *slog.Logger) (control.Result, error) {
+	if ch.Op != "set" {
+		return control.Result{}, fmt.Errorf("log: unknown op %q (use set)", ch.Op)
+	}
+	spec, err := logx.ParseSpec(ch.Level)
+	if err != nil {
+		return control.Result{}, err
+	}
+	was, now := levels.Get().String(), spec.String()
+	res := control.Result{DryRun: ch.DryRun}
+	switch {
+	case now == was:
+		res.Message = "the log level is " + now + " already"
+	case ch.DryRun:
+		res.Message = fmt.Sprintf("would log at %s (now %s)", now, was)
+	default:
+		levels.Set(spec)
+		res.Changed, res.Message = true, fmt.Sprintf("logging at %s (was %s)", now, was)
+		log.Info("control: log level", "level", now, "was", was)
+	}
+	return res, nil
 }
 
 // routeNotes say, by route profile i asks for, what of it the profile

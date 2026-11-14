@@ -279,7 +279,7 @@ func (a *app) renderProfile(now time.Time) {
 			a.profConns.SetCell(i+1, col, tview.NewTableCell(text+"   "))
 		}
 	}
-	a.profLogs.SetTitle(boxTitle("Logs · " + tview.Escape(nameOf(t)) + " · level: " + strings.ToLower(a.filter.level.String()) + " · " + a.followText()))
+	a.profLogs.SetTitle(boxTitle("Logs · " + tview.Escape(nameOf(t)) + " · levels: " + a.filter.levels() + " · " + a.followText()))
 }
 
 // selectableRow is row if it can be selected, else the nearest item row

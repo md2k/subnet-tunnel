@@ -903,6 +903,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	// Status: counters per tunnel, its state, the control socket.
 	es := newEngineStatus(mp, eo.control)
 	es.configPath = configPath(g)
+	es.levels = rl.levels
 	utun := make([]meter.Dialer, n)
 	for i := range n {
 		utun[i] = es.meters[i].Dialer(meter.ViaUtun, lives[i])
@@ -923,6 +924,9 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	defer close(loopDone)
 	if eo.control == controlFull {
 		es.change = func(rctx context.Context, ch control.Change) (control.Result, error) {
+			if ch.Kind == control.KindLog { // no plan to change: at once
+				return setLogLevel(rl.levels, ch, log)
+			}
 			req := changeRequest{ch: ch, reply: make(chan changeReply, 1)}
 			select {
 			case changes <- req:

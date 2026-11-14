@@ -94,9 +94,16 @@ func scrollsBack(ev *tcell.EventKey) bool {
 // toEnd reports whether a key goes to a log view's end.
 func toEnd(ev *tcell.EventKey) bool { return ev.Key() == tcell.KeyEnd || ev.Rune() == 'G' }
 
-// logScrollKey handles the keys that pause or follow the log view on
-// screen; false: not one of them.
+// logScrollKey handles the keys of the log view on screen: following or
+// pausing it, and d, i, w, e (the levels it shows); false: not one of them.
 func (a *app) logScrollKey(ev *tcell.EventKey) bool {
+	if i := strings.IndexRune("diwe", ev.Rune()); i >= 0 && ev.Modifiers()&tcell.ModAlt == 0 {
+		a.filter.hide[i] = !a.filter.hide[i]
+		a.rebuildLogs()
+		a.flash("green", "levels shown: "+a.filter.levels())
+		a.refresh()
+		return true
+	}
 	switch {
 	case toEnd(ev):
 		a.follow()
@@ -137,12 +144,6 @@ func (a *app) logsKey(ev *tcell.EventKey) *tcell.EventKey {
 		}
 		i := slices.Index(names, a.filter.profile)
 		a.filter.profile = names[(i+1)%len(names)]
-		a.rebuildLogs()
-		a.refresh()
-		return nil
-	case 'v':
-		i := slices.Index(levels, a.filter.level)
-		a.filter.level = levels[(i+1)%len(levels)]
 		a.rebuildLogs()
 		a.refresh()
 		return nil

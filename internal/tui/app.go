@@ -7,7 +7,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -234,7 +233,6 @@ func newApp(ctx context.Context, quit context.CancelFunc, o Options) *app {
 	a := &app{o: o, ctx: ctx, quit: quit, tv: tview.NewApplication(), pages: tview.NewPages(), samples: map[string][]meter.Sample{},
 		conns: map[string][]meter.ConnInfo{}, following: true, screen: scrDash, open: -1, pollNow: make(chan struct{}, 1),
 		ui: make(chan func(), 64), started: make(chan struct{})}
-	a.filter.level = slog.LevelInfo
 	a.bits = o.Units == config.UnitsBits
 	a.mouse = o.Mouse
 	a.tv.EnableMouse(a.mouse)
@@ -420,6 +418,9 @@ func (a *app) renderHeader() {
 		s = " subtun › " + a.cardTitle(a.st.Tunnels[a.open], time.Now())
 	case a.screen == scrLogs:
 		s = " subtun › logs · " + tview.Escape(a.filter.describe()) + " · " + a.followText()
+		if a.st.LogLevel != "" {
+			s += " · subtun logs at " + tview.Escape(a.st.LogLevel)
+		}
 	case a.screen == scrHelp:
 		s = " subtun › keys"
 	default:
@@ -473,14 +474,14 @@ func (a *app) renderKeys() {
 	case scrDash:
 		ks = []string{a.key("↑↓", "select", false), a.key("enter", "open", false),
 			a.key("v", "layout", false), a.key("s", "stop", true), a.key("S", "start", true), a.key("r", "reconnect", true),
-			a.key("a", "add profile", true), a.key("l", "logs", false), a.key("u", "units", false), a.key("m", "mouse", false), a.key("tab", "focus", false), a.key("f", "follow", false)}
+			a.key("a", "add profile", true), a.key("l", "logs", false), a.key("V", "log level", true), a.key("u", "units", false), a.key("m", "mouse", false), a.key("tab", "focus", false), a.key("f", "follow", false)}
 	case scrProfile:
 		ks = []string{a.key("esc", "back", false), a.key("s", "stop", true), a.key("S", "start", true),
 			a.key("r", "reconnect", true), a.key("R", "reload from config", true), a.key("a/x/d", "routes", true), a.key("A/D", "DNS", true),
 			a.key("t", "routes/DNS", false), a.key("1-4", "panes", false), a.key("L", "logs full screen", false), a.key("u", "units", false), a.key("tab", "focus", false)}
 	case scrLogs:
-		ks = []string{a.key("esc", "back", false), a.key("f", "follow", false), a.key("p", "profile", false), a.key("v", "level", false),
-			a.key("/", "search", false), a.key("g/G", "top/bottom", false)}
+		ks = []string{a.key("esc", "back", false), a.key("f", "follow", false), a.key("p", "profile", false), a.key("d/i/w/e", "levels", false),
+			a.key("/", "search", false), a.key("g/G", "top/bottom", false), a.key("V", "subtun's log level", true)}
 	case scrHelp:
 		ks = []string{a.key("esc", "back", false)}
 	}
@@ -536,6 +537,9 @@ func (a *app) onKey(ev *tcell.EventKey) *tcell.EventKey {
 			a.flash("green", "mouse off: the terminal selects text again")
 		}
 		a.refresh()
+		return nil
+	case 'V':
+		a.act(a.logLevelDialog)
 		return nil
 	case 'u':
 		a.bits = !a.bits
@@ -666,7 +670,9 @@ const helpText = `
  [yellow]Logs[-]
    f           follow, or pause (scrolling back pauses too)
    p           the profile shown: all, or one
-   v           the lowest level shown
+   d i w e     show or hide debug, info, warn, error lines (also in the
+               dashboard's and the profile screen's logs, when focused)
+   V           the log levels of subtun itself (what it logs, everywhere)
    /           search (enter applies, esc cancels; empty: none)
    g G         top, bottom
    esc         back

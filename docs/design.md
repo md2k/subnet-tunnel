@@ -579,8 +579,9 @@ shaped as a list of tunnels: one in a single-profile run, several with `--profil
   `/v1/connections`, `/v1/samples` (each tunnel's 1 s traffic samples, the last 5 minutes),
   `/v1/config` (the profiles of the run's config file, read when asked, and which are in the
   run), and `/v1/logs` (newline-delimited JSON, each line with its level and profile; with
-  `?follow=1` new lines keep coming); with `control: full` also `POST /v1/routes`, `/v1/dns` and `/v1/profiles` (a JSON change:
-  `op`, `profile`, `cidrs` and `exclude`, `domains` and `patterns`, `reload`, `dryRun`), answered
+  `?follow=1` new lines keep coming); with `control: full` also `POST /v1/routes`, `/v1/dns`,
+  `/v1/profiles` and `/v1/log` (a JSON change: `op`, `profile`, `cidrs` and `exclude`, `domains` and
+  `patterns`, `reload`, `level`, `dryRun`), answered
   with what changed, or refused with the reason (403 when read only). A general event stream (state changes and counters as they happen) and a WebSocket
   come with the web UI; `subtun status --watch` and the terminal UI poll once a second meanwhile.
 - Later, for a browser UI: an optional localhost TCP listener with a random token (Jupyter style).

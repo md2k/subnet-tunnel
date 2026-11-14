@@ -64,7 +64,7 @@ func (s socket) Logs(ctx context.Context, fn func(logring.Line)) error {
 }
 
 func (s socket) Change(ctx context.Context, c control.Change) (control.Result, error) {
-	endpoint := map[string]string{control.KindRoute: "/v1/routes", control.KindDNS: "/v1/dns", control.KindProfile: "/v1/profiles"}[c.Kind]
+	endpoint := map[string]string{control.KindRoute: "/v1/routes", control.KindDNS: "/v1/dns", control.KindProfile: "/v1/profiles", control.KindLog: "/v1/log"}[c.Kind]
 	if endpoint == "" {
 		return control.Result{}, fmt.Errorf("unknown change kind %q", c.Kind)
 	}

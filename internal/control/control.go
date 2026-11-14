@@ -44,6 +44,7 @@ type Status struct {
 	DNS        *DNS        `json:"dns,omitempty"`
 	KillSwitch *KillSwitch `json:"killSwitch,omitempty"`
 	BlockIPv6  bool        `json:"blockIPv6,omitempty"`
+	LogLevel   string      `json:"logLevel,omitempty"` // as --log-level: "info,dns=debug"
 }
 
 // Tunnel is one profile's tunnel.
@@ -158,6 +159,7 @@ const (
 	KindRoute   = "route"   // POST /v1/routes: Op add or del, CIDRs, Exclude
 	KindDNS     = "dns"     // POST /v1/dns: Op add or del, Domains, Patterns
 	KindProfile = "profile" // POST /v1/profiles: Op stop, start (Reload) or reconnect
+	KindLog     = "log"     // POST /v1/log: Op set, Level (as --log-level)
 )
 
 // Change is a change to a running subtun (control: full). It lasts until
@@ -171,6 +173,7 @@ type Change struct {
 	Domains  []string `json:"domains,omitempty"`
 	Patterns []string `json:"patterns,omitempty"`
 	Reload   bool     `json:"reload,omitempty"` // start: re-read the profile from the config file
+	Level    string   `json:"level,omitempty"`  // log: the levels, as --log-level ("info,dns=debug")
 	DryRun   bool     `json:"dryRun,omitempty"` // only say what would change
 }
 
@@ -227,6 +230,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/routes", s.change(KindRoute))
 	mux.HandleFunc("POST /v1/dns", s.change(KindDNS))
 	mux.HandleFunc("POST /v1/profiles", s.change(KindProfile))
+	mux.HandleFunc("POST /v1/log", s.change(KindLog))
 	return mux
 }
 

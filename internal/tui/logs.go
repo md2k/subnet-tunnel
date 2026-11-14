@@ -35,13 +35,26 @@ func (b *logBuf) add(l logring.Line) bool {
 
 // logFilter picks the lines shown.
 type logFilter struct {
-	profile string     // "": every profile
-	level   slog.Level // the lowest level shown
-	search  string     // case-insensitive text; "": none
+	profile string  // "": every profile
+	hide    [4]bool // levels not shown: debug, info, warn, error (d, i, w, e)
+	search  string  // case-insensitive text; "": none
 }
 
-// levels are the filter's level choices, in the order v cycles them.
-var levels = []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError}
+// levelNames are the levels the view shows or hides, by their keys' order.
+var levelNames = []string{"debug", "info", "warn", "error"}
+
+// levelIndex is a level's place in levelNames.
+func levelIndex(lv slog.Level) int {
+	switch {
+	case lv < slog.LevelInfo:
+		return 0
+	case lv < slog.LevelWarn:
+		return 1
+	case lv < slog.LevelError:
+		return 2
+	}
+	return 3
+}
 
 func lineLevel(l logring.Line) slog.Level {
 	var lv slog.Level
@@ -55,7 +68,7 @@ func (f logFilter) match(l logring.Line) bool {
 	if f.profile != "" && l.Tunnel != f.profile {
 		return false
 	}
-	if lineLevel(l) < f.level {
+	if f.hide[levelIndex(lineLevel(l))] {
 		return false
 	}
 	return f.search == "" || strings.Contains(strings.ToLower(searchText(l)), strings.ToLower(f.search))
@@ -71,17 +84,34 @@ func searchText(l logring.Line) string {
 	return strings.Join([]string{l.Time.Local().Format("15:04:05.000"), who, lineLevel(l).String(), logMessage(l)}, " ")
 }
 
-// describe is the filter for a title: "profile: all · level: debug".
+// describe is the filter for a title: "profile: all · levels: all".
 func (f logFilter) describe() string {
 	p := f.profile
 	if p == "" {
 		p = "all"
 	}
-	s := fmt.Sprintf("profile: %s · level: %s", p, strings.ToLower(f.level.String()))
+	s := fmt.Sprintf("profile: %s · levels: %s", p, f.levels())
 	if f.search != "" {
 		s += " · search: " + f.search
 	}
 	return s
+}
+
+// levels are the levels shown: "all", "info warn error", "none".
+func (f logFilter) levels() string {
+	var shown []string
+	for i, name := range levelNames {
+		if !f.hide[i] {
+			shown = append(shown, name)
+		}
+	}
+	switch len(shown) {
+	case len(levelNames):
+		return "all"
+	case 0:
+		return "none"
+	}
+	return strings.Join(shown, " ")
 }
 
 // logMessage is a line's text without what the TUI shows in columns: the

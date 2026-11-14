@@ -272,9 +272,7 @@ func TestDashboard(t *testing.T) {
 	u.wait("─ Profiles (3)", "▶ ● work", "up 1h12m", "reconnecting 2/10", "pod ops/toolbox", "10.0.0.0/8 +1", "lockdown",
 		"120.0 kB", "3.1 MB", "reconnected", "connection to the agent lost; reconnecting", "control full", "? help · q quit",
 		"helper  INFO  route removed cidr=10.60.0.0/16") // a relayed line: its source, its own message
-	if strings.Contains(u.text(), "dns query") {
-		t.Error("a debug line at the default level info")
-	}
+	u.wait("dns query") // every level shown: what subtun logs
 	u.key(tcell.KeyDown)
 	u.wait("▶ ◐ dev")
 	u.key(tcell.KeyUp)
@@ -425,17 +423,22 @@ func TestLogs(t *testing.T) {
 	u := start(t, f, Options{})
 	u.wait("reconnected")
 	u.press("l")
-	u.wait("subtun › logs · profile: all · level: info", "reconnected")
-	u.press("vvv") // warn, error, debug
-	u.wait("level: debug", "dns query")
+	u.wait("subtun › logs · profile: all · levels: all", "reconnected", "dns query")
+	u.press("d") // debug hidden
+	u.wait("levels: info warn error")
+	u.gone("dns query")
+	u.press("i") // info hidden too: warn and error
+	u.wait("levels: warn error", "connection to the agent lost")
+	u.gone("reconnected via")
+	u.press("di")
+	u.wait("levels: all", "dns query", "reconnected via")
 	u.press("p") // work
 	u.wait("profile: work")
 	u.gone("dns query")
 	u.press("pp") // dev, vault
 	u.press("p")  // all
 	u.wait("profile: all", "dns query")
-	u.press("v") // info and up
-	u.wait("level: info")
+	u.press("d")
 	u.gone("dns query")
 	u.press("/")
 	u.press("lost")
@@ -680,4 +683,28 @@ func TestClickBesideRows(t *testing.T) {
 	u.wait("▶ ● work")
 	u.key(tcell.KeyDown)
 	u.wait("▶ ◐ dev") // still answering
+}
+
+// V changes subtun's own log levels: the default and a component's, with
+// the dry run first.
+func TestLogLevelDialog(t *testing.T) {
+	f := newFake("full")
+	f.st.LogLevel = "info"
+	u := start(t, f, Options{})
+	u.wait("Profiles (3)")
+	u.press("V")
+	u.wait("Log levels of subtun", "default", "dns", "transport", "Dry run: would set")
+	u.key(tcell.KeyEnter) // open the default's list
+	u.key(tcell.KeyUp)    // debug
+	u.key(tcell.KeyEnter)
+	for range 9 { // down to Apply: past the 8 components
+		u.key(tcell.KeyDown)
+	}
+	time.Sleep(200 * time.Millisecond) // the dry run of "debug"
+	u.key(tcell.KeyEnter)
+	c := waitChange(t, f, 1)
+	if c.Kind != control.KindLog || c.Op != "set" || c.Level != "debug" {
+		t.Fatalf("change: %+v", c)
+	}
+	u.gone("Log levels of subtun")
 }

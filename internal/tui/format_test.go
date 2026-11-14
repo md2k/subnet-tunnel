@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -180,19 +179,23 @@ func TestLogFilter(t *testing.T) {
 	dbg := logring.Line{Text: "msg=x", Level: "DEBUG", Tunnel: "dev"}
 	warn := logring.Line{Text: "msg=Reconnecting", Level: "WARN", Tunnel: "work"}
 	none := logring.Line{Text: "msg=helper"} // no level: as info
-	f := logFilter{level: slog.LevelDebug}
-	if !f.match(dbg) || !f.match(warn) || !f.match(none) {
+	var f logFilter
+	if !f.match(dbg) || !f.match(warn) || !f.match(none) || f.levels() != "all" {
 		t.Error("everything shown by default")
 	}
-	f.level = slog.LevelInfo
-	if f.match(dbg) || !f.match(none) {
-		t.Error("level")
+	f.hide[0] = true // d
+	if f.match(dbg) || !f.match(none) || f.levels() != "info warn error" {
+		t.Error("debug hidden")
 	}
-	f = logFilter{level: slog.LevelDebug, profile: "work"}
+	f.hide = [4]bool{true, true, false, true} // warn only
+	if f.match(none) || !f.match(warn) || f.levels() != "warn" {
+		t.Error("warn only")
+	}
+	f = logFilter{profile: "work"}
 	if f.match(dbg) || !f.match(warn) || f.match(none) {
 		t.Error("profile")
 	}
-	f = logFilter{level: slog.LevelDebug, search: "reconn"}
+	f = logFilter{search: "reconn"}
 	if !f.match(warn) || f.match(dbg) {
 		t.Error("search")
 	}

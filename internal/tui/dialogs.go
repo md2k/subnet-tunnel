@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/rivo/tview"
 
 	"github.com/md2k/subnet-tunnel/internal/control"
+	"github.com/md2k/subnet-tunnel/internal/logx"
 )
 
 // dlg is a dialog: an explanation, a form, and the dry run or the answer.
@@ -325,6 +327,11 @@ func (a *app) dnsDialog(t control.Tunnel) {
 func (a *app) formArrows(f *tview.Form) func(*tcell.EventKey) *tcell.EventKey {
 	return func(ev *tcell.EventKey) *tcell.EventKey {
 		item, button := f.GetFocusedItemIndex()
+		if item >= 0 {
+			if dd, ok := f.GetFormItem(item).(*tview.DropDown); ok && dd.IsOpen() {
+				return ev // the list takes its arrows
+			}
+		}
 		n, nb := f.GetFormItemCount(), f.GetButtonCount()
 		at := item
 		if button >= 0 {
@@ -508,4 +515,54 @@ func (a *app) addProfileDialog() {
 			showRow(1)
 		})
 	}()
+}
+
+// logLevelDialog changes subtun's own log levels: the default and each
+// component's, with the dry run first.
+func (a *app) logLevelDialog() {
+	spec, err := logx.ParseSpec(a.st.LogLevel)
+	if err != nil {
+		spec, _ = logx.ParseSpec("info")
+	}
+	d := a.newDlg("Log levels of subtun", "What subtun logs, everywhere: its terminal, the log file, this TUI; until it stops. A component's own level wins over the default.")
+	d.form.SetItemPadding(0)
+	index := func(lv slog.Level) int { return levelIndex(lv) }
+	def := index(spec.Default)
+	comps := map[string]int{} // a component's level (index); none: the default
+	for c, lv := range spec.By {
+		comps[c] = index(lv)
+	}
+	build := func() (control.Change, bool) {
+		parts := []string{levelNames[def]}
+		for _, c := range logx.Components {
+			if i, ok := comps[c]; ok {
+				parts = append(parts, c+"="+levelNames[i])
+			}
+		}
+		return control.Change{Kind: control.KindLog, Op: "set", Level: strings.Join(parts, ",")}, true
+	}
+	style := func(dd *tview.DropDown) { dd.SetListStyles(fieldStyle, focusedStyle) }
+	d.form.AddDropDown("default", levelNames, def, func(_ string, i int) {
+		def = i
+		a.dryRun(d, 0, build)
+	})
+	style(d.form.GetFormItem(0).(*tview.DropDown))
+	for _, c := range logx.Components {
+		initial := 0
+		if i, ok := comps[c]; ok {
+			initial = i + 1
+		}
+		d.form.AddDropDown(c, append([]string{"default"}, levelNames...), initial, func(_ string, i int) {
+			if i == 0 {
+				delete(comps, c)
+			} else {
+				comps[c] = i - 1
+			}
+			a.dryRun(d, 0, build)
+		})
+		style(d.form.GetFormItem(d.form.GetFormItemCount() - 1).(*tview.DropDown))
+	}
+	d.form.AddButton("Apply", func() { a.submit(d, build) }).AddButton("Cancel", func() { a.closeDlg(d) })
+	a.showDlg(d, d.form.GetFormItemCount()+3)
+	a.dryRun(d, 0, build)
 }

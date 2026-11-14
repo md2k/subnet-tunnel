@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
+	"log/slog"
 	"net/netip"
 	"slices"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/md2k/subnet-tunnel/internal/config"
 	"github.com/md2k/subnet-tunnel/internal/control"
+	"github.com/md2k/subnet-tunnel/internal/logx"
 	"github.com/md2k/subnet-tunnel/internal/meter"
 )
 
@@ -167,5 +170,32 @@ func TestGlobalsFromConfig(t *testing.T) {
 	s.log.Level = "loud"
 	if err := globalsFromConfig(cmd, &globalOpts{config: "testdata/control-off.yaml"}, &s); err == nil {
 		t.Fatal("a bad --log-level accepted")
+	}
+}
+
+// subtun log level: the run's levels change at once, a dry run only says;
+// the CLI checks the spec and needs a running subtun.
+func TestSetLogLevel(t *testing.T) {
+	lv := logx.NewLevels(logx.Spec{Default: slog.LevelInfo})
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	res, err := setLogLevel(lv, control.Change{Op: "set", Level: "info,dns=debug", DryRun: true}, quiet)
+	if err != nil || res.Changed || !strings.Contains(res.Message, "would log at info,dns=debug (now info)") || lv.Get().String() != "info" {
+		t.Fatalf("dry run: %+v %v %q", res, err, lv.Get().String())
+	}
+	res, err = setLogLevel(lv, control.Change{Op: "set", Level: "info,dns=debug"}, quiet)
+	if err != nil || !res.Changed || lv.Get().String() != "info,dns=debug" {
+		t.Fatalf("set: %+v %v", res, err)
+	}
+	if res, _ := setLogLevel(lv, control.Change{Op: "set", Level: "info,dns=debug"}, quiet); res.Changed || !strings.Contains(res.Message, "already") {
+		t.Errorf("again: %+v", res)
+	}
+	if _, err := setLogLevel(lv, control.Change{Op: "set", Level: "loud"}, quiet); err == nil {
+		t.Error("a bad level accepted")
+	}
+	if _, err := runCLI(t, "log", "level", "loud"); err == nil || !strings.Contains(err.Error(), "loud") {
+		t.Errorf("CLI bad level: %v", err)
+	}
+	if _, err := runCLI(t, "log", "level", "debug"); err == nil || err.Error() != "no subtun running" {
+		t.Errorf("CLI nothing running: %v", err)
 	}
 }
