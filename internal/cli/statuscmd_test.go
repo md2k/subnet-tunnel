@@ -53,14 +53,6 @@ func TestWriteStatus(t *testing.T) {
 	}
 }
 
-func TestBytesText(t *testing.T) {
-	for n, want := range map[uint64]string{0: "0 B", 999: "999 B", 1000: "1.0 kB", 1_500_000: "1.5 MB", 2_000_000_000_000_000: "2000.0 TB"} {
-		if got := bytesText(n); got != want {
-			t.Errorf("%d: %q, want %q", n, got, want)
-		}
-	}
-}
-
 // The status a run reports, from its plan, its tunnels' state and meters.
 func TestEngineStatus(t *testing.T) {
 	mp := multiPlanFor(t, "work", "dev")

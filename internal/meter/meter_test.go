@@ -97,3 +97,11 @@ func TestSamples(t *testing.T) {
 		t.Fatalf("kept %d samples", n)
 	}
 }
+
+func TestBytes(t *testing.T) {
+	for n, want := range map[uint64]string{0: "0 B", 999: "999 B", 1000: "1.0 kB", 1_500_000: "1.5 MB", 2_000_000_000_000_000: "2000.0 TB"} {
+		if got := Bytes(n); got != want {
+			t.Errorf("%d: %q, want %q", n, got, want)
+		}
+	}
+}
