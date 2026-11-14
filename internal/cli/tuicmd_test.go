@@ -52,13 +52,14 @@ func TestTUISettings(t *testing.T) {
 	}
 
 	t.Setenv("XDG_STATE_HOME", dir)
-	if s := loadTUIState(); s != (tuiState{}) {
+	if s := loadTUIState(); s.Layout+s.Units+s.Mouse+s.Tab != "" || len(s.Hidden) != 0 {
 		t.Errorf("nothing remembered yet: %+v", s)
 	}
 	saveTUIState(func(s *tuiState) { s.Layout = "detail" })
 	saveTUIState(func(s *tuiState) { s.Units = "bits" })
 	saveTUIState(func(s *tuiState) { s.Mouse = "off" })
-	if s := loadTUIState(); s.Layout != "detail" || s.Units != "bits" || s.Mouse != "off" {
+	saveTUIState(func(s *tuiState) { s.Hidden, s.Tab = []string{"logs"}, "dns" })
+	if s := loadTUIState(); s.Layout != "detail" || s.Units != "bits" || s.Mouse != "off" || len(s.Hidden) != 1 || s.Tab != "dns" {
 		t.Errorf("remembered: %+v", s)
 	}
 	if fi, err := os.Stat(filepath.Join(dir, "subtun", "tui.json")); err != nil || fi.Mode().Perm() != 0o600 {

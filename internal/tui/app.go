@@ -39,6 +39,11 @@ type Options struct {
 	// the terminal selects text. OnMouse is called when m switches it.
 	Mouse   bool
 	OnMouse func(bool)
+	// HiddenPanes and ConfigTab are the profile screen's view as left last
+	// time; OnView is called when they change (to remember them).
+	HiddenPanes []string
+	ConfigTab   string
+	OnView      func(hidden []string, tab string)
 	// Screen is the terminal; nil: this one. Tests pass a simulation.
 	Screen tcell.Screen
 	// Interval between status polls; 0: a second.
@@ -84,18 +89,20 @@ type app struct {
 	dashLogs *tview.TextView
 
 	// The profile screen.
-	profInfo    *tview.TextView
-	profItems   *tview.Table
-	profConns   *tview.Table
-	profLogs    *tview.TextView
-	profTraffic *tview.TextView
-	profLeft    *tview.Flex
-	trafficRows int
-	cardLines   []cardLine
-	panes       [4]bool // the profile screen's panes shown (paneConfig...)
-	profGraph   *tview.TextView
-	profCard    *tview.Flex
-	profFlex    *tview.Flex
+	profItems *tview.Table    // the config pane's rows
+	profHint  *tview.TextView // the config pane's keys
+	profCfg   *tview.Flex     // the config pane
+	profStats *tview.TextView
+	profGraph *tview.TextView
+	profConns *tview.Table
+	profLogs  *tview.TextView
+	profTop   *tview.Flex // traffic: stats, graph
+	profMid   *tview.Flex // config, connections
+	profFlex  *tview.Flex
+	cardLines []cardLine
+	statLines int
+	panes     [4]bool // the profile screen's panes shown (paneConfig...)
+	cfgTab    string  // the config pane's tab: tabRoutes, tabDNS
 
 	// The logs screen.
 	logsFlex *tview.Flex
@@ -410,7 +417,7 @@ func (a *app) renderHeader() {
 	case !a.have:
 		s = " subtun · connecting to the control socket…"
 	case a.screen == scrProfile && a.open >= 0 && a.open < len(a.st.Tunnels):
-		s = " subtun › " + tview.Escape(nameOf(a.st.Tunnels[a.open]))
+		s = " subtun › " + a.cardTitle(a.st.Tunnels[a.open], time.Now())
 	case a.screen == scrLogs:
 		s = " subtun › logs · " + tview.Escape(a.filter.describe()) + " · " + a.followText()
 	case a.screen == scrHelp:
@@ -470,7 +477,7 @@ func (a *app) renderKeys() {
 	case scrProfile:
 		ks = []string{a.key("esc", "back", false), a.key("s", "stop", true), a.key("S", "start", true),
 			a.key("r", "reconnect", true), a.key("R", "reload from config", true), a.key("a/x/d", "routes", true), a.key("A/D", "DNS", true),
-			a.key("1-4", "panes", false), a.key("L", "logs full screen", false), a.key("u", "units", false), a.key("tab", "focus", false)}
+			a.key("t", "routes/DNS", false), a.key("1-4", "panes", false), a.key("L", "logs full screen", false), a.key("u", "units", false), a.key("tab", "focus", false)}
 	case scrLogs:
 		ks = []string{a.key("esc", "back", false), a.key("f", "follow", false), a.key("p", "profile", false), a.key("v", "level", false),
 			a.key("/", "search", false), a.key("g/G", "top/bottom", false)}
@@ -644,13 +651,14 @@ const helpText = `
                most terminals select with shift or option held)
 
  [yellow]Profile screen[-]
-   a x         add a route, an exclude
-   A           add DNS domains or patterns
+   t           its config pane: routes and excludes, or DNS names
+   a           add a route (or, on the DNS tab, DNS names); x an exclude;
+               A DNS names
    d D         delete the selected route, exclude, domain or pattern
    s S r       stop, start, reconnect
    R           read the profile from the config file again
-   1 2 3 4     show or hide its panes: routes and DNS names, traffic graph,
-               connections (c), log lines (l)
+   1 2 3 4     show or hide its panes: config (routes, DNS names), traffic,
+               connections (c), log lines (l); remembered
    L           its log lines full screen
    tab         move between the panes shown
    esc         back

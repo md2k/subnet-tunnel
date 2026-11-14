@@ -362,11 +362,16 @@ func TestProfileScreen(t *testing.T) {
 	u := start(t, f, Options{})
 	u.wait("Profiles (3)")
 	u.key(tcell.KeyEnter)
-	u.wait("subtun › work", "work · up 1h12m · pod ops/toolbox (binary agent 0.4.1)", "Routes on the utun",
-		"[a] add  [d] delete  [x] exclude", "10.0.0.0/8", "parts carried by dev (more specific)", "added 15:02", "configured",
-		"DNS names through this tunnel", "(all, except local names)", "unrouted answers: warn", "corp.example",
+	u.wait("subtun › work · up 1h12m · pod ops/toolbox (binary agent 0.4.1) · kill switch on", "Routes (2) · DNS names (2)",
+		"a add  x exclude  d delete", "t DNS names", "10.0.0.0/8", "parts carried by dev (more specific)", "added 15:02", "configured",
 		"Open connections (1)", "10.0.4.17:5432", "(on the utun)", "Traffic · 5 min", "· peak ", "· scale ", "esc back · ? help",
-		"Logs · work", "reconnected via")
+		"Logs · work", "reconnected via", "Counts")
+	// t: the DNS names tab.
+	u.press("t")
+	u.wait("(all, except local names)", "unrouted answers: warn", "corp.example", "a add  d delete", "t routes")
+	u.gone("parts carried by dev")
+	u.press("t")
+	u.wait("parts carried by dev")
 	if strings.Contains(u.text(), "connection to the agent lost") {
 		t.Fatal("the profile's log pane shows another profile's lines")
 	}
@@ -376,11 +381,11 @@ func TestProfileScreen(t *testing.T) {
 	u.press("l")
 	u.gone("Logs · work")
 	u.press("1")
-	u.gone("Routes on the utun")
+	u.gone("Routes (2)")
 	u.press("2")
 	u.gone("Traffic · 5 min")
 	u.press("1234")
-	u.wait("Open connections (1)", "Logs · work", "Routes on the utun", "Traffic · 5 min")
+	u.wait("Open connections (1)", "Logs · work", "Routes (2)", "Traffic · 5 min")
 	u.press("a")
 	u.wait("Add a route to work", "CIDRs or IPs")
 	u.press("10.80.0.0/16")
@@ -569,7 +574,7 @@ func TestProfileNothingToSelect(t *testing.T) {
 	u.key(tcell.KeyDown)
 	u.key(tcell.KeyUp)
 	u.press("d")
-	u.wait("select a route, exclude, domain or pattern to delete")
+	u.wait("select a route or exclude to delete")
 	u.press("c")
 	u.gone("Open connections")
 	u.key(tcell.KeyEscape)

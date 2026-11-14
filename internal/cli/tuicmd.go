@@ -56,7 +56,11 @@ else as used last.`,
 				Source: tui.Socket(in.Path),
 				Layout: firstSet(layout, fromFile.Layout, last.Layout), OnLayout: func(l string) { saveTUIState(func(s *tuiState) { s.Layout = l }) },
 				Units: firstSet(units, fromFile.Units, last.Units), OnUnits: func(u string) { saveTUIState(func(s *tuiState) { s.Units = u }) },
-				Mouse: firstSet(mouse, string(fromFile.Mouse), last.Mouse) != "off",
+				Mouse:       firstSet(mouse, string(fromFile.Mouse), last.Mouse) != "off",
+				HiddenPanes: last.Hidden, ConfigTab: last.Tab,
+				OnView: func(hidden []string, tab string) {
+					saveTUIState(func(s *tuiState) { s.Hidden, s.Tab = hidden, tab })
+				},
 				OnMouse: func(on bool) {
 					saveTUIState(func(s *tuiState) { s.Mouse = map[bool]string{true: "on", false: "off"}[on] })
 				},
@@ -98,6 +102,9 @@ type tuiState struct {
 	Layout string `json:"layout,omitempty"`
 	Units  string `json:"units,omitempty"`
 	Mouse  string `json:"mouse,omitempty"`
+	// The profile screen's view: the panes hidden, the config tab.
+	Hidden []string `json:"hiddenPanes,omitempty"`
+	Tab    string   `json:"configTab,omitempty"`
 }
 
 func tuiStatePath() (string, error) {
