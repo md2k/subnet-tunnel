@@ -1101,8 +1101,8 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		r := &runners[i]
 		sp := mp.specs[i]
 		if r.cancel != nil {
-			if mode == startReconnect && r.spec == sp {
-				r.keep.Store(true) // the next runner connects to the same pod
+			if r.spec == sp {
+				r.keep.Store(true) // the same profile again (a reconnect): the next runner uses its pod
 			}
 			r.cancel()
 		}

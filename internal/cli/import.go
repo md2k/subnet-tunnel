@@ -65,7 +65,7 @@ with --k8s/--docker (required with --write), or fill in the placeholder.`,
 			target := ""
 			switch {
 			case pod != "":
-				parts := []string{"create: false", "name: " + quote(pod)}
+				parts := []string{"create: false", "name: " + quote(strings.TrimPrefix(pod, "pod/"))}
 				if namespace != "" {
 					parts = append([]string{"namespace: " + quote(namespace)}, parts...)
 				}

@@ -503,7 +503,7 @@ func (t Target) Validate() error {
 
 func (t K8sTarget) validate() error {
 	if t.OldPod != "" {
-		return fmt.Errorf("target.k8s.pod is now name, with create: false for an existing pod (name: %s, create: false)", t.OldPod)
+		return fmt.Errorf("target.k8s.pod is now name, with create: false for an existing pod (name: %s, create: false)", strings.TrimPrefix(t.OldPod, "pod/"))
 	}
 	if t.Creates() {
 		if err := unset("target.k8s", "with create: false (an existing pod)", map[string]string{"selector": t.Selector, "container": t.Container}); err != nil {
@@ -557,8 +557,8 @@ func (r *Resources) validate(what string, requests bool) error {
 			if v == "" {
 				continue
 			}
-			if _, err := resource.ParseQuantity(v); err != nil {
-				return fmt.Errorf("%s.resources.%s.%s %q: a quantity such as 100m, 1, 64Mi", what, kind, key, v)
+			if q, err := resource.ParseQuantity(v); err != nil || q.Sign() <= 0 {
+				return fmt.Errorf("%s.resources.%s.%s %q: a quantity more than 0, such as 100m, 1, 64Mi", what, kind, key, v)
 			}
 		}
 	}

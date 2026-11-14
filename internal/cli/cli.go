@@ -446,7 +446,7 @@ func profileTarget(name string, tg config.Target, s *settings, g *globalOpts) (c
 			Context:    k.Context,
 			Namespace:  k.Namespace,
 			Create:     k.Creates(),
-			Name:       k.Name,
+			Name:       strings.TrimPrefix(k.Name, "pod/"), // kubectl's way, as the old pod: took it
 			Selector:   k.Selector,
 			Container:  k.Container,
 			Image:      k.Image,

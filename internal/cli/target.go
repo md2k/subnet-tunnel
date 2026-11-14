@@ -129,14 +129,24 @@ func onlyFor(flags *pflag.FlagSet, kind string, names ...string) error {
 	return nil
 }
 
-// flagWords says a target error in flags: target.k8s.name → --name.
+// flagWords says a target error in flags: target.k8s.name → --name,
+// target.k8s.resources.limits.cpu → --limits cpu.
 func flagWords(err error) error {
 	s := err.Error()
 	for _, kind := range []string{"target.k8s", "target.docker"} {
+		for _, r := range []string{"requests", "limits"} {
+			for _, q := range []string{"cpu", "memory"} {
+				s = strings.ReplaceAll(s, kind+".resources."+r+"."+q, "--"+r+" "+q)
+			}
+			s = strings.ReplaceAll(s, kind+".resources."+r, "--"+r)
+		}
+		s = strings.ReplaceAll(s, kind+".resources", "--requests/--limits")
 		s = strings.ReplaceAll(s, kind+" (an existing pod)", "an existing pod")
 		s = strings.ReplaceAll(s, kind+" (an existing container)", "an existing container")
 		s = strings.ReplaceAll(s, kind+".", "--")
 	}
+	s = strings.ReplaceAll(s, "needs one of name, selector", "needs --name or -l (--selector)")
+	s = strings.ReplaceAll(s, ": name and selector don't go together (one of name, selector)", ": --name and -l (--selector) don't go together")
 	s = strings.ReplaceAll(s, "create: false", "--create=false")
 	return errors.New(s)
 }
@@ -157,6 +167,8 @@ func parseResources(requests, limits string) (*config.Resources, error) {
 		for _, kv := range strings.Split(pair.v, ",") {
 			k, v, ok := strings.Cut(strings.TrimSpace(kv), "=")
 			switch {
+			case ok && v == "":
+				return nil, fmt.Errorf("--%s %q: %s has no value", flag, pair.v, k)
 			case ok && k == "cpu":
 				pair.l.CPU = v
 			case ok && k == "memory":
