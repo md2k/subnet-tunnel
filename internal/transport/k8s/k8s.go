@@ -7,6 +7,7 @@ package k8s
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -38,18 +39,28 @@ type Target struct {
 	Kubeconfig string // empty: $KUBECONFIG or ~/.kube/config
 	Context    string // empty: current context
 	Namespace  string // empty: the context's namespace
-	Pod        string
-	// Deployment or Selector, instead of Pod, follows: a running, ready pod
-	// of the Deployment (by its own selector) or with these labels, picked
-	// at each connect (see pickPod).
-	Deployment string
-	Selector   string
-	Container  string // empty: kubectl's default container
-	// Picked remembers the pod a followed target picked last.
+	// Create: subtun creates the pod (see pod.go) and deletes it on stop;
+	// else it is an existing pod, by Name or Selector (a running, ready pod
+	// with these labels, picked at each connect: see pickPod).
+	Create    bool
+	Name      string // the pod: to create (empty: generated), or the existing one
+	Selector  string
+	Container string // an existing pod's; empty: kubectl's default container
+	Image     string // a created pod's; empty: DefaultImage
+	Resources Resources
+	Profile   string // names and labels the pods subtun creates
+	// Picked remembers the pod picked last (a selector's choice, or the
+	// pod subtun created).
 	Picked *transport.Picked
 }
 
-func (t Target) followed() bool { return t.Deployment != "" || t.Selector != "" }
+// Resources are a created pod's requests and limits (Kubernetes
+// quantities; empty: none).
+type Resources struct {
+	RequestCPU, RequestMemory, LimitCPU, LimitMemory string
+}
+
+func (t Target) followed() bool { return t.Selector != "" }
 
 const defaultContainerAnnotation = "kubectl.kubernetes.io/default-container"
 
@@ -142,7 +153,10 @@ func newKube(ctx context.Context, t Target) (*kube, error) {
 	if err != nil {
 		return nil, err
 	}
-	name, follows := t.Pod, ""
+	if t.Create {
+		return nil, errors.New("creating pods isn't there yet: use create: false with name or selector")
+	}
+	name, follows := t.Name, ""
 	if t.followed() {
 		if name, follows, err = pickPod(ctx, cs, ns, t); err != nil {
 			return nil, err
@@ -162,25 +176,14 @@ func newKube(ctx context.Context, t Target) (*kube, error) {
 	return &kube{cfg: cfg, cs: cs, ns: ns, pod: name, container: container, follows: follows}, nil
 }
 
-// pickPod picks the pod a followed target connects to: running, ready and
+// pickPod picks the existing pod a selector names: running, ready and
 // not being deleted; the one picked last time while it still is (its
 // agent is cached there), else the newest (during a rollout the older ones
 // are going). follows says what was followed, for people.
 func pickPod(ctx context.Context, cs kubernetes.Interface, ns string, t Target) (name, follows string, err error) {
 	sel := t.Selector
 	follows = "pods in " + ns + " with " + sel
-	if t.Deployment != "" {
-		follows = "deployment " + ns + "/" + t.Deployment
-		d, err := cs.AppsV1().Deployments(ns).Get(ctx, t.Deployment, metav1.GetOptions{})
-		if err != nil {
-			return "", follows, fmt.Errorf("%s: %w", follows, err)
-		}
-		s, err := metav1.LabelSelectorAsSelector(d.Spec.Selector)
-		if err != nil {
-			return "", follows, fmt.Errorf("%s: its selector: %w", follows, err)
-		}
-		sel = s.String()
-	} else if _, err := labels.Parse(sel); err != nil {
+	if _, err := labels.Parse(sel); err != nil {
 		return "", follows, fmt.Errorf("selector %q: %w", sel, err)
 	}
 	list, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: sel})

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -604,13 +605,8 @@ func reloadSummary(old, ns *tunnelSpec, wasFinal, nowFinal []netip.Prefix, wasNa
 
 // targetKey is a target's settings, comparable.
 func targetKey(t config.Target) string {
-	switch {
-	case t.K8s != nil:
-		return fmt.Sprintf("k8s %+v", *t.K8s)
-	case t.Docker != nil:
-		return fmt.Sprintf("docker %+v", *t.Docker)
-	}
-	return ""
+	b, _ := json.Marshal(t) // values, not the pointers' addresses
+	return string(b)
 }
 
 // applyReload makes a reloaded profile part of the plan; the caller has

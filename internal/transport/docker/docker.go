@@ -32,14 +32,21 @@ import (
 
 // Target selects the daemon and container that runs the agent.
 type Target struct {
-	Host      string // empty: $DOCKER_HOST, then the docker context
-	Context   string // empty: $DOCKER_CONTEXT, then the current context
-	Container string // name or ID
-	// Selector, instead of Container, follows: a running container with
-	// these labels ("key=value,key2", all must match), picked at each
-	// connect (see pickContainer).
+	Host    string // empty: $DOCKER_HOST, then the docker context
+	Context string // empty: $DOCKER_CONTEXT, then the current context
+	// Create: subtun creates the container and removes it on stop; else
+	// it is an existing one, by Name or Selector (a running container with
+	// these labels, "key=value,key2", all must match, picked at each
+	// connect: see pickContainer).
+	Create   bool
+	Name     string // the container (name or ID): to create, or the existing one
 	Selector string
-	// Picked remembers the container a followed target picked last.
+	Image    string // a created container's; empty: transport.DefaultImage
+	Network  string // the network a created container joins; empty: the default bridge
+	LimitCPU string // a created container's limits (Kubernetes quantities)
+	LimitMem string
+	Profile  string // names and labels the containers subtun creates
+	// Picked remembers the container picked last.
 	Picked *transport.Picked
 }
 
@@ -50,7 +57,10 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	if err != nil {
 		return nil, err
 	}
-	target := t.Container
+	if t.Create {
+		return nil, errors.New("creating containers isn't there yet: use create: false with name or selector")
+	}
+	target := t.Name
 	if t.Selector != "" {
 		if target, err = pickContainer(ctx, cli, t); err != nil {
 			return nil, err

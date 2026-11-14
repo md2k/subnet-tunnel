@@ -1,81 +1,65 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"log/slog"
-	"net/netip"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/md2k/subnet-tunnel/internal/agentbin"
 	"github.com/md2k/subnet-tunnel/internal/config"
-	"github.com/md2k/subnet-tunnel/internal/transport"
 	"github.com/md2k/subnet-tunnel/internal/transport/docker"
 	"github.com/md2k/subnet-tunnel/internal/transport/k8s"
 )
 
 // targetFlags give subtun up a target on the command line, instead of a
-// profile's.
+// profile's: the same keys as a profile's target, as flags.
 type targetFlags struct {
-	k8s, docker                   kindFlag
-	namespace, container, context string
-	kubeconfig, host, selector    string
+	k8s, docker bool
+	create      bool
+	name        string
+	selector    string
+	image       string
+	network     string
+	requests    string
+	limits      string
+	namespace   string
+	container   string
+	context     string
+	kubeconfig  string
+	host        string
 }
 
-// kindFlag is --k8s or --docker: bare, with the target's name as the
-// first argument (--k8s deploy/toolbox), or with it (--k8s=deploy/toolbox).
-type kindFlag struct {
-	set  bool
-	name string
-}
-
-func (f *kindFlag) String() string {
-	if f.name != "" {
-		return f.name
-	}
-	return strconv.FormatBool(f.set)
-}
-
-func (f *kindFlag) Set(s string) error {
-	switch s {
-	case "true":
-		f.set, f.name = true, ""
-	case "false":
-		f.set, f.name = false, ""
-	default:
-		f.set, f.name = true, s
-	}
-	return nil
-}
-
-func (f *kindFlag) Type() string { return "bool" } // shown and parsed as a switch
+// The flags that belong to a target given here.
+var targetFlagNames = []string{"create", "name", "selector", "image", "network", "requests", "limits",
+	"namespace", "container", "context", "kubeconfig", "host"}
 
 func (tf *targetFlags) register(cmd *cobra.Command) {
 	f := cmd.Flags()
-	f.Var(&tf.k8s, "k8s", "the target is a Kubernetes pod, named first: POD, pod/POD or deploy/NAME (or -l)")
-	f.Lookup("k8s").NoOptDefVal = "true"
-	f.Var(&tf.docker, "docker", "the target is a Docker container, named first (or -l)")
-	f.Lookup("docker").NoOptDefVal = "true"
+	f.BoolVar(&tf.k8s, "k8s", false, "the target is a Kubernetes pod: one subtun creates (the default), or an existing one (--create=false with --name or -l)")
+	f.BoolVar(&tf.docker, "docker", false, "the target is a Docker container: one subtun creates (the default), or an existing one (--create=false with --name or -l)")
+	f.BoolVar(&tf.create, "create", true, "--k8s, --docker: create the pod or container (and delete it on stop); false: use an existing one")
+	f.StringVar(&tf.name, "name", "", "--k8s, --docker: the pod's or container's name: to create (default: generated), or the existing one")
+	f.StringVarP(&tf.selector, "selector", "l", "", "--k8s, --docker: an existing pod or container with these labels, picked at each connect (k8s: kubectl's syntax; docker: key=value, comma-separated); implies --create=false")
+	f.StringVar(&tf.image, "image", "", "--k8s, --docker: the image of the pod or container subtun creates (default: "+config.DefaultImage+")")
+	f.StringVar(&tf.network, "network", "", "--docker: the network the container subtun creates joins (default: the default bridge)")
+	f.StringVar(&tf.requests, "requests", "", "--k8s: the created pod's requests, e.g. cpu=50m,memory=64Mi")
+	f.StringVar(&tf.limits, "limits", "", "--k8s, --docker: the created pod's or container's limits, e.g. cpu=1,memory=512Mi")
 	f.StringVarP(&tf.namespace, "namespace", "n", "", "--k8s: the namespace (default: the kubeconfig context's)")
-	f.StringVarP(&tf.container, "container", "c", "", "--k8s: the container (default: kubectl's default container)")
+	f.StringVarP(&tf.container, "container", "c", "", "--k8s: an existing pod's container (default: kubectl's default container)")
 	f.StringVar(&tf.context, "context", "", "--k8s: the kubeconfig context (default: its current one); --docker: the docker context (default: $DOCKER_CONTEXT, then the current one)")
 	f.StringVar(&tf.kubeconfig, "kubeconfig", "", "--k8s: the kubeconfig file (default: $KUBECONFIG or ~/.kube/config)")
 	f.StringVarP(&tf.host, "host", "H", "", "--docker: the daemon's address (default: $DOCKER_HOST, then the docker context)")
-	f.StringVarP(&tf.selector, "selector", "l", "", "--k8s, --docker: follow a pod or container with these labels instead of naming one (k8s: kubectl's syntax; docker: key=value, comma-separated)")
 }
 
 // given reports whether a target was given here.
-func (tf *targetFlags) given() bool { return tf.k8s.set || tf.docker.set }
+func (tf *targetFlags) given() bool { return tf.k8s || tf.docker }
 
 // unused refuses the target's flags without a target given here.
 func (tf *targetFlags) unused(flags *pflag.FlagSet) error {
 	var used []string
-	for _, n := range []string{"namespace", "container", "context", "kubeconfig", "host", "selector"} {
+	for _, n := range targetFlagNames {
 		if flags.Changed(n) {
 			used = append(used, "--"+n)
 		}
@@ -86,62 +70,102 @@ func (tf *targetFlags) unused(flags *pflag.FlagSet) error {
 	return fmt.Errorf("%s: for a target given here, with --k8s or --docker (a profile has them in its target)", strings.Join(used, ", "))
 }
 
-// spec is the run of the target given here: its name (from --k8s=NAME, or
-// the first argument unless -l picks it) and the CIDRs.
-func (tf *targetFlags) spec(args []string, s settings, g *globalOpts) (*tunnelSpec, error) {
-	if tf.k8s.set && tf.docker.set {
-		return nil, errors.New("--k8s and --docker don't go together")
+// target is the target given here, checked as a profile's would be.
+func (tf *targetFlags) target(flags *pflag.FlagSet) (config.Target, error) {
+	if tf.k8s && tf.docker {
+		return config.Target{}, errors.New("--k8s and --docker don't go together")
 	}
-	kind, what := &tf.k8s, "pod"
-	if tf.docker.set {
-		kind, what = &tf.docker, "container"
+	var create *bool
+	if flags.Changed("create") {
+		create = &tf.create
 	}
-	name, routes := kind.name, args
-	if name != "" {
-		if tf.selector != "" {
-			return nil, fmt.Errorf("--%s=%s and --selector don't go together", map[string]string{"pod": "k8s", "container": "docker"}[what], name)
+	res, err := parseResources(tf.requests, tf.limits)
+	if err != nil {
+		return config.Target{}, err
+	}
+	var tg config.Target
+	if tf.k8s {
+		if err := onlyFor(flags, "--docker", "network", "host"); err != nil {
+			return config.Target{}, err
 		}
+		tg.K8s = &config.K8sTarget{Kubeconfig: tf.kubeconfig, Context: tf.context, Namespace: tf.namespace, Create: create,
+			Name: tf.name, Selector: tf.selector, Container: tf.container, Image: tf.image, Resources: res}
 	} else {
-		var err error
-		if name, routes, err = targetArgs(args, tf.selector, what); err != nil {
-			return nil, err
+		if err := onlyFor(flags, "--k8s", "namespace", "container", "kubeconfig", "requests"); err != nil {
+			return config.Target{}, err
 		}
+		tg.Docker = &config.DockerTarget{Host: tf.host, Context: tf.context, Create: create, Name: tf.name, Selector: tf.selector,
+			Image: tf.image, Network: tf.network, Resources: res}
 	}
-	s.routes = routes
+	if err := tg.Validate(); err != nil {
+		return config.Target{}, flagWords(err)
+	}
+	if err := checkSelector(tg); err != nil {
+		return config.Target{}, err
+	}
+	return tg, nil
+}
+
+// spec is the run of the target given here; the arguments are CIDRs.
+func (tf *targetFlags) spec(flags *pflag.FlagSet, args []string, s settings, g *globalOpts) (*tunnelSpec, error) {
+	tg, err := tf.target(flags)
+	if err != nil {
+		return nil, err
+	}
+	s.routes = args
 	sp := &tunnelSpec{s: s}
-	if tf.k8s.set {
-		if tf.host != "" {
-			return nil, errors.New("--host is for --docker")
-		}
-		t := k8s.Target{Kubeconfig: config.ExpandHome(tf.kubeconfig), Context: tf.context, Namespace: tf.namespace,
-			Container: tf.container, Selector: tf.selector, Picked: &transport.Picked{}}
-		if t.Selector != "" {
-			if err := k8s.ParseSelector(t.Selector); err != nil {
-				return nil, err
-			}
-		} else if err := k8sTargetArg(&t, name); err != nil {
-			return nil, err
-		}
-		sp.connect = func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
-			return k8s.Connect(ctx, t, agents, sp.s.transport(g), log)
-		}
-		return sp, nil
-	}
-	for n, v := range map[string]string{"namespace": tf.namespace, "container": tf.container, "kubeconfig": tf.kubeconfig} {
-		if v != "" {
-			return nil, fmt.Errorf("--%s is for --k8s", n)
-		}
-	}
-	t := docker.Target{Host: tf.host, Context: tf.context, Container: name, Selector: tf.selector, Picked: &transport.Picked{}}
-	if t.Selector != "" {
-		if _, err := docker.ParseSelector(t.Selector); err != nil {
-			return nil, err
-		}
-	}
-	sp.connect = func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
-		return docker.Connect(ctx, t, agents, sp.s.transport(g), log)
-	}
+	sp.connect, sp.endpoint = profileTarget("", tg, &sp.s, g)
 	return sp, nil
+}
+
+// onlyFor refuses flags that belong to the other kind of target.
+func onlyFor(flags *pflag.FlagSet, kind string, names ...string) error {
+	for _, n := range names {
+		if flags.Changed(n) {
+			return fmt.Errorf("--%s is for %s", n, kind)
+		}
+	}
+	return nil
+}
+
+// flagWords says a target error in flags: target.k8s.name → --name.
+func flagWords(err error) error {
+	s := err.Error()
+	for _, kind := range []string{"target.k8s", "target.docker"} {
+		s = strings.ReplaceAll(s, kind+" (an existing pod)", "an existing pod")
+		s = strings.ReplaceAll(s, kind+" (an existing container)", "an existing container")
+		s = strings.ReplaceAll(s, kind+".", "--")
+	}
+	s = strings.ReplaceAll(s, "create: false", "--create=false")
+	return errors.New(s)
+}
+
+// parseResources reads --requests and --limits: "cpu=50m,memory=64Mi".
+func parseResources(requests, limits string) (*config.Resources, error) {
+	if requests == "" && limits == "" {
+		return nil, nil
+	}
+	r := &config.Resources{}
+	for flag, pair := range map[string]struct {
+		v string
+		l *config.ResourceList
+	}{"requests": {requests, &r.Requests}, "limits": {limits, &r.Limits}} {
+		if pair.v == "" {
+			continue
+		}
+		for _, kv := range strings.Split(pair.v, ",") {
+			k, v, ok := strings.Cut(strings.TrimSpace(kv), "=")
+			switch {
+			case ok && k == "cpu":
+				pair.l.CPU = v
+			case ok && k == "memory":
+				pair.l.Memory = v
+			default:
+				return nil, fmt.Errorf("--%s %q: cpu=QUANTITY and memory=QUANTITY, comma-separated", flag, pair.v)
+			}
+		}
+	}
+	return r, nil
 }
 
 // checkSelector refuses a target's label selector that can't be parsed,
@@ -153,47 +177,6 @@ func checkSelector(t config.Target) error {
 	case t.Docker != nil && t.Docker.Selector != "":
 		_, err := docker.ParseSelector(t.Docker.Selector)
 		return err
-	}
-	return nil
-}
-
-// targetArgs splits the arguments into the target's name and the CIDRs:
-// with --selector there is no name.
-func targetArgs(args []string, selector, what string) (string, []string, error) {
-	if selector != "" {
-		if len(args) > 0 {
-			if _, err := netip.ParsePrefix(args[0]); err != nil {
-				if _, err := netip.ParseAddr(args[0]); err != nil {
-					return "", nil, fmt.Errorf("%q: with --selector, the arguments are CIDRs (no %s name)", args[0], what)
-				}
-			}
-		}
-		return "", args, nil
-	}
-	if len(args) == 0 {
-		return "", nil, fmt.Errorf("name the %s, or pick one by its labels with --selector", what)
-	}
-	return args[0], args[1:], nil
-}
-
-// k8sTargetArg names the pod or the Deployment, kubectl style: NAME,
-// pod/NAME, deploy/NAME.
-func k8sTargetArg(t *k8s.Target, arg string) error {
-	kind, name, ok := strings.Cut(arg, "/")
-	if !ok {
-		t.Pod = arg
-		return nil
-	}
-	switch kind {
-	case "pod", "pods", "po":
-		t.Pod = name
-	case "deploy", "deployment", "deployments", "deployment.apps":
-		t.Deployment = name
-	default:
-		return fmt.Errorf("%q: name a pod (NAME, pod/NAME) or a Deployment (deploy/NAME)", arg)
-	}
-	if name == "" {
-		return fmt.Errorf("%q: the name is missing", arg)
 	}
 	return nil
 }

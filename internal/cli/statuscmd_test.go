@@ -122,7 +122,7 @@ func TestEngineStatus(t *testing.T) {
 	if cp := es.configProfiles("testdata/no-such-config.yaml"); cp.Error == "" || len(cp.Profiles) != 0 {
 		t.Errorf("missing file: %+v", cp)
 	}
-	if got := configTarget(config.Target{K8s: &config.K8sTarget{Namespace: "ops", Pod: "pod/toolbox"}}); got != "pod ops/toolbox" {
+	if got := configTarget(config.Target{K8s: &config.K8sTarget{Namespace: "ops", Create: new(false), Name: "toolbox"}}); got != "pod ops/toolbox" {
 		t.Errorf("k8s target: %q", got)
 	}
 	// DNS while the kill switch holds: blocked by default; nothing to hold

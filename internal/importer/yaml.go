@@ -35,7 +35,7 @@ func (p *Profile) Entry(name, target, source, indent string) string {
 	in1, in2 := indent+"  ", indent+"    "
 	fmt.Fprintf(&b, "%s%s:\n", indent, name)
 	if target == "" {
-		fmt.Fprintf(&b, "%starget: {}  # set one: {k8s: {context: ..., namespace: ..., pod: ...}} or {docker: {container: ...}}\n", in1)
+		fmt.Fprintf(&b, "%starget: {}  # set one: {k8s: {context: ..., namespace: ...}} (subtun creates the pod) or {docker: {network: ...}}; an existing one: create: false, name: ...\n", in1)
 	} else {
 		fmt.Fprintf(&b, "%starget: %s\n", in1, target)
 	}

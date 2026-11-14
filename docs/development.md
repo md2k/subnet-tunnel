@@ -88,7 +88,7 @@ Kubernetes (Docker Desktop, kind, ...):
 ```sh
 kubectl apply -k test/dev
 kubectl -n subtun-dev wait --for=condition=Ready pod --all
-build/subtun k8s -n subtun-dev target --socks 127.0.0.1:1080
+build/subtun up --k8s -n subtun-dev --create=false --name target --socks 127.0.0.1:1080
 curl --socks5-hostname 127.0.0.1:1080 http://web.subtun-dev.svc.cluster.local:8080/
 kubectl delete namespace subtun-dev
 ```
@@ -97,7 +97,7 @@ Docker:
 
 ```sh
 docker compose -f test/dev/compose.yaml up -d
-build/subtun docker subtun-dev-target-1 --socks 127.0.0.1:1080
+build/subtun up --docker --create=false --name subtun-dev-target-1 --socks 127.0.0.1:1080
 curl --socks5-hostname 127.0.0.1:1080 http://web:8080/
 docker compose -f test/dev/compose.yaml down
 ```
@@ -107,9 +107,9 @@ agent in `/dev/shm/subtun-65534`. The compose `python` profile adds Python targe
 
 ```sh
 docker compose -f test/dev/compose.yaml --profile python up -d
-build/subtun docker subtun-dev-hardened-1 --socks 127.0.0.1:1080      # auto -> Python (no exec-able dir)
-build/subtun docker subtun-dev-distroless-1 --socks 127.0.0.1:1080    # auto -> Python (no shell)
-build/subtun docker subtun-dev-py36-1 --agent python --socks 127.0.0.1:1080
+build/subtun up --docker --create=false --name subtun-dev-hardened-1 --socks 127.0.0.1:1080      # auto -> Python (no exec-able dir)
+build/subtun up --docker --create=false --name subtun-dev-distroless-1 --socks 127.0.0.1:1080    # auto -> Python (no shell)
+build/subtun up --docker --create=false --name subtun-dev-py36-1 --agent python --socks 127.0.0.1:1080
 docker compose -f test/dev/compose.yaml --profile python down
 ```
 
@@ -133,7 +133,7 @@ Use single IPs or narrow ranges: wide 10.x ranges can overlap corporate networks
 ```sh
 WEB_POD=$(kubectl -n subtun-dev get pod -l app=web -o jsonpath='{.items[0].status.podIP}')
 WEB_SVC=$(kubectl -n subtun-dev get svc web -o jsonpath='{.spec.clusterIP}')
-build/subtun k8s -n subtun-dev target $WEB_POD $WEB_SVC        # sudo asks once
+build/subtun up --k8s -n subtun-dev --create=false --name target $WEB_POD $WEB_SVC   # sudo asks once
 curl http://$WEB_SVC:8080/                                     # in another terminal
 netstat -rn -f inet | grep utun                                # routes on the utun
 ```
@@ -215,13 +215,13 @@ Without root, through SOCKS: one profile per target, plus one that can't connect
 cat > build/multi.yaml <<'EOF'
 profiles:
   kube:
-    target: {k8s: {context: docker-desktop, namespace: subtun-dev, pod: target}}
+    target: {k8s: {context: docker-desktop, namespace: subtun-dev, create: false, name: target}}
     socks: 127.0.0.1:17080
   dock:
-    target: {docker: {container: subtun-dev-target-1}}
+    target: {docker: {create: false, name: subtun-dev-target-1}}
     socks: 127.0.0.1:17081
   ghost:
-    target: {k8s: {context: docker-desktop, namespace: subtun-dev, pod: no-such-pod}}
+    target: {k8s: {context: docker-desktop, namespace: subtun-dev, create: false, name: no-such-pod}}
     socks: 127.0.0.1:17082
     reconnect: {attempts: 1}
 EOF

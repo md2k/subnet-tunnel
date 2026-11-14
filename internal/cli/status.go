@@ -381,29 +381,35 @@ func (es *engineStatus) configProfiles(path string) control.ConfigProfiles {
 	return cp
 }
 
-// configTarget is a configured target for people: "pod ns/name",
-// "deployment ns/name", "pods in ns with app=x", "container name",
-// "containers with key=value".
+// configTarget is a configured target for people: "pod ops/toolbox",
+// "pods in ops with app=x", "a pod subtun creates in ops", "container web",
+// "containers with key=value", "a container subtun creates".
 func configTarget(t config.Target) string {
 	switch {
 	case t.K8s != nil:
-		ns := ""
-		if t.K8s.Namespace != "" {
-			ns = t.K8s.Namespace + "/"
-		}
+		k := t.K8s
 		switch {
-		case t.K8s.Deployment != "":
-			return "deployment " + ns + t.K8s.Deployment
-		case t.K8s.Selector != "" && t.K8s.Namespace != "":
-			return "pods in " + t.K8s.Namespace + " with " + t.K8s.Selector
-		case t.K8s.Selector != "":
-			return "pods with " + t.K8s.Selector
+		case k.Creates() && k.Namespace != "":
+			return "a pod subtun creates in " + k.Namespace
+		case k.Creates():
+			return "a pod subtun creates"
+		case k.Selector != "" && k.Namespace != "":
+			return "pods in " + k.Namespace + " with " + k.Selector
+		case k.Selector != "":
+			return "pods with " + k.Selector
+		case k.Namespace != "":
+			return "pod " + k.Namespace + "/" + k.Name
 		}
-		return "pod " + ns + strings.TrimPrefix(t.K8s.Pod, "pod/")
-	case t.Docker != nil && t.Docker.Selector != "":
-		return "containers with " + t.Docker.Selector
+		return "pod " + k.Name
 	case t.Docker != nil:
-		return "container " + t.Docker.Container
+		d := t.Docker
+		switch {
+		case d.Creates():
+			return "a container subtun creates"
+		case d.Selector != "":
+			return "containers with " + d.Selector
+		}
+		return "container " + d.Name
 	}
 	return ""
 }

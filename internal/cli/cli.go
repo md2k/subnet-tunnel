@@ -240,8 +240,8 @@ func newUpCmd(g *globalOpts) *cobra.Command {
 	var tf targetFlags
 	cmd := &cobra.Command{
 		Use: `up [PROFILE [CIDR...]] [--profile NAME...]
-  subtun up --k8s POD|deploy/NAME [CIDR...] | --k8s -l LABELS [CIDR...]
-  subtun up --docker CONTAINER [CIDR...] | --docker -l LABELS [CIDR...]`,
+  subtun up --k8s|--docker [--image IMAGE] [--name NAME] [CIDR...]
+  subtun up --k8s|--docker --create=false --name NAME|-l LABELS [CIDR...]`,
 		Short: "Start a profile from the config file, several, or a target given here",
 		Long: `Start a named profile from the config file. Flags override the profile's
 values; CIDRs and --exclude given here are added to the profile's.
@@ -252,15 +252,18 @@ names go to the profile whose route or domain matches most specifically.
 They are configured in the config file only: the command line then takes
 --dry-run, not settings or CIDRs.
 
-Or give the target here, without a profile:
-  --k8s     a Kubernetes pod, through the API server's exec, with your
-            kubeconfig (--context, else its current context; -n, else its
-            namespace). Name the pod, or follow a Deployment (deploy/NAME) or
-            labels (-l): a running, ready pod is picked at each connect, so a
-            reconnect finds the one that replaced a pod that went.
-  --docker  a Docker container, through the daemon's exec (-H, $DOCKER_HOST,
-            then the docker context). Name it, or follow labels (-l, such as
-            a Compose service's).
+Or give the target here, without a profile (the same keys as a profile's
+target, as flags):
+  --k8s     a Kubernetes pod, through the API server with your kubeconfig
+            (--context, else its current context; -n, else its namespace).
+  --docker  a Docker container, through the daemon (-H, $DOCKER_HOST, then
+            the docker context).
+subtun creates the pod or container (--image, --name, --limits; --requests,
+and --network for Docker), starts its agent in it, creates it again if it
+goes, and deletes it on stop. With --create=false it uses an existing one
+instead, only starting its agent in it: --name, or -l (labels: a running,
+ready one is picked at each connect, so a reconnect finds the one that
+replaced one that went).
 
 CIDRs (or single IPs) are captured transparently through a utun interface:
 any program on this machine reaches them directly. Setting up the interface
@@ -272,10 +275,11 @@ Without a profile name or a target, lists the profiles.`,
   subtun up dev-cluster --dry-run
   subtun up dev-cluster 10.50.0.0/16 -x 10.50.1.0/24
   subtun up --profile work,dev-cluster
-  subtun up --k8s -n team-a debug-pod 10.96.0.0/12 10.244.0.0/16
-  subtun up --k8s -n team-a deploy/toolbox 10.0.0.0/8 -x 10.1.0.0/16
-  subtun up --k8s -n team-a -l app=toolbox --socks 127.0.0.1:1080
-  subtun up --docker my-app 172.20.0.0/16
+  subtun up --k8s -n team-a 10.96.0.0/12 10.244.0.0/16
+  subtun up --k8s -n team-a --image registry.example.com/busybox:1.37 10.0.0.0/8
+  subtun up --k8s -n team-a --create=false --name debug-pod --socks 127.0.0.1:1080
+  subtun up --k8s -n team-a -l app=subtun-gw 10.0.0.0/8 -x 10.1.0.0/16
+  subtun up --docker --network dev_default 172.20.0.0/16
   subtun up --docker -l com.docker.compose.service=web --socks 127.0.0.1:1080
   curl --socks5-hostname 127.0.0.1:1080 http://my-svc.team-a.svc.cluster.local`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -283,7 +287,7 @@ Without a profile name or a target, lists the profiles.`,
 				if len(profiles) > 0 {
 					return errors.New("--profile and --k8s/--docker don't go together: a profile has its own target")
 				}
-				sp, err := tf.spec(args, s, g)
+				sp, err := tf.spec(cmd.Flags(), args, s, g)
 				if err != nil {
 					return err
 				}
@@ -393,7 +397,7 @@ func profileSpec(f *config.File, path, name string, base settings, extra []strin
 	sp.s.routes = slices.Clone(extra)
 	sp.s.applyProfile(p, flags)
 	sp.base = sp.s
-	sp.connect, sp.endpoint = profileTarget(p, &sp.s, g)
+	sp.connect, sp.endpoint = profileTarget(name, p.Target, &sp.s, g)
 	sp.reload = func() (*tunnelSpec, error) {
 		f, err := config.Load(path)
 		if err != nil {
@@ -430,28 +434,39 @@ func configSpecs(path string, g *globalOpts) func(name string) (*tunnelSpec, err
 }
 
 // profileTarget returns how to connect to a profile's target, and how to
-// find its endpoint (API server, Docker daemon) without connecting.
-func profileTarget(p config.Profile, s *settings, g *globalOpts) (connectFunc, func() (string, error)) {
+// find its endpoint (API server, Docker daemon) without connecting. name
+// is the profile's ("": a target given on the command line).
+func profileTarget(name string, tg config.Target, s *settings, g *globalOpts) (connectFunc, func() (string, error)) {
 	switch {
-	case p.Target.K8s != nil:
+	case tg.K8s != nil:
+		k := tg.K8s
 		t := k8s.Target{
-			Kubeconfig: config.ExpandHome(p.Target.K8s.Kubeconfig),
-			Context:    p.Target.K8s.Context,
-			Namespace:  p.Target.K8s.Namespace,
-			Pod:        strings.TrimPrefix(p.Target.K8s.Pod, "pod/"),
-			Deployment: p.Target.K8s.Deployment,
-			Selector:   p.Target.K8s.Selector,
-			Container:  p.Target.K8s.Container,
+			Kubeconfig: config.ExpandHome(k.Kubeconfig),
+			Context:    k.Context,
+			Namespace:  k.Namespace,
+			Create:     k.Creates(),
+			Name:       k.Name,
+			Selector:   k.Selector,
+			Container:  k.Container,
+			Image:      k.Image,
+			Profile:    name,
 			Picked:     &transport.Picked{},
+		}
+		if r := k.Resources; r != nil {
+			t.Resources = k8s.Resources{RequestCPU: r.Requests.CPU, RequestMemory: r.Requests.Memory, LimitCPU: r.Limits.CPU, LimitMemory: r.Limits.Memory}
 		}
 		return func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
 				return k8s.Connect(ctx, t, agents, s.transport(g), log)
 			}, func() (string, error) {
 				return k8s.Endpoint(t)
 			}
-	default: // the config makes sure there is one
-		t := docker.Target{Host: p.Target.Docker.Host, Context: p.Target.Docker.Context, Container: p.Target.Docker.Container,
-			Selector: p.Target.Docker.Selector, Picked: &transport.Picked{}}
+	default: // validated: there is one
+		d := tg.Docker
+		t := docker.Target{Host: d.Host, Context: d.Context, Create: d.Creates(), Name: d.Name, Selector: d.Selector,
+			Image: d.Image, Network: d.Network, Profile: name, Picked: &transport.Picked{}}
+		if r := d.Resources; r != nil {
+			t.LimitCPU, t.LimitMem = r.Limits.CPU, r.Limits.Memory
+		}
 		return func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
 				return docker.Connect(ctx, t, agents, s.transport(g), log)
 			}, func() (string, error) {
@@ -459,7 +474,6 @@ func profileTarget(p config.Profile, s *settings, g *globalOpts) (connectFunc, f
 			}
 	}
 }
-
 
 // globalsFromConfig applies the config file's top-level control: and log:
 // to a run without a profile (subtun up --k8s, --docker), under the flags

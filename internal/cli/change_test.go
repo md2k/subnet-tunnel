@@ -197,11 +197,11 @@ const reloadBase = `defaults:
     servers: [192.0.2.53]
 profiles:
   a:
-    target: {docker: {host: "tcp://203.0.113.10:2376", container: a}}
+    target: {docker: {host: "tcp://203.0.113.10:2376", create: false, name: a}}
     routes: [10.0.0.0/8]
     dns: {domains: [a.example]}
   b:
-    target: {docker: {host: "tcp://203.0.113.20:2376", container: b}}
+    target: {docker: {host: "tcp://203.0.113.20:2376", create: false, name: b}}
     routes: [10.50.0.0/16]
     killSwitch: {mode: "on"}
 `
