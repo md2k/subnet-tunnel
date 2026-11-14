@@ -91,13 +91,27 @@ type TUI struct {
 	// logs) or detail (a list, and the selected profile's detail); unset:
 	// the one used last.
 	Layout string `json:"layout,omitempty"`
+	// Units are the rates' units: bytes (MB/s) or bits (Mb/s); unset: the
+	// ones used last.
+	Units string `json:"units,omitempty"`
 }
 
-// Layouts of the terminal UI's dashboard.
+// Layouts of the terminal UI's dashboard, and its units for rates.
 const (
 	LayoutTable  = "table"
 	LayoutDetail = "detail"
+	UnitsBytes   = "bytes"
+	UnitsBits    = "bits"
 )
+
+// ValidUnits checks the TUI's units (the setting and --units).
+func ValidUnits(v string) error {
+	switch v {
+	case "", UnitsBytes, UnitsBits:
+		return nil
+	}
+	return fmt.Errorf("units %q: use bytes or bits", v)
+}
 
 // ValidLayout checks a TUI layout (the setting and --layout).
 func ValidLayout(v string) error {
@@ -338,6 +352,9 @@ func Parse(data []byte, name string) (*File, error) {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	if err := ValidLayout(f.TUI.Layout); err != nil {
+		return nil, fmt.Errorf("%s: tui.%w", name, err)
+	}
+	if err := ValidUnits(f.TUI.Units); err != nil {
 		return nil, fmt.Errorf("%s: tui.%w", name, err)
 	}
 	if f.Defaults.Target.K8s != nil || f.Defaults.Target.Docker != nil {

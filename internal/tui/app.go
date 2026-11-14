@@ -30,6 +30,10 @@ type Options struct {
 	Layout string
 	// OnLayout is called when v switches the layout (to remember it).
 	OnLayout func(string)
+	// Units are the rates' units: config.UnitsBytes (default) or
+	// config.UnitsBits; OnUnits is called when u switches them.
+	Units   string
+	OnUnits func(string)
 	// Screen is the terminal; nil: this one. Tests pass a simulation.
 	Screen tcell.Screen
 	// Interval between status polls; 0: a second.
@@ -75,6 +79,9 @@ type app struct {
 	profInfo  *tview.TextView
 	profItems *tview.Table
 	profConns *tview.Table
+	profGraph *tview.TextView
+	profCard  *tview.Flex
+	profFlex  *tview.Flex
 	itemRows  []item
 
 	// The logs screen.
@@ -96,8 +103,9 @@ type app struct {
 	following  bool
 	unseen     int // lines that came while paused
 	layout     string
-	sel        int // the selected profile (index in st.Tunnels: a run never drops one)
-	open       int // the profile screen's profile; -1: none
+	bits       bool // rates in bits a second (u), not bytes
+	sel        int  // the selected profile (index in st.Tunnels: a run never drops one)
+	open       int  // the profile screen's profile; -1: none
 	screen     string
 	logsBack   string          // the screen esc on the logs returns to
 	helpBack   string          // the screen the key list returns to
@@ -206,6 +214,7 @@ func newApp(ctx context.Context, quit context.CancelFunc, o Options) *app {
 		conns: map[string][]meter.ConnInfo{}, following: true, screen: scrDash, open: -1, pollNow: make(chan struct{}, 1),
 		ui: make(chan func(), 64), started: make(chan struct{})}
 	a.filter.level = levels[0]
+	a.bits = o.Units == config.UnitsBits
 
 	a.header = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
 	a.header.SetBackgroundColor(tcell.ColorNavy)
@@ -430,11 +439,11 @@ func (a *app) renderKeys() {
 	case scrDash:
 		ks = []string{a.key("?", "help", false), a.key("q", "quit", false), a.key("↑↓", "select", false), a.key("enter", "open", false),
 			a.key("v", "layout", false), a.key("s", "stop", true), a.key("S", "start", true), a.key("r", "reconnect", true),
-			a.key("a", "add profile", true), a.key("l", "logs", false), a.key("tab", "focus", false), a.key("f", "follow", false)}
+			a.key("a", "add profile", true), a.key("l", "logs", false), a.key("u", "units", false), a.key("tab", "focus", false), a.key("f", "follow", false)}
 	case scrProfile:
 		ks = []string{a.key("esc", "back", false), a.key("?", "help", false), a.key("s", "stop", true), a.key("S", "start", true),
 			a.key("r", "reconnect", true), a.key("R", "reload", true), a.key("a/x", "add route/exclude", true), a.key("A", "add DNS", true),
-			a.key("d", "delete", true), a.key("l", "logs", false), a.key("tab", "focus", false)}
+			a.key("d", "delete", true), a.key("l", "logs", false), a.key("u", "units", false), a.key("tab", "focus", false)}
 	case scrLogs:
 		ks = []string{a.key("esc", "back", false), a.key("f", "follow", false), a.key("p", "profile", false), a.key("v", "level", false),
 			a.key("/", "search", false), a.key("g/G", "top/bottom", false)}
@@ -480,6 +489,17 @@ func (a *app) onKey(ev *tcell.EventKey) *tcell.EventKey {
 			a.helpBack = a.screen
 			a.goTo(scrHelp)
 		}
+		return nil
+	case 'u':
+		a.bits = !a.bits
+		units := config.UnitsBytes
+		if a.bits {
+			units = config.UnitsBits
+		}
+		if a.o.OnUnits != nil {
+			a.o.OnUnits(units)
+		}
+		a.refresh()
 		return nil
 	}
 	switch a.screen {
@@ -579,6 +599,7 @@ const helpText = `
    l           the logs, full screen; / searches them
    tab         move between the profiles and the logs
    f           follow the logs, or pause them
+   u           rates in bytes or bits a second (MB/s, Mb/s)
 
  [yellow]Profile screen[-]
    a x         add a route, an exclude

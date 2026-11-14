@@ -269,6 +269,9 @@ func TestTUIKey(t *testing.T) {
 	if _, err := Parse([]byte("tui: {layout: grid}\n"+base), "t"); err == nil || !strings.Contains(err.Error(), `tui.layout "grid"`) {
 		t.Errorf("bad layout: %v", err)
 	}
+	if _, err := Parse([]byte("tui: {units: furlongs}\n"+base), "t"); err == nil || !strings.Contains(err.Error(), `tui.units "furlongs"`) {
+		t.Errorf("bad units: %v", err)
+	}
 	if _, err := Parse([]byte("defaults:\n  tui: {layout: table}\n"+base), "t"); err == nil {
 		t.Error("tui in defaults accepted: it is global only")
 	}

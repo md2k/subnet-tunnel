@@ -18,37 +18,67 @@ func TestNiceTop(t *testing.T) {
 	}
 }
 
-func TestChart(t *testing.T) {
-	plain := func(rows []string) string { return strings.Join(rows, "|") }
-	strip := func(rows []string) []string {
-		out := make([]string, len(rows))
-		for i, r := range rows {
-			for _, tag := range []string{"[green]", "[gray]", "[-]"} {
-				r = strings.ReplaceAll(r, tag, "")
-			}
-			out[i] = r
-		}
-		return out
+// plain drops the colour tags of chart rows.
+func plain(rows []string) string {
+	s := strings.Join(rows, "|")
+	for _, tag := range []string{"[green]", "[yellow]", "[orange]", "[red]", "[gray]", "[-]"} {
+		s = strings.ReplaceAll(s, tag, "")
 	}
+	return s
+}
+
+func TestArea(t *testing.T) {
 	for _, c := range []struct {
 		vals          []uint64
 		width, height int
 		top           uint64
+		hang          bool
 		want          string
 	}{
-		{nil, 4, 1, 0, "▁▁▁▁"},                       // nothing yet: the baseline
-		{[]uint64{0, 8}, 3, 1, 8, "▁▁█"},             // a zero is the baseline too
-		{[]uint64{1, 4, 8}, 3, 1, 16, "▁▂▄"},         // against the scale, not the largest
-		{[]uint64{8, 0, 0, 1, 2, 4}, 3, 1, 8, "█▁▄"}, // grouped evenly, the largest of each
-		{[]uint64{2, 8, 16}, 3, 2, 16, "  █|▂██"},    // two rows: 16 eighths
-		{[]uint64{5}, 0, 1, 5, ""},
+		{nil, 2, 1, 0, false, "⣀⣀"},                       // nothing yet: the baseline
+		{nil, 2, 1, 0, true, "⠉⠉"},                        // hanging: the baseline on top
+		{[]uint64{0, 8}, 1, 1, 8, false, "⣸"},             // a zero beside a full column: its baseline dot
+		{[]uint64{4, 8}, 1, 1, 8, false, "⣼"},             // two values a cell, four dots a row
+		{[]uint64{4, 8}, 1, 1, 16, false, "⣠"},            // against the scale, not the largest
+		{[]uint64{16, 16}, 1, 2, 16, false, "⣿|⣿"},        // two rows: eight dots
+		{[]uint64{8, 16}, 1, 2, 16, false, "⢸|⣿"},         // half and whole
+		{[]uint64{8, 16}, 1, 2, 16, true, "⣿|⢸"},          // hanging: from the top
+		{[]uint64{8, 0, 0, 2, 1, 2}, 1, 1, 8, false, "⣇"}, // grouped evenly, the largest of each
 	} {
-		if got := plain(strip(chart(c.vals, c.width, c.height, c.top, "green"))); got != c.want {
-			t.Errorf("chart(%v, %d, %d, %d) = %q, want %q", c.vals, c.width, c.height, c.top, got, c.want)
+		if got := plain(area(c.vals, c.width, c.height, c.top, c.hang)); got != c.want {
+			t.Errorf("area(%v, %d, %d, %d, %v) = %q, want %q", c.vals, c.width, c.height, c.top, c.hang, got, c.want)
 		}
 	}
-	if got := chart([]uint64{0, 8}, 2, 1, 8, "green")[0]; got != "[gray]▁[green]█[-]" {
+	// Coloured by how far the dots reach: the top of a full chart is red.
+	if got := area([]uint64{16, 16}, 1, 2, 16, false); got[0] != "[red]⣿[-]" || got[1] != "[green]⣿[-]" {
 		t.Errorf("colours: %q", got)
+	}
+}
+
+func TestGauge(t *testing.T) {
+	if got := plain([]string{gauge(5, 10, 4)}); got != "██··" {
+		t.Errorf("half: %q", got)
+	}
+	if got := plain([]string{gauge(1, 1000, 4)}); got != "▏···" {
+		t.Errorf("a little shows: %q", got)
+	}
+	if got := plain([]string{gauge(0, 0, 3)}); got != "···" {
+		t.Errorf("none: %q", got)
+	}
+	if got := gauge(10, 10, 4); !strings.HasPrefix(got, "[green]██[yellow]█[red]█") {
+		t.Errorf("gradient: %q", got)
+	}
+}
+
+func TestRateText(t *testing.T) {
+	for _, c := range []struct {
+		n    uint64
+		bits bool
+		want string
+	}{{3_100_000, false, "3.1 MB/s"}, {3_100_000, true, "24.8 Mb/s"}, {100, true, "800 b/s"}, {120_000, true, "960.0 kb/s"}} {
+		if got := rateText(c.n, c.bits); got != c.want {
+			t.Errorf("rateText(%d, %v) = %q, want %q", c.n, c.bits, got, c.want)
+		}
 	}
 }
 

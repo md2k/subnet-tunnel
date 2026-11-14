@@ -12,11 +12,15 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/meter"
 )
 
-const profInfoRows = 11
+// statsShare is the stats' share of the profile card's width; the traffic
+// graph has the rest.
+const statsShare = 0.4
 
 func (a *app) buildProfile() {
 	a.profInfo = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
 	a.profInfo.SetBorder(true)
+	a.profGraph = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
+	a.profGraph.SetBorder(true).SetTitle(" Traffic · 5 min ")
 	sel := tcell.StyleDefault.Reverse(true)
 	a.profItems = tview.NewTable().SetSelectable(true, false).SetFixed(1, 0).SetSelectedStyle(sel)
 	a.profItems.SetBorder(true).SetTitle(" Routes and DNS names ")
@@ -24,12 +28,21 @@ func (a *app) buildProfile() {
 	a.profConns.SetBorder(true)
 }
 
+// The profile card: its stats next to its traffic graph.
 func (a *app) profilePage() tview.Primitive {
-	return tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(a.profInfo, profInfoRows, 0, false).
+	a.profCard = tview.NewFlex().
+		AddItem(a.profInfo, 0, 2, false).
+		AddItem(a.profGraph, 0, 3, false)
+	a.profFlex = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(a.profCard, a.cardRows(), 0, false).
 		AddItem(a.profItems, 0, 1, true).
 		AddItem(a.profConns, 0, 1, false)
+	return a.profFlex
 }
+
+// cardRows is the profile card's height: its stats (8 lines) or its graph
+// (both sides and their lines), and the borders.
+func (a *app) cardRows() int { return max(8, 2*a.graphRows()+2) + 2 }
 
 func (a *app) openProfile(i int) {
 	if !a.have || i < 0 || i >= len(a.st.Tunnels) {
@@ -46,12 +59,15 @@ func (a *app) renderProfile(now time.Time) {
 		return
 	}
 	t := a.st.Tunnels[a.open]
+	a.profFlex.ResizeItem(a.profCard, a.cardRows(), 0)
 	a.profInfo.SetTitle(" " + tview.Escape(nameOf(t)) + " ")
-	w := 118 // before the first draw
+	a.profInfo.SetText(a.profileText(t, now))
+	w := 120 // before the first draw
 	if a.scrW > 0 {
-		w = a.scrW - 2
+		w = a.scrW
 	}
-	a.profInfo.SetText(a.profileText(t, now, max(w-graphLabel, 10)))
+	gw := w - int(float64(w)*statsShare) - 2 // the graph's part, less its borders
+	a.profGraph.SetText(strings.Join(a.trafficGraph(t, max(gw, 10), a.graphRows()), "\n"))
 
 	// What it asks for, as rows to act on.
 	row, col := a.profItems.GetSelection()
@@ -96,40 +112,43 @@ func (a *app) renderProfile(now time.Time) {
 	}
 }
 
-// profileText is the top of the profile screen.
-func (a *app) profileText(t control.Tunnel, now time.Time, sparkW int) string {
+// profileText is the profile card's stats.
+func (a *app) profileText(t control.Tunnel, now time.Time) string {
 	var b strings.Builder
-	line := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
-	head := []string{"[" + stateColor(t.State) + "]" + stateText(t, now) + "[-]"}
-	if t.Target != "" {
-		head = append(head, tview.Escape(t.Target))
+	line := func(label, format string, args ...any) {
+		fmt.Fprintf(&b, "[gray]%-8s[-] "+format+"\n", append([]any{label}, args...)...)
 	}
+	line("state", "[%s]%s[-]", stateColor(t.State), stateText(t, now))
+	if t.Target != "" {
+		line("target", "%s", tview.Escape(t.Target))
+	}
+	var guard []string
 	if t.KillSwitch != "" {
-		head = append(head, "kill switch "+ksText(t.KillSwitch))
+		guard = append(guard, "kill switch "+ksText(t.KillSwitch))
 	}
 	if t.SOCKS != "" {
-		head = append(head, "SOCKS "+tview.Escape(t.SOCKS))
+		guard = append(guard, "SOCKS "+tview.Escape(t.SOCKS))
 	}
-	line("%s", strings.Join(head, " · "))
+	if len(guard) > 0 {
+		line("", "%s", strings.Join(guard, " · "))
+	}
 	if len(t.Routes) > 0 {
 		on := "[gray](not on the utun)[-]"
 		if t.RoutesOn {
 			on = "[gray](on the utun)[-]"
 		}
-		line("[gray]carries[-]   %s %s", tview.Escape(summary(t.Routes, 6)), on)
+		line("carries", "%s %s", tview.Escape(summary(t.Routes, 4)), on)
 	}
 	c := t.Counts
 	via := ""
 	if c.ViaSOCKS > 0 {
 		via = fmt.Sprintf(" (%d through SOCKS)", c.ViaSOCKS)
 	}
-	line("[gray]traffic[-]   conns %d open / %d total / %d failed%s · loop guard refused %d", c.Open, c.Total, c.Failed, via, c.Refused)
-	line("          ↑ %s (%s)  ↓ %s (%s) · DNS %d answered, %d failed", meter.Bytes(c.Up), rate(c.UpRate), meter.Bytes(c.Down), rate(c.DownRate),
-		t.DNSCounts.Answered, t.DNSCounts.Failed)
-	line("%s", a.graphText(t, "↑", c.UpRate, upOf, sparkW))
-	line("%s", a.graphText(t, "↓", c.DownRate, downOf, sparkW))
+	line("conns", "%d open / %d total / %d failed%s", c.Open, c.Total, c.Failed, via)
+	line("bytes", "↑ %s  ↓ %s", meter.Bytes(c.Up), meter.Bytes(c.Down))
+	line("DNS", "%d answered, %d failed · loop guard refused %d", t.DNSCounts.Answered, t.DNSCounts.Failed, c.Refused)
 	if t.LastError != "" && t.State != "up" {
-		line("[red]last error:[-] %s", tview.Escape(t.LastError))
+		line("[red]error[-]", "%s", tview.Escape(t.LastError))
 	}
 	return strings.TrimSuffix(b.String(), "\n")
 }

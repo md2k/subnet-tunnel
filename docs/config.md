@@ -647,13 +647,15 @@ subtun tui                                     # in another
 subtun tui --layout detail
 ```
 
-- **Dashboard:** every profile with its state, target, routes, DNS names, kill switch, the traffic
-  rate each way and a 5-minute sparkline; below, the log lines of every profile. Two layouts,
-  switched with `v`: `table` (the profiles above the logs) and `detail` (a list, and the selected
-  profile's detail next to it).
-- **Profile screen** (`enter`): what the profile asks for (routes, excludes, DNS domains and
-  patterns, marked when added or removed while running), the routes it carries, its traffic and its
-  open connections.
+- **Dashboard:** every profile with its state, target, routes, DNS names, kill switch, the rate each
+  way and a gauge of its traffic now (against the scale of its last 5 minutes); below, the log lines
+  of every profile. Two layouts, switched with `v`: `table` (the profiles above the logs) and
+  `detail` (a list, and the selected profile's detail with its traffic graph next to it).
+- **Profile screen** (`enter`): its stats next to its traffic graph of the last 5 minutes (upload
+  above a zero line, download below, each against its own round scale, coloured by height), what it
+  asks for (routes, excludes, DNS domains and patterns, marked when added or removed while
+  running) and its open connections.
+- **Units:** `u` switches the rates between bytes and bits a second (`MB/s`, `Mb/s`).
 - **Logs** (`l`, or `/` to search them): full screen, filtered by profile (`p`), lowest level (`v`)
   and text (`/`); `f` follows or pauses. They are the lines `subtun logs` shows; the TUI saves
   nothing.
@@ -670,6 +672,7 @@ subtun tui --layout detail
 | Setting | Flag | Values |
 |---|---|---|
 | `tui.layout` (top level of the config file) | `--layout` | `table` or `detail`; unset: the layout used last (kept in `~/.local/state/subtun/tui.json`), else `table` |
+| `tui.units` | `--units` | `bytes` or `bits`; unset: the units used last, else `bytes` |
 
 `tui` is read by `subtun tui` only, never per profile.
 

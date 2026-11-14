@@ -15,8 +15,6 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/routes"
 )
 
-var blocks = []rune("▁▂▃▄▅▆▇█") // 1 to 8 eighths of a cell
-
 // niceTop is a chart's scale for its largest value v: the next 1, 2 or 5
 // times a power of ten at or above v plus a tenth, so steady traffic
 // doesn't fill the chart; 0 for 0.
@@ -34,31 +32,113 @@ func niceTop(v uint64) uint64 {
 	return uint64(math.Ceil(10 * p))
 }
 
-// chart draws values as bars height rows high and width cells wide, the
-// newest on the right, the top row first, against the scale top. More
-// values than cells are grouped evenly (the largest of each group). Zeros,
-// and the cells no value has reached yet, show a grey baseline (▁) on the
-// bottom row; bars are color (a tview colour name).
-func chart(vals []uint64, width, height int, top uint64, color string) []string {
+// Braille dots of a cell's left and right column (on U+2800), none to all
+// four: filled from the bottom (rising) and from the top (hanging).
+var (
+	riseLeft  = [5]rune{0, 0x40, 0x44, 0x46, 0x47}
+	riseRight = [5]rune{0, 0x80, 0xA0, 0xB0, 0xB8}
+	hangLeft  = [5]rune{0, 0x01, 0x03, 0x07, 0x47}
+	hangRight = [5]rune{0, 0x08, 0x18, 0x38, 0xB8}
+)
+
+// gradient is the colour of a chart's dots at frac of its height (btop
+// style): green low, then yellow, orange, red at the top.
+func gradient(frac float64) string {
+	switch {
+	case frac <= 0.5:
+		return "green"
+	case frac <= 0.75:
+		return "yellow"
+	case frac <= 0.9:
+		return "orange"
+	}
+	return "red"
+}
+
+// eighths are a cell filled from the left: none to whole.
+var eighths = []rune(" ▏▎▍▌▋▊▉█")
+
+// gauge draws v against top as a bar width cells wide filling from the
+// left, each cell coloured by how far along it is (the gradient); the rest
+// is a grey track.
+func gauge(v, top uint64, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	units := 0
+	if top > 0 {
+		units = min(int(math.Round(float64(v)/float64(top)*float64(width*8))), width*8)
+	}
+	if v > 0 && units == 0 {
+		units = 1
+	}
+	var b strings.Builder
+	cur := ""
+	set := func(tag string) {
+		if tag != cur {
+			b.WriteString(tag)
+			cur = tag
+		}
+	}
+	for i := range width {
+		switch fill := min(max(units-i*8, 0), 8); fill {
+		case 0:
+			set("[gray]")
+			b.WriteRune('·')
+		default:
+			set("[" + gradient(float64(i+1)/float64(width)) + "]")
+			b.WriteRune(eighths[fill])
+		}
+	}
+	b.WriteString("[-]")
+	return b.String()
+}
+
+// braille draws values as an area chart of braille dots rising from the
+// bottom (see area).
+func braille(vals []uint64, width, height int, top uint64) []string {
+	return area(vals, width, height, top, false)
+}
+
+// area draws values as an area chart of braille dots, height rows high and
+// width cells wide (two values a cell, four dots a row), the newest on the
+// right, the rows top first, against the scale top: rising from the bottom,
+// or hanging from the top. More values than dot columns are grouped evenly
+// (the largest of each group). Each cell is coloured by how far its dots
+// reach; zeros, and the time no value has reached yet, show a grey
+// baseline on the row the chart grows from.
+func area(vals []uint64, width, height int, top uint64, hang bool) []string {
 	if width <= 0 || height <= 0 {
 		return make([]string, max(height, 0))
 	}
+	cols := width * 2
 	groups := vals
-	if n := len(vals); n > width {
-		groups = make([]uint64, width)
+	if n := len(vals); n > cols {
+		groups = make([]uint64, cols)
 		for i := range groups {
-			groups[i] = slices.Max(vals[i*n/width : (i+1)*n/width])
+			groups[i] = slices.Max(vals[i*n/cols : (i+1)*n/cols])
 		}
 	}
-	levels := make([]int, width) // eighths; 0: the baseline
+	dots := height * 4
+	levels := make([]int, cols) // dots long; 0: zero or no value
 	for i, v := range groups {
 		if v > 0 && top > 0 {
-			l := int(math.Ceil(float64(v) / float64(top) * float64(height*8)))
-			levels[width-len(groups)+i] = min(max(l, 1), height*8)
+			l := int(math.Ceil(float64(v) / float64(top) * float64(dots)))
+			levels[cols-len(groups)+i] = min(max(l, 1), dots)
 		}
+	}
+	left, right, base := riseLeft, riseRight, rune(0x2800+0x40+0x80) // ⣀
+	if hang {
+		left, right, base = hangLeft, hangRight, 0x2800+0x01+0x08 // ⠉
 	}
 	rows := make([]string, height)
 	for r := range height { // r: from the top
+		near := height - 1 - r // rows between this one and where the chart grows from
+		if hang {
+			near = r
+		}
+		floor := near * 4
+		edge := near == 0
 		var b strings.Builder
 		cur := ""
 		set := func(tag string) {
@@ -67,15 +147,23 @@ func chart(vals []uint64, width, height int, top uint64, color string) []string 
 				cur = tag
 			}
 		}
-		floor := (height - 1 - r) * 8 // eighths below this row
-		for _, l := range levels {
-			switch fill := min(l-floor, 8); {
-			case fill > 0:
-				set("[" + color + "]")
-				b.WriteRune(blocks[fill-1])
-			case l == 0 && r == height-1:
+		for c := range width {
+			l, rt := levels[2*c], levels[2*c+1]
+			fl, fr := min(max(l-floor, 0), 4), min(max(rt-floor, 0), 4)
+			switch {
+			case fl > 0 || fr > 0:
+				ch := 0x2800 + left[fl] + right[fr]
+				if edge && fl == 0 {
+					ch += left[1]
+				}
+				if edge && fr == 0 {
+					ch += right[1]
+				}
+				set("[" + gradient(float64(max(min(l, floor+4), min(rt, floor+4)))/float64(dots)) + "]")
+				b.WriteRune(ch)
+			case edge:
 				set("[gray]")
-				b.WriteRune('▁')
+				b.WriteRune(base)
 			default:
 				b.WriteRune(' ')
 			}
@@ -116,7 +204,22 @@ func short(d time.Duration) string {
 	return fmt.Sprintf("%dd%dh", int(d.Hours())/24, int(d.Hours())%24)
 }
 
-func rate(n uint64) string { return meter.Bytes(n) + "/s" }
+// rateText is a rate for people: bytes a second, or bits (decimal units).
+func rateText(n uint64, bits bool) string {
+	if !bits {
+		return meter.Bytes(n) + "/s"
+	}
+	if n*8 < 1000 {
+		return fmt.Sprintf("%d b/s", n*8)
+	}
+	v, units := float64(n)*8, []string{"kb/s", "Mb/s", "Gb/s", "Tb/s"}
+	i := -1
+	for v >= 1000 && i < len(units)-1 {
+		v /= 1000
+		i++
+	}
+	return fmt.Sprintf("%.1f %s", v, units[i])
+}
 
 // stateText is a tunnel's state with how long or which attempt.
 func stateText(t control.Tunnel, now time.Time) string {

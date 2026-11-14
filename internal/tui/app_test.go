@@ -267,15 +267,17 @@ func TestDashboard(t *testing.T) {
 	u := start(t, f, Options{OnLayout: func(l string) { layouts <- l }})
 	u.wait("Profiles (3)", "up 1h12m", "reconnecting 2/10", "pod ops/toolbox", "10.0.0.0/8 +1", "lockdown",
 		"120.0 kB/s", "3.1 MB/s", "reconnected", "connection to the agent lost; reconnecting", "control full")
-	// The sparkline takes the table's spare width (more than its 10 cells here).
+	// The traffic gauge takes the table's spare width: work fills part of it.
 	for _, l := range strings.Split(u.text(), "\n") {
-		if strings.Contains(l, "● work") {
-			if n := strings.Count(l, "▁") + strings.Count(l, "▂") + strings.Count(l, "▃") + strings.Count(l, "▄") +
-				strings.Count(l, "▅") + strings.Count(l, "▆") + strings.Count(l, "▇") + strings.Count(l, "█"); n <= sparkCells {
-				t.Errorf("sparkline of %d cells: %q", n, l)
-			}
+		if strings.Contains(l, "● work") && (!strings.Contains(l, "·") || !strings.ContainsAny(l, "▏▎▍▌▋▊▉█")) {
+			t.Errorf("no gauge: %q", l)
 		}
 	}
+	// u: rates in bits a second, and back.
+	u.press("u")
+	u.wait("24.8 Mb/s", "960.0 kb/s")
+	u.press("u")
+	u.wait("3.1 MB/s")
 	next := func() string {
 		select {
 		case l := <-layouts:
@@ -350,7 +352,7 @@ func TestProfileScreen(t *testing.T) {
 	u.wait("Profiles (3)")
 	u.key(tcell.KeyEnter)
 	u.wait("subtun › work", "Routes and DNS names", "10.0.0.0/8", "added while running", "configured", "corp.example",
-		"Open connections (1)", "10.0.4.17:5432", "carries", "(on the utun)")
+		"Open connections (1)", "10.0.4.17:5432", "carries", "(on the utun)", "Traffic · 5 min", "· peak ", "· scale ")
 	u.press("a")
 	u.wait("Add a route to work", "CIDRs or IPs")
 	u.press("10.80.0.0/16")
