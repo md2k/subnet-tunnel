@@ -866,11 +866,8 @@ type engineOpts struct {
 // connect once before the capture (and sudo) starts. It ends on Ctrl-C, or
 // when every profile has given up. With control: full, changes through the
 // control socket (routes, DNS names, profiles) are made by its loop.
-func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts) error {
-	termLog := io.Writer(os.Stderr)
-	if eo.tui {
-		termLog = io.Discard // the TUI shows the log lines
-	}
+func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts) (retErr error) {
+	termLog := &switchWriter{w: os.Stderr} // off while a TUI shows the log lines
 	rl, logWarn := newRunLog(g.verbose, eo.log, mp.dnsDomains, termLog)
 	defer rl.close() // last: after the capture has stopped
 	log, ring := rl.log, rl.ring
@@ -938,7 +935,8 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	// loop below, one at a time.
 	changes := make(chan changeRequest)
 	loopDone := make(chan struct{})
-	defer close(loopDone)
+	endLoop := sync.OnceFunc(func() { close(loopDone) })
+	defer endLoop()
 	canChange := eo.control == controlFull || eo.tui
 	if canChange {
 		es.change = func(rctx context.Context, ch control.Change) (control.Result, error) {
@@ -1015,8 +1013,12 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 
 	markStop := func() {}
 	if eo.tui { // after the listeners: a busy port fails before the TUI shows
-		ui := startUpTUI(es.server(ring, log.With(logx.ComponentKey, "control"), true), ring, es.configPath, stopAsked, ctx.Done())
-		defer ui.end() // after the capture and the tunnels have stopped: the TUI shows it
+		ui := startUpTUI(es.server(ring, log.With(logx.ComponentKey, "control"), true), ring, es.configPath, stopAsked, loopDone, termLog, log)
+		defer func() { // after the capture and the tunnels have stopped: the TUI shows it
+			if err := ui.end(); err != nil && retErr == nil {
+				retErr = fmt.Errorf("terminal UI: %w", err)
+			}
+		}()
 		mp.lend, markStop = ui.lend(), ui.stopping
 	}
 
@@ -1573,6 +1575,9 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		return res, nil
 	}
 
+	// First of the defers once the loop ends: changes are refused, and the
+	// TUI shows the stop, while the rest stops.
+	defer endLoop()
 	for {
 		select {
 		case <-ctx.Done():

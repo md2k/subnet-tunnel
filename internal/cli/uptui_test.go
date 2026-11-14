@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +20,18 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/transport"
 	"github.com/md2k/subnet-tunnel/internal/tui"
 )
+
+// stubTUITerminal stands in for the terminal (and keeps fd 2 alone).
+func stubTUITerminal(t *testing.T) {
+	origCtl, origCap, origLeft := startControl, startCapture, leftoversMarked
+	origTerm, origOut, origRun, origErr := isTerminal, tuiOut, runTUI, captureStderr
+	t.Cleanup(func() {
+		startControl, startCapture, leftoversMarked = origCtl, origCap, origLeft
+		isTerminal, tuiOut, runTUI, captureStderr = origTerm, origOut, origRun, origErr
+	})
+	isTerminal = func() bool { return true }
+	captureStderr = func(*slog.Logger) (*os.File, func(), error) { return nil, nil, errors.New("not in tests") }
+}
 
 // syncBuffer is a bytes.Buffer safe to read while written.
 type syncBuffer struct {
@@ -42,19 +55,13 @@ func (s *syncBuffer) String() string {
 // changes under control: status, and q stops subtun as a signal would;
 // when it closes, the stop's log lines are printed.
 func TestUpTUI(t *testing.T) {
-	origCtl, origCap, origLeft := startControl, startCapture, leftoversMarked
-	origTerm, origOut, origRun := isTerminal, tuiOut, runTUI
-	t.Cleanup(func() {
-		startControl, startCapture, leftoversMarked = origCtl, origCap, origLeft
-		isTerminal, tuiOut, runTUI = origTerm, origOut, origRun
-	})
+	stubTUITerminal(t)
 	sockets := make(chan *engineStatus, 1)
 	startControl = func(_ context.Context, es *engineStatus, _ *logring.Ring, _ *slog.Logger) { sockets <- es }
 	leftoversMarked = func() bool { return false }
 	startCapture = func(context.Context, *multiPlan, []bool, []*liveTunnel, []meter.Dialer, *router, *privhelper.Client, *leftovers, bool, func(string), *slog.Logger) (*capture.Capture, error) {
 		return nil, errors.New("no capture in tests")
 	}
-	isTerminal = func() bool { return true }
 	out := &syncBuffer{}
 	tuiOut = out
 	opened := make(chan tui.Options, 1)
@@ -140,17 +147,10 @@ func TestUpTUI(t *testing.T) {
 
 // A TUI that can't start stops the run: nothing would show it, or stop it.
 func TestUpTUIFails(t *testing.T) {
-	origCtl, origCap, origLeft := startControl, startCapture, leftoversMarked
-	origTerm, origOut, origRun := isTerminal, tuiOut, runTUI
-	t.Cleanup(func() {
-		startControl, startCapture, leftoversMarked = origCtl, origCap, origLeft
-		isTerminal, tuiOut, runTUI = origTerm, origOut, origRun
-	})
+	stubTUITerminal(t)
 	startControl = func(context.Context, *engineStatus, *logring.Ring, *slog.Logger) {}
 	leftoversMarked = func() bool { return false }
-	isTerminal = func() bool { return true }
-	out := &syncBuffer{}
-	tuiOut = out
+	tuiOut = &syncBuffer{}
 	runTUI = func(context.Context, tui.Options) error { return errors.New("no tty") }
 	mp := multiPlanFor(t, "work")
 	mp.specs[0].s.socks = ""
@@ -161,13 +161,49 @@ func TestUpTUIFails(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- runEngine(context.Background(), &globalOpts{}, mp, engineOpts{tui: true}) }()
 	select {
-	case <-done:
+	case err := <-done:
+		if err == nil || err.Error() != "terminal UI: no tty" {
+			t.Errorf("ended with %v, want the TUI's error", err)
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("subtun went on without its TUI")
 	}
-	if !strings.Contains(out.String(), "subtun: terminal UI: no tty") {
-		t.Errorf("printed: %s", out.String())
+}
+
+// The --max-duration watchdog's way out doesn't wait for a TUI that
+// doesn't end; the hook is there only while the TUI is.
+func TestUpTUICloseTimeout(t *testing.T) {
+	stubTUITerminal(t)
+	out := &syncBuffer{}
+	tuiOut = out
+	block := make(chan struct{})
+	runTUI = func(context.Context, tui.Options) error { <-block; return nil }
+	ring := logring.New(0, 0)
+	ring.Add(logring.Line{Text: "still stopping after --max-duration; exiting now"})
+	tl := &switchWriter{w: out}
+	u := startUpTUI(&control.Server{}, ring, "", func() {}, make(chan struct{}), tl, slog.New(slog.DiscardHandler))
+	hook := beforeHardExit.Load()
+	if hook == nil {
+		t.Fatal("no hook while the TUI runs")
 	}
+	start := time.Now()
+	(*hook)()
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("waited %v", d)
+	}
+	if beforeHardExit.Load() != nil {
+		t.Error("the hook stayed")
+	}
+	if !strings.Contains(out.String(), "still stopping after --max-duration") {
+		t.Errorf("printed: %q", out.String())
+	}
+	_, _ = tl.Write([]byte("after\n")) // the terminal has the log again
+	if !strings.Contains(out.String(), "after") {
+		t.Error("terminal log output still off")
+	}
+	_ = u.end() // once only: doesn't wait again
+	close(block)
+	<-u.done // the stand-in TUI has ended before the cleanup
 }
 
 func TestTUIFlagRefused(t *testing.T) {
