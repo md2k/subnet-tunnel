@@ -664,7 +664,8 @@ subtun tui --layout detail
   dialog shows the change's dry run first, as `--dry-run` does; the changes are those of
   [Changes while running](#changes-while-running), and last until subtun stops. A run with
   `control: status` shows everything and greys the change keys out.
-- `?` lists the keys.
+- `?` lists the keys. The TUI follows the terminal's size: in a narrow one the table drops its
+  target, DNS, sparkline and kill-switch columns, in that order, and dialogs shrink to fit.
 
 | Setting | Flag | Values |
 |---|---|---|

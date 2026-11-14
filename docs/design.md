@@ -576,8 +576,8 @@ shaped as a list of tunnels: one in a single-profile run, several with `--profil
   `LOCAL_PEERCRED`). `subtun status` finds every running subtun by its socket and removes sockets
   whose process is gone.
 - JSON over HTTP on that socket, under `/v1/`, so `curl --unix-socket` works too: `/v1/status`,
-  `/v1/connections`, `/v1/samples` (each tunnel's 1 s traffic samples; `?since=` for the newer
-  ones), `/v1/config` (the profiles of the run's config file, read when asked, and which are in the
+  `/v1/connections`, `/v1/samples` (each tunnel's 1 s traffic samples, the last 5 minutes),
+  `/v1/config` (the profiles of the run's config file, read when asked, and which are in the
   run), and `/v1/logs` (newline-delimited JSON, each line with its level and profile; with
   `?follow=1` new lines keep coming); with `control: full` also `POST /v1/routes`, `/v1/dns` and `/v1/profiles` (a JSON change:
   `op`, `profile`, `cidrs` and `exclude`, `domains` and `patterns`, `reload`, `dryRun`), answered
@@ -719,6 +719,13 @@ second and follows `/v1/logs`.
   while running marked; what it carries; its traffic and connections), full-screen logs with filters
   by profile, level and text, and the key list.
 - **Read only:** a run with `control: status` shows everything and greys the change keys out.
+- **Size:** fitted to the terminal before every draw that follows a resize: the table's columns
+  shrink, then the least needed go; an open dialog shrinks with the screen.
+- **Updates:** only the UI goroutine touches the widgets and state; the poller, the log stream and
+  the change requests hand their results to one pump goroutine, the only caller of tview's
+  `QueueUpdate` (which waits for the event loop) and the one that stops the loop, so quitting never
+  leaves a goroutine waiting. Log lines carry a sequence number, so a reconnected stream's repeats
+  are dropped.
 - **Tests:** tcell's simulation screen and a fake control socket: the screens are drawn and keys
   sent as a terminal would, and the changes made are checked.
 
