@@ -39,6 +39,7 @@ func newFake(controlMode string) *fake {
 				Domains: []string{".", "corp.example"}, KillSwitch: "on", Changes: []string{"+route 10.70.0.0/16"}, Agent: "0.4.1",
 				ChangedAt:  map[string]time.Time{"+route 10.70.0.0/16": time.Date(2026, 11, 14, 15, 2, 0, 0, time.Local)},
 				RouteNotes: map[string]string{"10.0.0.0/8": "parts carried by dev (more specific)"}, Unrouted: "warn",
+				Context: "ops", Endpoint: "https://192.0.2.10:6443", EndpointAddrs: []string{"192.0.2.10"},
 				Counts: meter.Counts{Open: 3, Total: 120, UpRate: 120_000, DownRate: 3_100_000}},
 			{Name: "dev", State: "reconnecting", Attempt: 2, Attempts: 10, Include: []string{"10.50.0.0/16"}, Domains: []string{"cluster.local"},
 				LastError: "pod dev/debug: not found"},
@@ -365,7 +366,7 @@ func TestProfileScreen(t *testing.T) {
 	u.wait("subtun › work · up 1h12m · pod ops/toolbox (binary agent 0.4.1) · kill switch on", "Routes (2) · DNS names (2)",
 		"a add  x exclude  d delete", "t DNS names", "10.0.0.0/8", "parts carried by dev (more specific)", "added 15:02", "configured",
 		"Open connections (1)", "10.0.4.17:5432", "(on the utun)", "Traffic · 5 min", "· peak ", "· scale ", "esc back · ? help",
-		"Logs · work", "reconnected via", "Counts")
+		"Logs · work", "reconnected via", "Counts", "via      context ops · https://192.0.2.10:6443")
 	// t: the DNS names tab.
 	u.press("t")
 	u.wait("(all, except local names)", "unrouted answers: warn", "corp.example", "a add  d delete", "t routes")

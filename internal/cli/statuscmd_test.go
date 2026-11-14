@@ -89,6 +89,9 @@ func TestEngineStatus(t *testing.T) {
 	if n := w.RouteNotes["10.0.0.0/8"]; n != "parts carried by dev (more specific)" {
 		t.Errorf("route notes: %q", w.RouteNotes)
 	}
+	if w.Endpoint != "tcp://203.0.113.200:2376" {
+		t.Errorf("work's endpoint: %q", w.Endpoint)
+	}
 	if w.Unrouted != "warn" || dv.Unrouted != "warn" {
 		t.Errorf("unrouted: %q %q", w.Unrouted, dv.Unrouted)
 	}

@@ -403,6 +403,9 @@ func (a *app) detailText(t control.Tunnel, now time.Time, sparkW int) string {
 	}
 	head = append(head, "["+stateColor(t.State)+"]"+stateText(t, now)+"[-]")
 	line("%s", strings.Join(head, " · "))
+	if v := viaText(t); v != "" {
+		line("[gray]via    [-]  %s", tview.Escape(v))
+	}
 	its := items(t)
 	if s := listOf(its, "route"); s != "" {
 		line("[gray]routes [-]  %s", s)

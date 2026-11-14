@@ -1594,6 +1594,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 				switch ev.state {
 				case stateUp:
 					t.target, t.agent, t.attempt, t.nextTry = ev.carrier.Desc, ev.agent, 0, time.Time{}
+					t.endpoints, t.local = prefixAddrs(ev.carrier.Endpoints), ev.carrier.Local
 				case stateReconnecting:
 					t.lastErr = "connection to the agent lost"
 				}

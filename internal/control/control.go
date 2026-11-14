@@ -57,6 +57,13 @@ type Tunnel struct {
 	Attempts  int       `json:"attempts,omitempty"`
 	NextTry   time.Time `json:"nextTry,omitzero"`
 	LastError string    `json:"lastError,omitempty"`
+	// Where the tunnel's own connection goes: the endpoint as configured
+	// (the API server's URL, the Docker host), its addresses, whether it
+	// stays on this machine, the kube context (if the profile names one).
+	Endpoint      string   `json:"endpoint,omitempty"`
+	EndpointAddrs []string `json:"endpointAddrs,omitempty"`
+	EndpointLocal bool     `json:"endpointLocal,omitempty"`
+	Context       string   `json:"context,omitempty"`
 	// Include and Exclude are the routes and excludes the profile asks for
 	// (configured, plus changes while running); Routes are what it carries:
 	// excludes, other profiles' more specific routes and the API servers

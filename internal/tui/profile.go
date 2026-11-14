@@ -455,11 +455,15 @@ func (a *app) statsText(t control.Tunnel) string {
 	if c.ViaSOCKS > 0 {
 		via = fmt.Sprintf(" (%d via SOCKS)", c.ViaSOCKS)
 	}
-	lines := []string{
+	var lines []string
+	if v := viaText(t); v != "" {
+		lines = append(lines, "[gray]via    [-]  "+tview.Escape(v))
+	}
+	lines = append(lines,
 		fmt.Sprintf("[gray]conns  [-]  %d open / %d total / %d failed%s", c.Open, c.Total, c.Failed, via),
 		fmt.Sprintf("[gray]bytes  [-]  ↑ %s (%s)  ↓ %s (%s)", meter.Bytes(c.Up), a.rate(c.UpRate), meter.Bytes(c.Down), a.rate(c.DownRate)),
 		fmt.Sprintf("[gray]DNS    [-]  %d answered, %d failed", t.DNSCounts.Answered, t.DNSCounts.Failed),
-	}
+	)
 	if c.Refused > 0 {
 		lines = append(lines, fmt.Sprintf("[gray]guard  [-]  [yellow]loop guard refused %d[-]", c.Refused))
 	}

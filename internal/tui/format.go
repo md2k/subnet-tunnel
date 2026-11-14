@@ -380,3 +380,27 @@ func cut(s string, n int) string {
 	}
 	return string(r[:n-1]) + "…"
 }
+
+// viaText is where a tunnel's own connection goes: "context remote ·
+// https://192.168.1.20:16443 (192.168.1.20)", "local Docker socket"; "" when
+// not known yet.
+func viaText(t control.Tunnel) string {
+	var parts []string
+	if t.Context != "" {
+		parts = append(parts, "context "+t.Context)
+	}
+	ep := t.Endpoint
+	switch {
+	case strings.HasPrefix(ep, "unix://") || strings.HasPrefix(ep, "npipe://"):
+		ep = "local socket " + strings.TrimPrefix(strings.TrimPrefix(ep, "unix://"), "npipe://")
+	case ep != "" && len(t.EndpointAddrs) > 0 && !strings.Contains(ep, t.EndpointAddrs[0]):
+		ep += " (" + strings.Join(t.EndpointAddrs, ", ") + ")"
+	}
+	if ep != "" {
+		parts = append(parts, ep)
+	}
+	if t.EndpointLocal && ep != "" && !strings.HasPrefix(ep, "local socket") {
+		parts = append(parts, "on this machine")
+	}
+	return strings.Join(parts, " · ")
+}

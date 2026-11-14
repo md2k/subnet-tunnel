@@ -41,6 +41,16 @@ type tunnelInfo struct {
 	nextTry           time.Time
 	lastErr           string
 	routesOn          bool
+	endpoints         []string // the addresses the tunnel's own connection goes to
+	local             bool     // that connection stays on this machine
+}
+
+func prefixAddrs(addrs []netip.Addr) []string {
+	out := make([]string, len(addrs))
+	for i, a := range addrs {
+		out[i] = a.String()
+	}
+	return out
 }
 
 func (t *tunnelInfo) update(f func(*tunnelInfo)) {
@@ -163,7 +173,14 @@ func (es *engineStatus) status() control.Status {
 		info := es.infos[i]
 		info.mu.Lock()
 		t := control.Tunnel{Name: sp.name, Target: info.target, Agent: info.agent, State: info.state.String(),
-			Since: info.since, LastError: info.lastErr, RoutesOn: info.routesOn && c != nil, SOCKS: sp.s.socks}
+			Since: info.since, LastError: info.lastErr, RoutesOn: info.routesOn && c != nil, SOCKS: sp.s.socks,
+			EndpointAddrs: slices.Clone(info.endpoints), EndpointLocal: info.local}
+		if i < len(mp.hosts) {
+			t.Endpoint = mp.hosts[i]
+		}
+		if k := sp.cfg.Target.K8s; k != nil {
+			t.Context = k.Context
+		}
 		if info.state == stateReconnecting || info.state == stateConnecting && info.attempt > 0 {
 			t.Attempt, t.Attempts, t.NextTry = info.attempt, info.attempts, info.nextTry
 		}

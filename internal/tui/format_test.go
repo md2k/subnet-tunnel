@@ -251,3 +251,21 @@ func TestFitColumns(t *testing.T) {
 		t.Errorf("78: TARGET kept before DNS went: %v", got)
 	}
 }
+
+func TestViaText(t *testing.T) {
+	for _, c := range []struct {
+		t    control.Tunnel
+		want string
+	}{
+		{control.Tunnel{}, ""},
+		{control.Tunnel{Context: "remote", Endpoint: "https://192.168.1.20:16443", EndpointAddrs: []string{"192.168.1.20"}},
+			"context remote · https://192.168.1.20:16443"},
+		{control.Tunnel{Endpoint: "https://kubernetes.docker.internal:6443", EndpointAddrs: []string{"127.0.0.1"}, EndpointLocal: true},
+			"https://kubernetes.docker.internal:6443 (127.0.0.1) · on this machine"},
+		{control.Tunnel{Endpoint: "unix:///var/run/docker.sock", EndpointLocal: true}, "local socket /var/run/docker.sock"},
+	} {
+		if got := viaText(c.t); got != c.want {
+			t.Errorf("%+v: %q, want %q", c.t, got, c.want)
+		}
+	}
+}
