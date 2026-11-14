@@ -549,3 +549,25 @@ func TestResize(t *testing.T) {
 	u.sim.PostEvent(tcell.NewEventResize(120, 40))
 	u.wait("TARGET", "pod ops/toolbox")
 }
+
+// A profile with nothing to select on its card (SOCKS only, no DNS) takes
+// arrow keys and goes on answering (tview's Table spun forever on them).
+func TestProfileNothingToSelect(t *testing.T) {
+	f := newFake("full")
+	f.st.Tunnels = append(f.st.Tunnels, control.Tunnel{Name: "socks", State: "up", Since: time.Now(), SOCKS: "127.0.0.1:18081"})
+	u := start(t, f, Options{})
+	u.wait("Profiles (4)")
+	for range 3 {
+		u.key(tcell.KeyDown)
+	}
+	u.key(tcell.KeyEnter)
+	u.wait("subtun › socks", "none: SOCKS only")
+	u.key(tcell.KeyDown)
+	u.key(tcell.KeyUp)
+	u.press("d")
+	u.wait("select a route, exclude, domain or pattern to delete")
+	u.press("c")
+	u.gone("Open connections")
+	u.key(tcell.KeyEscape)
+	u.wait("Profiles (4)")
+}

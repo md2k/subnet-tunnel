@@ -144,7 +144,13 @@ func (a *app) renderProfile(now time.Time) {
 			a.profItems.SetCell(r, c, cell)
 		}
 	}
-	a.profItems.Select(a.selectableRow(row), 0)
+	// tview's Table spins forever on an arrow key when rows are selectable
+	// but none is: select rows only when there is an item to select.
+	hasItem := slices.ContainsFunc(a.cardLines, func(l cardLine) bool { return l.item != nil })
+	a.profItems.SetSelectable(hasItem, false)
+	if hasItem {
+		a.profItems.Select(a.selectableRow(row), 0)
+	}
 
 	w := 120 // before the first draw
 	if a.scrW > 0 {
