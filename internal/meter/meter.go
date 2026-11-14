@@ -6,6 +6,7 @@ package meter
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"slices"
@@ -242,3 +243,18 @@ func (cw countingWriter) Write(p []byte) (int, error) {
 
 // readerOnly hides Conn's WriteTo from io.Copy.
 type readerOnly struct{ io.Reader }
+
+// Bytes is a byte count for people (decimal units): "1.5 MB".
+func Bytes(n uint64) string {
+	const unit = 1000
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	v, suffix := float64(n), []string{"kB", "MB", "GB", "TB"}
+	i := -1
+	for v >= unit && i < len(suffix)-1 {
+		v /= unit
+		i++
+	}
+	return fmt.Sprintf("%.1f %s", v, suffix[i])
+}

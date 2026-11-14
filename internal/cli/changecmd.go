@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/md2k/subnet-tunnel/internal/control"
+	"github.com/md2k/subnet-tunnel/internal/logx"
 )
 
 // changeTimeout bounds one change: a reload looks its target's endpoint up.
@@ -198,5 +199,49 @@ at start. reconnect drops its connection and connects again now.
 		op("start", "Start a stopped or given-up profile again, or add one from the config file", true),
 		op("reconnect", "Drop a profile's connection and connect again now", false),
 	)
+	return cmd
+}
+
+func newLogCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "log",
+		Short: "Show or change a running subtun's log levels",
+	}
+	var o changeOpts
+	level := &cobra.Command{
+		Use:   "level [SPEC]",
+		Short: "Show or change a running subtun's log levels",
+		Long: `Show a running subtun's log levels, or change them while it runs. SPEC is as
+--log-level: a level (debug, info, warn, error), levels per component
+(dns=debug), or both ("info,dns=debug"); it replaces the levels the run has.
+The terminal, subtun logs, the terminal UI and the log file all follow.
+` + changeNote,
+		Example: `  subtun log level                  # show them
+  subtun log level info,dns=debug   # every DNS query, the rest at info
+  subtun log level info             # back`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				in, err := oneInstance(o.pid)
+				if err != nil {
+					return err
+				}
+				ctx, cancel := context.WithTimeout(cmd.Context(), queryTimeout)
+				defer cancel()
+				var st control.Status
+				if err := control.NewClient(in.Path).Get(ctx, "/v1/status", &st); err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), st.LogLevel)
+				return nil
+			}
+			if _, err := logx.ParseSpec(args[0]); err != nil {
+				return err
+			}
+			return sendChange(cmd, o.pid, "/v1/log", control.Change{Op: "set", Level: args[0], DryRun: o.dryRun})
+		},
+	}
+	o.register(level, false)
+	cmd.AddCommand(level)
 	return cmd
 }

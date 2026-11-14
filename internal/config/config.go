@@ -29,6 +29,7 @@ type File struct {
 	// global, never per profile.
 	Control Word `json:"control,omitempty"`
 	Log     Log  `json:"log,omitempty"` // global too
+	TUI     TUI  `json:"tui,omitempty"` // subtun tui
 
 	Defaults Profile            `json:"defaults,omitempty"` // every key except target
 	Profiles map[string]Profile `json:"profiles"`
@@ -82,6 +83,46 @@ func (l Log) Validate() error {
 		}
 	}
 	return nil
+}
+
+// TUI is the terminal UI's settings (subtun tui).
+type TUI struct {
+	// Layout is the dashboard it starts with: table (the profiles above the
+	// logs) or detail (a list, and the selected profile's detail); unset:
+	// the one used last.
+	Layout string `json:"layout,omitempty"`
+	// Units are the rates' units: bytes (MB/s) or bits (Mb/s); unset: the
+	// ones used last.
+	Units string `json:"units,omitempty"`
+	// Mouse: on (clicks, double-click opens, the wheel scrolls) or off (the
+	// terminal selects text); unset: as used last, else on.
+	Mouse Word `json:"mouse,omitempty"`
+}
+
+// Layouts of the terminal UI's dashboard, and its units for rates.
+const (
+	LayoutTable  = "table"
+	LayoutDetail = "detail"
+	UnitsBytes   = "bytes"
+	UnitsBits    = "bits"
+)
+
+// ValidUnits checks the TUI's units (the setting and --units).
+func ValidUnits(v string) error {
+	switch v {
+	case "", UnitsBytes, UnitsBits:
+		return nil
+	}
+	return fmt.Errorf("units %q: use bytes or bits", v)
+}
+
+// ValidLayout checks a TUI layout (the setting and --layout).
+func ValidLayout(v string) error {
+	switch v {
+	case "", LayoutTable, LayoutDetail:
+		return nil
+	}
+	return fmt.Errorf("layout %q: use table or detail", v)
 }
 
 // ValidControl checks a control mode (the setting and --control).
@@ -312,6 +353,15 @@ func Parse(data []byte, name string) (*File, error) {
 	}
 	if err := f.Log.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	if err := ValidLayout(f.TUI.Layout); err != nil {
+		return nil, fmt.Errorf("%s: tui.%w", name, err)
+	}
+	if err := ValidUnits(f.TUI.Units); err != nil {
+		return nil, fmt.Errorf("%s: tui.%w", name, err)
+	}
+	if m := f.TUI.Mouse; m != "" && m != "on" && m != "off" {
+		return nil, fmt.Errorf("%s: tui.mouse %q: use on or off", name, m)
 	}
 	if f.Defaults.Target.K8s != nil || f.Defaults.Target.Docker != nil {
 		return nil, fmt.Errorf("%s: defaults: target can only be set in a profile", name)

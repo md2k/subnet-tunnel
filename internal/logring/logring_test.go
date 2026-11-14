@@ -30,6 +30,10 @@ func TestCaps(t *testing.T) {
 	if got := r.Lines(); len(got) != 1 || len(got[0].Text) != 50 {
 		t.Fatalf("one long line: %v", got)
 	}
+	// Lines are numbered in the order added, also past the caps.
+	if got := r.Lines()[0].Seq; got != 4 {
+		t.Fatalf("seq %d", got)
+	}
 }
 
 // A follower gets new lines; one that doesn't read loses lines and the
@@ -72,10 +76,32 @@ func TestHandlerAndTee(t *testing.T) {
 	log.Debug("hidden")
 	lines := r.Lines()
 	if len(lines) != 1 || !strings.Contains(lines[0].Text, `msg="tunnel up" tunnel=work took=1s`) || strings.HasSuffix(lines[0].Text, "\n") {
-		t.Fatalf("ring: %q", lines)
+		t.Fatalf("ring: %+v", lines)
 	}
 	if !strings.Contains(term.String(), `msg="tunnel up" tunnel=work`) || strings.Contains(term.String(), "hidden") {
 		t.Fatalf("terminal: %q", term.String())
+	}
+	if l := lines[0]; l.Level != "INFO" || l.Tunnel != "work" {
+		t.Fatalf("level %q, tunnel %q", l.Level, l.Tunnel)
+	}
+}
+
+// Each line carries its record's level and profile: from With, from the
+// record, none, never from a group.
+func TestLineMeta(t *testing.T) {
+	r := New(0, 0)
+	base := slog.New(r.Handler(&slog.HandlerOptions{Level: slog.LevelDebug}))
+	base.Warn("no profile")
+	base.With("tunnel", "dev").Debug("from With")
+	base.Error("from the record", "tunnel", "vault")
+	base.WithGroup("g").Info("grouped", "tunnel", "nope")
+	base.With("component", "helper").Info("from the helper")
+	var got []string
+	for _, l := range r.Lines() {
+		got = append(got, l.Level+"/"+l.Tunnel+"/"+l.Component)
+	}
+	if want := "WARN//,DEBUG/dev/,ERROR/vault/,INFO//,INFO//helper"; strings.Join(got, ",") != want {
+		t.Fatalf("got %v, want %s", got, want)
 	}
 }
 

@@ -2,8 +2,9 @@
 // process in the private run directory, user-only (the peer's uid is
 // checked too), JSON over HTTP under /v1/. `subtun status` and `subtun
 // logs` read it; with control: full, `subtun route`, `subtun dns` and
-// `subtun profile` change the run through it; later a terminal or web UI
-// too. It lives in the user process, never in the root helper.
+// `subtun profile` change the run through it, and `subtun tui` does both;
+// later a web UI too. It lives in the user process, never in the root
+// helper.
 package control
 
 import (
@@ -43,28 +44,47 @@ type Status struct {
 	DNS        *DNS        `json:"dns,omitempty"`
 	KillSwitch *KillSwitch `json:"killSwitch,omitempty"`
 	BlockIPv6  bool        `json:"blockIPv6,omitempty"`
+	LogLevel   string      `json:"logLevel,omitempty"` // as --log-level: "info,dns=debug"
 }
 
 // Tunnel is one profile's tunnel.
 type Tunnel struct {
-	Name       string       `json:"name"` // empty: one profile from the command line
-	Target     string       `json:"target,omitempty"`
-	Agent      string       `json:"agent,omitempty"`
-	State      string       `json:"state"` // connecting, up, reconnecting, gave up, stopped
-	Since      time.Time    `json:"since"`
-	Attempt    int          `json:"attempt,omitempty"` // while reconnecting
-	Attempts   int          `json:"attempts,omitempty"`
-	NextTry    time.Time    `json:"nextTry,omitzero"`
-	LastError  string       `json:"lastError,omitempty"`
-	Routes     []string     `json:"routes,omitempty"`
-	RoutesOn   bool         `json:"routesOn"` // on the utun now
-	Domains    []string     `json:"domains,omitempty"`
-	Patterns   int          `json:"patterns,omitempty"`
-	SOCKS      string       `json:"socks,omitempty"`
-	KillSwitch string       `json:"killSwitch,omitempty"`
-	Changes    []string     `json:"runtimeChanges,omitempty"` // made through the control socket, until the run ends
-	Counts     meter.Counts `json:"counts"`
-	DNSCounts  DNSCounts    `json:"dnsCounts"`
+	Name      string    `json:"name"` // empty: one profile from the command line
+	Target    string    `json:"target,omitempty"`
+	Agent     string    `json:"agent,omitempty"`
+	State     string    `json:"state"` // connecting, up, reconnecting, gave up, stopped
+	Since     time.Time `json:"since"`
+	Attempt   int       `json:"attempt,omitempty"` // while reconnecting
+	Attempts  int       `json:"attempts,omitempty"`
+	NextTry   time.Time `json:"nextTry,omitzero"`
+	LastError string    `json:"lastError,omitempty"`
+	// Where the tunnel's own connection goes: the endpoint as configured
+	// (the API server's URL, the Docker host), its addresses, whether it
+	// stays on this machine, the kube context (if the profile names one).
+	Endpoint      string   `json:"endpoint,omitempty"`
+	EndpointAddrs []string `json:"endpointAddrs,omitempty"`
+	EndpointLocal bool     `json:"endpointLocal,omitempty"`
+	Context       string   `json:"context,omitempty"`
+	// Include and Exclude are the routes and excludes the profile asks for
+	// (configured, plus changes while running); Routes are what it carries:
+	// excludes, other profiles' more specific routes and the API servers
+	// taken out.
+	Include  []string `json:"include,omitempty"`
+	Exclude  []string `json:"exclude,omitempty"`
+	Routes   []string `json:"routes,omitempty"`
+	RoutesOn bool     `json:"routesOn"` // on the utun now
+	// RouteNotes say, by route asked for, what of it the profile doesn't
+	// carry: parts other profiles carry, subtun's own endpoints.
+	RouteNotes map[string]string    `json:"routeNotes,omitempty"`
+	Domains    []string             `json:"domains,omitempty"`
+	Patterns   []string             `json:"patterns,omitempty"`
+	Unrouted   string               `json:"dnsUnrouted,omitempty"` // answers outside the routes: warn, fallback, block
+	SOCKS      string               `json:"socks,omitempty"`
+	KillSwitch string               `json:"killSwitch,omitempty"`
+	Changes    []string             `json:"runtimeChanges,omitempty"` // made through the control socket, until the run ends
+	ChangedAt  map[string]time.Time `json:"changedAt,omitempty"`      // when each of Changes was made
+	Counts     meter.Counts         `json:"counts"`
+	DNSCounts  DNSCounts            `json:"dnsCounts"`
 }
 
 // DNSCounts are the names a tunnel (or the fallback) answered.
@@ -106,11 +126,40 @@ type TunnelConns struct {
 	Conns []meter.ConnInfo `json:"conns"`
 }
 
+// TunnelSamples are one tunnel's traffic, a sample a second (the last 5
+// minutes).
+type TunnelSamples struct {
+	Name    string         `json:"name"`
+	Samples []meter.Sample `json:"samples"`
+}
+
+// ConfigProfiles are the profiles of the config file the run reads, read
+// when asked: what `subtun profile start NAME` would add.
+type ConfigProfiles struct {
+	Path     string          `json:"path"`
+	Error    string          `json:"error,omitempty"` // the file can't be read
+	Profiles []ConfigProfile `json:"profiles"`
+}
+
+// ConfigProfile is one profile of the config file, defaults applied.
+type ConfigProfile struct {
+	Name       string   `json:"name"`
+	Target     string   `json:"target"`
+	Routes     []string `json:"routes,omitempty"`
+	Exclude    []string `json:"exclude,omitempty"`
+	Domains    []string `json:"domains,omitempty"`
+	Patterns   []string `json:"patterns,omitempty"`
+	SOCKS      string   `json:"socks,omitempty"`
+	KillSwitch string   `json:"killSwitch,omitempty"`
+	InRun      bool     `json:"inRun"` // part of this run already
+}
+
 // Change kinds: what the change is to (one endpoint each).
 const (
 	KindRoute   = "route"   // POST /v1/routes: Op add or del, CIDRs, Exclude
 	KindDNS     = "dns"     // POST /v1/dns: Op add or del, Domains, Patterns
 	KindProfile = "profile" // POST /v1/profiles: Op stop, start (Reload) or reconnect
+	KindLog     = "log"     // POST /v1/log: Op set, Level (as --log-level)
 )
 
 // Change is a change to a running subtun (control: full). It lasts until
@@ -124,6 +173,7 @@ type Change struct {
 	Domains  []string `json:"domains,omitempty"`
 	Patterns []string `json:"patterns,omitempty"`
 	Reload   bool     `json:"reload,omitempty"` // start: re-read the profile from the config file
+	Level    string   `json:"level,omitempty"`  // log: the levels, as --log-level ("info,dns=debug")
 	DryRun   bool     `json:"dryRun,omitempty"` // only say what would change
 }
 
@@ -146,8 +196,11 @@ const maxBody = 1 << 20
 
 // Server answers the API.
 type Server struct {
-	Status func() Status
-	Conns  func() []TunnelConns
+	Status  func() Status
+	Conns   func() []TunnelConns
+	Samples func() []TunnelSamples
+	// Config reads the run's config file; nil: answered with no profiles.
+	Config func() ConfigProfiles
 	Logs   *logring.Ring
 	// Change applies a change; nil: the run is read only (control: status).
 	Change func(context.Context, Change) (Result, error)
@@ -159,10 +212,25 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.Status()) })
 	mux.HandleFunc("GET /v1/connections", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.Conns()) })
+	mux.HandleFunc("GET /v1/samples", func(w http.ResponseWriter, _ *http.Request) {
+		out := []TunnelSamples{}
+		if s.Samples != nil {
+			out = s.Samples()
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
+	mux.HandleFunc("GET /v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		cp := ConfigProfiles{Profiles: []ConfigProfile{}}
+		if s.Config != nil {
+			cp = s.Config()
+		}
+		writeJSON(w, http.StatusOK, cp)
+	})
 	mux.HandleFunc("GET /v1/logs", s.logs)
 	mux.HandleFunc("POST /v1/routes", s.change(KindRoute))
 	mux.HandleFunc("POST /v1/dns", s.change(KindDNS))
 	mux.HandleFunc("POST /v1/profiles", s.change(KindProfile))
+	mux.HandleFunc("POST /v1/log", s.change(KindLog))
 	return mux
 }
 

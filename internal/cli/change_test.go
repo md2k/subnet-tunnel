@@ -425,6 +425,9 @@ func TestEngineChanges(t *testing.T) {
 	if err != nil || !res.Changed || res.Profile != "dev" || !slices.Contains(res.Warnings, "the capture hasn't started yet (connecting, or sudo is asking): it starts with this") {
 		t.Fatalf("route add: %+v %v", res, err)
 	}
+	if got := es.status().Tunnels[1]; got.ChangedAt["+route 10.70.0.0/16"].IsZero() {
+		t.Errorf("no time for the change: %v", got.ChangedAt)
+	}
 	if got := es.status().Tunnels[1]; !slices.Contains(got.Routes, "10.70.0.0/16") || !slices.Equal(got.Changes, []string{"+route 10.70.0.0/16"}) {
 		t.Errorf("status after route add: %v %v", got.Routes, got.Changes)
 	}

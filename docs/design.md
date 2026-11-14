@@ -576,11 +576,14 @@ shaped as a list of tunnels: one in a single-profile run, several with `--profil
   `LOCAL_PEERCRED`). `subtun status` finds every running subtun by its socket and removes sockets
   whose process is gone.
 - JSON over HTTP on that socket, under `/v1/`, so `curl --unix-socket` works too: `/v1/status`,
-  `/v1/connections`, and `/v1/logs` (newline-delimited JSON; with `?follow=1` new lines keep
-  coming); with `control: full` also `POST /v1/routes`, `/v1/dns` and `/v1/profiles` (a JSON change:
-  `op`, `profile`, `cidrs` and `exclude`, `domains` and `patterns`, `reload`, `dryRun`), answered
+  `/v1/connections`, `/v1/samples` (each tunnel's 1 s traffic samples, the last 5 minutes),
+  `/v1/config` (the profiles of the run's config file, read when asked, and which are in the
+  run), and `/v1/logs` (newline-delimited JSON, each line with its level and profile; with
+  `?follow=1` new lines keep coming); with `control: full` also `POST /v1/routes`, `/v1/dns`,
+  `/v1/profiles` and `/v1/log` (a JSON change: `op`, `profile`, `cidrs` and `exclude`, `domains` and
+  `patterns`, `reload`, `level`, `dryRun`), answered
   with what changed, or refused with the reason (403 when read only). A general event stream (state changes and counters as they happen) and a WebSocket
-  come with the terminal and web UIs; `subtun status --watch` polls once a second meanwhile.
+  come with the web UI; `subtun status --watch` and the terminal UI poll once a second meanwhile.
 - Later, for a browser UI: an optional localhost TCP listener with a random token (Jupyter style).
 
 **What it reports:**
@@ -613,7 +616,7 @@ shaped as a list of tunnels: one in a single-profile run, several with `--profil
 
 ```
 subtun status [--json] [--pid N]       # every running subtun, or one
-subtun status --watch                  # refreshed every second (a terminal UI comes later)
+subtun status --watch                  # refreshed every second (or subtun tui)
 subtun status --connections            # with the open connections
 subtun logs [-f] [--pid N]             # the ring buffer, then follow
 ```
@@ -683,7 +686,7 @@ built once. They keep their behaviour:
 - `dns.unrouted: tunnel` and `auto`;
 - routes that follow network changes (the automatic local excludes recomputed);
 - reconnecting to a recreated pod by label or owner;
-- a terminal UI and an embedded web UI;
+- an embedded web UI (the terminal UI is built: below);
 - saving runtime changes back to the config file.
 
 **Order:**
@@ -698,6 +701,39 @@ built once. They keep their behaviour:
    kill switch a capture with a guard; DNS names are ignored without the run's DNS capture and
    refused for servers it doesn't capture; `killSwitch.dns` and a full tunnel's IPv6 block only warn
    once the capture runs. Not for runs whose tunnel has no profile name (`subtun k8s`, `docker`).
+
+## Terminal UI
+
+`subtun tui` is a client of the control socket, like `subtun status`: it attaches to a running
+subtun from another terminal, and quitting it leaves subtun running. It shows everything status
+does, the log lines, a sparkline per profile from `/v1/samples`, and with `control: full` makes the
+same changes as `subtun route|dns|profile`, each after its dry run. It polls the status once a
+second and follows `/v1/logs`.
+
+- **Library:** tview on tcell (both permissive; k9s uses them). Its dialogs open over the screen
+  they belong to (a widget tree with pages), where Bubble Tea, the other candidate, replaces the
+  whole view on each screen change.
+- **Layouts:** the profiles as a table above the logs, or a list with the selected profile's
+  detail next to it (k9s style), switched with `v`; `tui.layout` / `--layout` sets the one to start
+  with, otherwise the one used last (remembered in the state directory).
+- **Screens:** the dashboard, a profile screen (what the profile asks for, with the changes made
+  while running marked; what it carries; its traffic and connections), full-screen logs with filters
+  by profile, level and text, and the key list.
+- **Read only:** a run with `control: status` shows everything and greys the change keys out.
+- **Size:** fitted to the terminal before every draw that follows a resize: the table's columns
+  shrink, then the least needed go; an open dialog shrinks with the screen.
+- **Updates:** only the UI goroutine touches the widgets and state; the poller, the log stream and
+  the change requests hand their results to one pump goroutine, the only caller of tview's
+  `QueueUpdate` (which waits for the event loop) and the one that stops the loop, so quitting never
+  leaves a goroutine waiting. Log lines carry a sequence number, so a reconnected stream's repeats
+  are dropped.
+- **Tests:** tcell's simulation screen and a fake control socket: the screens are drawn and keys
+  sent as a terminal would, and the changes made are checked.
+
+**Next:** `subtun up ... --tui` runs subtun with the TUI in the same terminal (the same TUI over an
+in-process socket; it steps aside while sudo asks for the root helper; quitting stops subtun after
+a confirm). A daemon (subtun in the background, its log in the log file, attached to with `subtun
+tui`) is deferred: started in the foreground for sudo, then detached.
 
 ## Decisions
 

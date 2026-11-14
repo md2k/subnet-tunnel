@@ -83,9 +83,10 @@ func mergeLog(flags *pflag.FlagSet, l *config.Log, f config.Log) error {
 // runLog is a run's logging: the terminal, the ring buffer behind subtun
 // logs, and the log file.
 type runLog struct {
-	log  *slog.Logger
-	ring *logring.Ring
-	file *logx.File // nil: no file
+	log    *slog.Logger
+	ring   *logring.Ring
+	file   *logx.File   // nil: no file
+	levels *logx.Levels // changed while running by subtun log level
 }
 
 func (r *runLog) close() {
@@ -107,8 +108,9 @@ func newRunLog(verbose bool, lc config.Log, domains func() []string, stderr io.W
 		spec = logx.Spec{Default: slog.LevelDebug}
 	}
 	mask := logx.NewMasker(slices.Contains(lc.Mask, "dns"), slices.Contains(lc.Mask, "destinations"), domains)
+	levels := logx.NewLevels(spec)
 	// The terminal and the ring: text, short times, no component.
-	termOpts := &slog.HandlerOptions{Level: spec.Min(), ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+	termOpts := &slog.HandlerOptions{Level: levels.Min(), ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 		if len(groups) == 0 {
 			switch a.Key {
 			case slog.TimeKey:
@@ -119,7 +121,7 @@ func newRunLog(verbose bool, lc config.Log, domains func() []string, stderr io.W
 		}
 		return mask.Replace(groups, a)
 	}}
-	r := &runLog{ring: logring.New(0, 0)}
+	r := &runLog{ring: logring.New(0, 0), levels: levels}
 	handlers := []slog.Handler{slog.NewTextHandler(stderr, termOpts), r.ring.Handler(termOpts)}
 	var warn string
 	if lc.File != "off" {
@@ -127,7 +129,7 @@ func newRunLog(verbose bool, lc config.Log, domains func() []string, stderr io.W
 			warn = fmt.Sprintf("no log file: %v", err)
 		} else {
 			r.file = f
-			fileOpts := &slog.HandlerOptions{Level: spec.Min(), ReplaceAttr: mask.Replace}
+			fileOpts := &slog.HandlerOptions{Level: levels.Min(), ReplaceAttr: mask.Replace}
 			if lc.Format == "text" {
 				handlers = append(handlers, slog.NewTextHandler(f, fileOpts))
 			} else {
@@ -135,7 +137,7 @@ func newRunLog(verbose bool, lc config.Log, domains func() []string, stderr io.W
 			}
 		}
 	}
-	r.log = slog.New(logx.Filter(logring.Tee(handlers...), spec))
+	r.log = slog.New(logx.FilterLevels(logring.Tee(handlers...), levels))
 	return r, warn
 }
 

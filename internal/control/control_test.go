@@ -211,3 +211,32 @@ func TestChange(t *testing.T) {
 		t.Error("GET on a change endpoint worked")
 	}
 }
+
+// Samples as the Samples function gives them (none without one); the
+// config profiles as the Config function reads them (none without one).
+func TestSamplesAndConfig(t *testing.T) {
+	srv := testServer()
+	c := &Client{hc: &http.Client{Transport: handlerTransport{srv.Handler()}}}
+	var ts []TunnelSamples
+	if err := c.Get(context.Background(), "/v1/samples", &ts); err != nil || ts == nil || len(ts) != 0 {
+		t.Fatalf("no samples func: %v %v", ts, err)
+	}
+	t0 := time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC)
+	srv.Samples = func() []TunnelSamples {
+		return []TunnelSamples{{Name: "work", Samples: []meter.Sample{{Time: t0, Up: 1}, {Time: t0.Add(time.Second), Up: 2}}}}
+	}
+	if err := c.Get(context.Background(), "/v1/samples", &ts); err != nil || len(ts) != 1 || len(ts[0].Samples) != 2 || ts[0].Samples[1].Up != 2 {
+		t.Fatalf("samples: %+v %v", ts, err)
+	}
+
+	var cp ConfigProfiles
+	if err := c.Get(context.Background(), "/v1/config", &cp); err != nil || cp.Profiles == nil || len(cp.Profiles) != 0 {
+		t.Fatalf("no config func: %+v %v", cp, err)
+	}
+	srv.Config = func() ConfigProfiles {
+		return ConfigProfiles{Path: "/c.yaml", Profiles: []ConfigProfile{{Name: "dev", Target: "pod dev/box", InRun: true}}}
+	}
+	if err := c.Get(context.Background(), "/v1/config", &cp); err != nil || cp.Path != "/c.yaml" || len(cp.Profiles) != 1 || !cp.Profiles[0].InRun {
+		t.Fatalf("config: %+v %v", cp, err)
+	}
+}

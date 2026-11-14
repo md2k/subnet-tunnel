@@ -8,7 +8,8 @@ with `subtun up NAME`.
 Location: `--config FILE`, else `$SUBTUN_CONFIG`, else `$XDG_CONFIG_HOME/subtun/config.yaml`, else
 `~/.config/subtun/config.yaml`. Parsing is strict: an unknown key is an error, so a typo can't
 silently drop a setting. Besides `defaults:` and `profiles:`, the top level takes `control:` (see
-[Status and logs](#status-and-logs)) and `log:` (see [Log files](#log-files)).
+[Status and logs](#status-and-logs)), `log:` (see [Log files](#log-files)) and `tui:` (see
+[Terminal UI](#terminal-ui)).
 
 ```yaml
 defaults:                          # optional: any profile key except target, for every profile
@@ -79,9 +80,11 @@ the words you meant (`mode: off`, `capture: off` work).
 | `subtun up --profile A,B` | run several profiles at once ([below](#several-profiles-at-once)) |
 | `subtun status` | what every running subtun is doing ([below](#status-and-logs)) |
 | `subtun logs [-f]` | a running subtun's recent log lines |
+| `subtun tui` | watch and change a running subtun in a terminal UI ([below](#terminal-ui)) |
 | `subtun route add\|del CIDR...` | change a running subtun's routes ([below](#changes-while-running)) |
 | `subtun dns add\|del DOMAIN...` | change a running subtun's DNS names |
 | `subtun profile stop\|start\|reconnect [NAME]` | stop, start or reconnect one of its profiles |
+| `subtun log level [SPEC]` | show or change a running subtun's log levels |
 | `subtun cleanup` | remove firewall rules an earlier session left (a kill switch's blocks), without starting one |
 | `subtun import sshuttle FILE` | turn an sshuttle options file into a profile ([below](#importing-from-sshuttle)) |
 | `subtun version` | print the version |
@@ -580,6 +583,7 @@ subtun profile stop dev                                 # as Ctrl-C, for dev onl
 subtun profile start dev                                # connect it again
 subtun profile start dev --reload                       # ... reading it from the config file again
 subtun profile reconnect work                           # drop its connection and connect again now
+subtun log level info,dns=debug                         # log every DNS query from now on (subtun log level: show)
 subtun profile start vault                              # add a profile of the config file to the run
 subtun route add --profile dev 10.80.0.0/16 --dry-run   # only show what would change
 ```
@@ -623,6 +627,8 @@ subtun route add --profile dev 10.80.0.0/16 --dry-run   # only show what would c
   added profiles.
 - **`profile reconnect`** drops the profile's connection and connects again at once, then by its
   reconnect settings; its routes stay meanwhile, as when a connection is lost.
+- **`log level SPEC`** replaces the run's log levels (as `--log-level`: `info,dns=debug`); the
+  terminal, `subtun logs`, the terminal UI and the log file all follow, until subtun stops.
 - **Limits for now.** Routes can be added to a profile that started with routes (not to a
   SOCKS-only one), and a profile keeps at least one route (stop it instead). DNS names can be added
   when the run captures DNS already (a profile had DNS names when it started), and only for a
@@ -633,6 +639,64 @@ With `control: full` the root helper stays up for the whole run, also for one pr
 only (otherwise it exits after setup), so routes can change without a sudo prompt: any program
 running as your user can then change subtun's routes. The routes can only point into subtun's utun,
 and the helper checks each one.
+
+## Terminal UI
+
+`subtun tui` attaches to a running subtun through its control socket (`--pid N` when several run)
+and shows it in the terminal. `q` quits the TUI; subtun goes on.
+
+```sh
+subtun up --profile work,dev --control full    # in one terminal
+subtun tui                                     # in another
+subtun tui --layout detail
+```
+
+- **Dashboard:** every profile with its state, target, routes, DNS names, kill switch, the rate each
+  way and a gauge of its traffic now (against the scale of its last 5 minutes); below, the log lines
+  of every profile (a line no profile logged names its source, such as `helper`). Two layouts,
+  switched with `v`: `table` (the profiles above the logs) and `detail` (a list, and the selected
+  profile's detail with its traffic graph next to it). The dashboard's logs are every profile's;
+  the profile screen has its own.
+- **Profile screen** (`enter`): its name, state, target, agent and kill switch in the header; then
+  panes, each shown or hidden with `1` to `4` and remembered:
+  - `2` traffic: where its own connection goes (the kube context, the API server or Docker host and
+    its addresses), its counts, and next to them its traffic graph of the last 5 minutes (upload
+    above a zero line, download below, each against its own round scale, coloured by height);
+  - `1` config: what it asks for, on two tabs (`t`): its routes and excludes (each marked
+    configured, or added or removed while running with the time, with what of it another profile
+    carries or subtun's own endpoint taken out), or its DNS names (with the unrouted-answers mode);
+    the tab's keys are on its first line;
+  - `3` its open connections, next to the config;
+  - `4` its log lines (`L`: full screen).
+- **Units:** `u` switches the rates between bytes and bits a second (`MB/s`, `Mb/s`).
+- **Mouse:** a click selects, a double-click opens a profile, the wheel scrolls (scrolling the logs
+  back pauses them). `m` turns it off, for the terminal to select text again (most terminals also
+  select with shift or option held).
+- **Dialogs:** tab or the arrow keys move between the fields and buttons; the focused button is
+  highlighted.
+- **Logs** (`l`, or `/` to search them): full screen, filtered by profile (`p`), by level (`d`,
+  `i`, `w`, `e` show or hide debug, info, warn and error lines; also in the other log views while
+  focused) and text (`/`: the time, profile, level and message); `f` follows or pauses. They are
+  the lines `subtun logs` shows; the TUI saves nothing. `V` changes what subtun itself logs (its
+  default level and each component's, as `subtun log level`).
+- **Changes** (a run with `control: full`): `s` stop (the confirm says what the profile's kill switch
+  then does), `S` start, `r` reconnect, and on the profile screen `R` reload from the config file,
+  `a` add (a route, or on the DNS tab DNS names), `x` an exclude, `A` DNS names, `d` delete the
+  selected one; on the dashboard `a` adds a profile of the config file (those that can't join say
+  why); `V` the log levels. Each dialog shows the change's dry run first, as `--dry-run` does; the
+  changes are those of [Changes while running](#changes-while-running), and last until subtun
+  stops. A run with `control: status` shows everything and greys the change keys out.
+- `?` lists the keys. The TUI follows the terminal's size: in a narrow one the table drops its
+  target, DNS, sparkline and kill-switch columns, in that order, and dialogs shrink to fit.
+
+| Setting | Flag | Values |
+|---|---|---|
+| `tui.layout` (top level of the config file) | `--layout` | `table` or `detail`; unset: the layout used last (kept in `~/.local/state/subtun/tui.json`), else `table` |
+| `tui.units` | `--units` | `bytes` or `bits`; unset: the units used last, else `bytes` |
+| `tui.mouse` | `--mouse` | `on` or `off`; unset: as used last, else `on` |
+
+`tui` is read by `subtun tui` only, never per profile. `tui.json` also keeps how the TUI was left:
+the profile screen's hidden panes and config tab, and the log levels the views hide.
 
 ## Importing from sshuttle
 

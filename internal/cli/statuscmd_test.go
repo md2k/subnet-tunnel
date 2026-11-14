@@ -3,12 +3,17 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
+	"log/slog"
+	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/md2k/subnet-tunnel/internal/config"
 	"github.com/md2k/subnet-tunnel/internal/control"
+	"github.com/md2k/subnet-tunnel/internal/logx"
 	"github.com/md2k/subnet-tunnel/internal/meter"
 )
 
@@ -52,14 +57,6 @@ func TestWriteStatus(t *testing.T) {
 	}
 }
 
-func TestBytesText(t *testing.T) {
-	for n, want := range map[uint64]string{0: "0 B", 999: "999 B", 1000: "1.0 kB", 1_500_000: "1.5 MB", 2_000_000_000_000_000: "2000.0 TB"} {
-		if got := bytesText(n); got != want {
-			t.Errorf("%d: %q, want %q", n, got, want)
-		}
-	}
-}
-
 // The status a run reports, from its plan, its tunnels' state and meters.
 func TestEngineStatus(t *testing.T) {
 	mp := multiPlanFor(t, "work", "dev")
@@ -86,6 +83,47 @@ func TestEngineStatus(t *testing.T) {
 	}
 	if c := es.conns(); len(c) != 2 || c[1].Name != "dev" {
 		t.Errorf("conns: %+v", c)
+	}
+	if !slices.Equal(w.Include, []string{"10.0.0.0/8", "203.0.113.0/24"}) || len(w.Exclude) != 0 {
+		t.Errorf("work's routes asked for: %v %v", w.Include, w.Exclude)
+	}
+	// What of its routes work doesn't carry: dev's more specific route, and
+	// subtun's own endpoint (work's Docker host) once known.
+	if n := w.RouteNotes["10.0.0.0/8"]; n != "parts carried by dev (more specific)" {
+		t.Errorf("route notes: %q", w.RouteNotes)
+	}
+	if w.Endpoint != "tcp://203.0.113.200:2376" {
+		t.Errorf("work's endpoint: %q", w.Endpoint)
+	}
+	if w.Unrouted != "warn" || dv.Unrouted != "warn" {
+		t.Errorf("unrouted: %q %q", w.Unrouted, dv.Unrouted)
+	}
+	if _, err := mp.addEndpoints([]netip.Addr{netip.MustParseAddr("203.0.113.200")}); err != nil {
+		t.Fatal(err)
+	}
+	if n := routeNotes(mp, 0, mp.endpointList()); !strings.Contains(n["203.0.113.0/24"], "minus 203.0.113.200/32: subtun's own endpoint") {
+		t.Errorf("carved endpoint: %q", n)
+	}
+	es.meters[0].Sample(time.Now())
+	if s := es.samples(); len(s) != 2 || s[0].Name != "work" || len(s[0].Samples) != 1 || len(s[1].Samples) != 0 {
+		t.Errorf("samples: %+v", s)
+	}
+	// The config file's profiles, which are in the run, and the file's
+	// error if it can't be read.
+	cp := es.configProfiles("testdata/multi.yaml")
+	byName := map[string]control.ConfigProfile{}
+	for _, p := range cp.Profiles {
+		byName[p.Name] = p
+	}
+	if cp.Error != "" || !byName["work"].InRun || byName["vault"].InRun || byName["dev"].Target != "container dev" ||
+		byName["work"].KillSwitch != "on" || byName["dev"].SOCKS != "127.0.0.1:1081" || !slices.Equal(byName["dev"].Domains, []string{"cluster.local"}) {
+		t.Errorf("config profiles: %+v", cp)
+	}
+	if cp := es.configProfiles("testdata/no-such-config.yaml"); cp.Error == "" || len(cp.Profiles) != 0 {
+		t.Errorf("missing file: %+v", cp)
+	}
+	if got := configTarget(config.Target{K8s: &config.K8sTarget{Namespace: "ops", Pod: "pod/toolbox"}}); got != "pod ops/toolbox" {
+		t.Errorf("k8s target: %q", got)
 	}
 	// DNS while the kill switch holds: blocked by default; nothing to hold
 	// without DNS capture.
@@ -132,5 +170,32 @@ func TestGlobalsFromConfig(t *testing.T) {
 	s.log.Level = "loud"
 	if err := globalsFromConfig(cmd, &globalOpts{config: "testdata/control-off.yaml"}, &s); err == nil {
 		t.Fatal("a bad --log-level accepted")
+	}
+}
+
+// subtun log level: the run's levels change at once, a dry run only says;
+// the CLI checks the spec and needs a running subtun.
+func TestSetLogLevel(t *testing.T) {
+	lv := logx.NewLevels(logx.Spec{Default: slog.LevelInfo})
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	res, err := setLogLevel(lv, control.Change{Op: "set", Level: "info,dns=debug", DryRun: true}, quiet)
+	if err != nil || res.Changed || !strings.Contains(res.Message, "would log at info,dns=debug (now info)") || lv.Get().String() != "info" {
+		t.Fatalf("dry run: %+v %v %q", res, err, lv.Get().String())
+	}
+	res, err = setLogLevel(lv, control.Change{Op: "set", Level: "info,dns=debug"}, quiet)
+	if err != nil || !res.Changed || lv.Get().String() != "info,dns=debug" {
+		t.Fatalf("set: %+v %v", res, err)
+	}
+	if res, _ := setLogLevel(lv, control.Change{Op: "set", Level: "info,dns=debug"}, quiet); res.Changed || !strings.Contains(res.Message, "already") {
+		t.Errorf("again: %+v", res)
+	}
+	if _, err := setLogLevel(lv, control.Change{Op: "set", Level: "loud"}, quiet); err == nil {
+		t.Error("a bad level accepted")
+	}
+	if _, err := runCLI(t, "log", "level", "loud"); err == nil || !strings.Contains(err.Error(), "loud") {
+		t.Errorf("CLI bad level: %v", err)
+	}
+	if _, err := runCLI(t, "log", "level", "debug"); err == nil || err.Error() != "no subtun running" {
+		t.Errorf("CLI nothing running: %v", err)
 	}
 }

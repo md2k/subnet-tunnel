@@ -13,6 +13,7 @@ import (
 
 	"github.com/md2k/subnet-tunnel/internal/control"
 	"github.com/md2k/subnet-tunnel/internal/logring"
+	"github.com/md2k/subnet-tunnel/internal/meter"
 )
 
 // queryTimeout bounds one question to a running subtun.
@@ -198,10 +199,10 @@ func writeStatus(w io.Writer, is instanceStatus, now time.Time) {
 			}
 			what = append(what, fmt.Sprintf("routes %s (%s)", summary(t.Routes, 4), on))
 		}
-		if len(t.Domains) > 0 || t.Patterns > 0 {
+		if len(t.Domains) > 0 || len(t.Patterns) > 0 {
 			names := t.Domains
-			if t.Patterns > 0 {
-				names = append(append([]string{}, names...), fmt.Sprintf("%d pattern(s)", t.Patterns))
+			if len(t.Patterns) > 0 {
+				names = append(append([]string{}, names...), fmt.Sprintf("%d pattern(s)", len(t.Patterns)))
 			}
 			what = append(what, "DNS "+strings.Join(names, ", "))
 		}
@@ -225,7 +226,7 @@ func writeStatus(w io.Writer, is instanceStatus, now time.Time) {
 		if c.Refused > 0 {
 			fmt.Fprintf(w, "; loop guard refused %d", c.Refused)
 		}
-		fmt.Fprintf(w, "\n%sup %s (%s/s), down %s (%s/s)", pad, bytesText(c.Up), bytesText(c.UpRate), bytesText(c.Down), bytesText(c.DownRate))
+		fmt.Fprintf(w, "\n%sup %s (%s/s), down %s (%s/s)", pad, meter.Bytes(c.Up), meter.Bytes(c.UpRate), meter.Bytes(c.Down), meter.Bytes(c.DownRate))
 		if d := t.DNSCounts; d.Answered+d.Failed > 0 {
 			fmt.Fprintf(w, "; DNS %d answered, %d failed", d.Answered, d.Failed)
 		}
@@ -271,7 +272,7 @@ func writeStatus(w io.Writer, is instanceStatus, now time.Time) {
 		}
 		fmt.Fprintf(w, "  open connections through %s:\n", label)
 		for _, c := range tc.Conns {
-			fmt.Fprintf(w, "    %-28s %-5s %8s  up %s, down %s\n", c.Dst, c.Via, ago(now, c.Opened), bytesText(c.Up), bytesText(c.Down))
+			fmt.Fprintf(w, "    %-28s %-5s %8s  up %s, down %s\n", c.Dst, c.Via, ago(now, c.Opened), meter.Bytes(c.Up), meter.Bytes(c.Down))
 		}
 	}
 }
@@ -311,19 +312,4 @@ func summary(items []string, n int) string {
 		return strings.Join(items, ", ")
 	}
 	return fmt.Sprintf("%s and %d more", strings.Join(items[:n], ", "), len(items)-n)
-}
-
-// bytesText is a byte count for people (decimal units).
-func bytesText(n uint64) string {
-	const unit = 1000
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	v, suffix := float64(n), []string{"kB", "MB", "GB", "TB"}
-	i := -1
-	for v >= unit && i < len(suffix)-1 {
-		v /= unit
-		i++
-	}
-	return fmt.Sprintf("%.1f %s", v, suffix[i])
 }

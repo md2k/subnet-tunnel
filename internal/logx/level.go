@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync/atomic"
 )
 
 // Components are the parts of subtun with their own level.
@@ -119,17 +120,48 @@ func (s Spec) String() string {
 	return strings.Join(parts, ",")
 }
 
+// Levels is a level spec that can change while running (subtun log
+// level): the filter reads it on every record, and Min is the lowest level,
+// for the handlers behind the filter.
+type Levels struct {
+	p   atomic.Pointer[Spec]
+	min slog.LevelVar
+}
+
+// NewLevels returns levels set to s.
+func NewLevels(s Spec) *Levels {
+	l := &Levels{}
+	l.Set(s)
+	return l
+}
+
+// Set changes the spec.
+func (l *Levels) Set(s Spec) {
+	l.p.Store(&s)
+	l.min.Set(s.Min())
+}
+
+// Get is the spec now.
+func (l *Levels) Get() Spec { return *l.p.Load() }
+
+// Min is the lowest level any component logs at now: the handlers'
+// HandlerOptions.Level.
+func (l *Levels) Min() slog.Leveler { return &l.min }
+
 // Filter drops records below their component's level; h gets the rest.
-func Filter(h slog.Handler, spec Spec) slog.Handler { return filter{h: h, spec: spec} }
+func Filter(h slog.Handler, spec Spec) slog.Handler { return FilterLevels(h, NewLevels(spec)) }
+
+// FilterLevels is Filter with levels that can change.
+func FilterLevels(h slog.Handler, l *Levels) slog.Handler { return filter{h: h, lv: l} }
 
 type filter struct {
 	h    slog.Handler
-	spec Spec
+	lv   *Levels
 	comp string
 }
 
 func (f filter) Enabled(ctx context.Context, l slog.Level) bool {
-	return l >= f.spec.Level(f.comp) && f.h.Enabled(ctx, l)
+	return l >= f.lv.Get().Level(f.comp) && f.h.Enabled(ctx, l)
 }
 
 // Handle adds the component once, last (nested With calls would repeat
@@ -152,9 +184,9 @@ func (f filter) WithAttrs(as []slog.Attr) slog.Handler {
 		}
 		rest = append(rest, a)
 	}
-	return filter{h: f.h.WithAttrs(rest), spec: f.spec, comp: comp}
+	return filter{h: f.h.WithAttrs(rest), lv: f.lv, comp: comp}
 }
 
 func (f filter) WithGroup(name string) slog.Handler {
-	return filter{h: f.h.WithGroup(name), spec: f.spec, comp: f.comp}
+	return filter{h: f.h.WithGroup(name), lv: f.lv, comp: f.comp}
 }
