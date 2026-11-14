@@ -68,6 +68,9 @@ type Options struct {
 	// Helper, if set, was started earlier (to take over an earlier session's
 	// rules before connecting) and is used instead of starting one.
 	Helper *privhelper.Client
+	// Lend has the terminal while sudo may ask, when the helper is started
+	// here; nil: sudo asks on the terminal as it is.
+	Lend privhelper.Lend
 }
 
 func (o Options) killSwitch() bool { return o.KillSwitch == "on" || o.KillSwitch == "lockdown" }
@@ -341,7 +344,7 @@ func Start(ctx context.Context, prefixes []netip.Prefix, opts Options, dialer ne
 
 	h := opts.Helper
 	if h == nil {
-		if h, err = privhelper.Start(ctx, &transport.LineLog{Log: log.With(logx.ComponentKey, "helper"), Prefix: "helper: "}, log); err != nil {
+		if h, err = privhelper.Start(ctx, &transport.LineLog{Log: log.With(logx.ComponentKey, "helper"), Prefix: "helper: "}, log, opts.Lend); err != nil {
 			return nil, err
 		}
 	}

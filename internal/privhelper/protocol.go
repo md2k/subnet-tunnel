@@ -189,3 +189,7 @@ func validateServers(what string, servers []netip.Addr) error {
 	}
 	return nil
 }
+
+// Lend runs f while sudo may ask for the password on the terminal: a
+// terminal UI steps aside for it, and comes back once f returns.
+type Lend func(f func())
