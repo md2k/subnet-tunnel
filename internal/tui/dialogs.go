@@ -61,7 +61,7 @@ func (a *app) showDlg(d *dlg, formRows int) {
 	d.flex.AddItem(d.form, formRows, 0, true)
 	d.flex.AddItem(d.result, resultRows, 0, false)
 	d.flex.SetBorderPadding(0, 0, 1, 1)
-	a.openDialog(d.flex, w, textRows+formRows+resultRows+2, d.form)
+	a.openDialog(d.flex, dialogWidth, textRows+formRows+resultRows+2, d.form) // the size wanted: fitted again on a resize
 }
 
 // textHeight is how many rows text takes wrapped to width.
