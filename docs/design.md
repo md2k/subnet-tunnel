@@ -759,6 +759,92 @@ second and follows `/v1/logs`.
 A daemon (subtun in the background, its log in the log file, attached to with `subtun tui`) is
 deferred: started in the foreground for sudo, then detached.
 
+## Targets subtun follows or runs (proposed)
+
+Today a target names one pod or container, and a reconnect looks for it by that name. A
+Deployment's pod comes back under a new name after a rollout, an eviction or a node drain, and
+many people would rather not keep a pod around for subtun at all: sshuttle setups often run a pod
+for the session from a script and delete it afterwards. Proposed: a target (still per profile:
+the profile is what connects, whatever the transport) is one of three kinds.
+
+```yaml
+profiles:
+  work:
+    target:
+      k8s:
+        context: dev
+        namespace: ops
+        # one of:
+        pod: toolbox-0              # a pod that exists (as today)
+        deployment: toolbox         # follow: a running pod of it, picked again when it goes
+        selector: app=toolbox       # follow: a running pod with these labels
+        run: {image: busybox:1.37}  # subtun creates, follows and deletes its own pod
+  local:
+    target:
+      docker:
+        # one of:
+        container: web                                 # as today
+        selector: com.docker.compose.service=web       # follow
+        run: {image: busybox:1.37, network: dev_default}  # docker run -d --rm
+```
+
+On the command line, kubectl style: `subtun k8s deploy/toolbox CIDR...`, `subtun k8s --selector
+app=toolbox`, `subtun k8s --run [--image IMAGE]`; `subtun docker --selector ...`, `subtun docker
+--run [--image IMAGE] [--network NET]`. `container:` (k8s) still picks the container in a pod that
+has several.
+
+**Follow** (`deployment`, `selector`):
+- At each connect, subtun lists the pods (the Deployment's own selector, or the labels given) and
+  picks a running, ready one that isn't being deleted: the one it used before if it still is
+  (its agent is cached there), else the newest (during a rollout, the old ones are going).
+- A reconnect whose pod is gone or not ready picks again at once, without waiting out the
+  reconnect delays meant for a target that is down.
+- Status and the TUI show what was picked: `deployment ops/toolbox: pod toolbox-7d9f8-xk2pq`.
+- Permissions: list pods (and get the Deployment), besides exec. Docker: running containers with
+  the labels (a Compose service's, say), picked the same way.
+
+**Run** (subtun's own pod):
+- **Start:** create the pod, wait until it runs (a deadline; a failure says why: the image can't
+  be pulled, the pod can't be scheduled, admission refused it), then connect as today: the agent
+  is uploaded through exec and started.
+- **Reconnect:** exec again if the pod still runs; if it is gone or failed, delete what's left and
+  create a new one.
+- **Stop:** delete it. Several profiles that run pods each get their own.
+- **The pod:** `generateName: subtun-<profile>-`; no service account token, no service links;
+  non-root (65534), all capabilities dropped, no privilege escalation, the default seccomp
+  profile, a read-only root with an emptyDir on `/tmp` for the agent: it fits the restricted pod
+  security level. Small requests (and a memory limit with room for the tunnel's buffers);
+  `restartPolicy: Never`.
+- **Labels:** `app.kubernetes.io/managed-by: subtun`, the profile, and an owner (this user and
+  machine, hashed) with subtun's process id, so leftovers can be told apart from another running
+  subtun's pods.
+- **Leftovers** (subtun killed, the laptop asleep): the pod's main process is a small shell loop
+  that exits when no agent process has run for a few minutes, so a pod left behind stops using
+  anything; the next start and `subtun cleanup` delete this owner's pods that have finished, or
+  whose subtun isn't running on this machine. A Job with `ttlSecondsAfterFinished` would delete
+  itself, but needs permissions on Jobs too: later, if leftover pods bother anyone.
+- **Settings** (`run:`): `image` (default a pinned busybox; a cluster that only takes images from
+  its own registry needs its mirror here; the image needs `sh`, as the agent's upload does today),
+  `labels`, `annotations` (`sidecar.istio.io/inject: "false"` in a mesh, whose sidecar would
+  otherwise take the pod's traffic), `nodeSelector`, `tolerations`. More (resources, a service
+  account, pull secrets beyond the namespace's default) when real clusters need them.
+- **Permissions:** create, get, list, watch and delete pods, and exec.
+- **Docker:** `docker run -d --rm` with the same labels, `--read-only --tmpfs /tmp:exec`, no
+  capabilities, `no-new-privileges`, user 65534, on `network`; `--rm` removes it when the idle
+  loop exits.
+- Where the traffic leaves: from the pod's node, under the namespace's network policies, as from
+  a pod the script ran.
+
+**Not decided:**
+- The default image, and whether a mesh opt-out annotation is on by default.
+- The idle time before a left-behind pod exits (a few minutes: long enough for a laptop's short
+  sleep and a reconnect).
+- An image with the agent inside (`subtun-agent`), so a run pod needs no upload, no shell and no
+  writable directory: needs images published with each release.
+
+**Order:** follow first (small; it fixes the recreated pod), then run for Kubernetes, then for
+Docker.
+
 ## Decisions
 
 - **Capture:** utun / TUN interface plus the gVisor network stack, with utun MTU 9000. Data never
@@ -789,7 +875,8 @@ deferred: started in the foreground for sudo, then detached.
   session helper can change routes while running (several profiles, `control: full`); what's
   missing is recomputing the automatic excludes when the networks change.
 - **Reconnecting to a recreated pod:** subtun reconnects to the same pod name. A Deployment's new pod
-  has another name; selecting the target by label or by its owner would find it. Also, if the API
+  has another name: [following a Deployment or labels](#targets-subtun-follows-or-runs-proposed), or
+  a pod subtun runs itself, is proposed. Also, if the API
   server's address moves inside the routes after a reconnect, a one-shot helper (one profile,
   routes only, without `control: full`) can't change the routes: subtun only warns (restart to
   exclude it). With a session it is carved out.
