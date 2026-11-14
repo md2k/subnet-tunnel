@@ -94,7 +94,10 @@ A target is where the agent runs: a Kubernetes pod or a Docker container (SSH is
   one the cluster or daemon can pull: a cluster that only takes images from its own registry needs
   its mirror here. The pod runs as an unprivileged user with nothing mounted but a scratch
   directory, so it fits a namespace's restricted pod security level. Creating pods needs the
-  permission to create, list and delete pods in the namespace, besides exec.
+  permission to create, get, list and delete pods in the namespace, besides exec. A container runs
+  the same way on `network` (default: the default bridge), with `resources.limits` only. A pod or
+  container left behind (subtun killed) exits after 5 minutes without an agent, and the next start
+  removes it; subtun only touches what it created for you on this machine (their labels say so).
 - **Existing** (`create: false`): subtun only starts its agent in it, by exact `name`, or by
   `selector`: labels (kubectl's syntax for Kubernetes; `key=value`, comma-separated, for Docker),
   where a running, ready one is picked at each connect: the one used before while it still is,
