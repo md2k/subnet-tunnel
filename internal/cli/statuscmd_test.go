@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,30 @@ func TestEngineStatus(t *testing.T) {
 	}
 	if c := es.conns(); len(c) != 2 || c[1].Name != "dev" {
 		t.Errorf("conns: %+v", c)
+	}
+	if !slices.Equal(w.Include, []string{"10.0.0.0/8", "203.0.113.0/24"}) || len(w.Exclude) != 0 {
+		t.Errorf("work's routes asked for: %v %v", w.Include, w.Exclude)
+	}
+	es.meters[0].Sample(time.Now())
+	if s := es.samples(); len(s) != 2 || s[0].Name != "work" || len(s[0].Samples) != 1 || len(s[1].Samples) != 0 {
+		t.Errorf("samples: %+v", s)
+	}
+	// The config file's profiles, which are in the run, and the file's
+	// error if it can't be read.
+	cp := es.configProfiles("testdata/multi.yaml")
+	byName := map[string]control.ConfigProfile{}
+	for _, p := range cp.Profiles {
+		byName[p.Name] = p
+	}
+	if cp.Error != "" || !byName["work"].InRun || byName["vault"].InRun || byName["dev"].Target != "container dev" ||
+		byName["work"].KillSwitch != "on" || byName["dev"].SOCKS != "127.0.0.1:1081" || !slices.Equal(byName["dev"].Domains, []string{"cluster.local"}) {
+		t.Errorf("config profiles: %+v", cp)
+	}
+	if cp := es.configProfiles("testdata/no-such-config.yaml"); cp.Error == "" || len(cp.Profiles) != 0 {
+		t.Errorf("missing file: %+v", cp)
+	}
+	if got := configTarget(config.Target{K8s: &config.K8sTarget{Namespace: "ops", Pod: "pod/toolbox"}}); got != "pod ops/toolbox" {
+		t.Errorf("k8s target: %q", got)
 	}
 	// DNS while the kill switch holds: blocked by default; nothing to hold
 	// without DNS capture.

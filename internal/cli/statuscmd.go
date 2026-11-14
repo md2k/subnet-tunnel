@@ -198,10 +198,10 @@ func writeStatus(w io.Writer, is instanceStatus, now time.Time) {
 			}
 			what = append(what, fmt.Sprintf("routes %s (%s)", summary(t.Routes, 4), on))
 		}
-		if len(t.Domains) > 0 || t.Patterns > 0 {
+		if len(t.Domains) > 0 || len(t.Patterns) > 0 {
 			names := t.Domains
-			if t.Patterns > 0 {
-				names = append(append([]string{}, names...), fmt.Sprintf("%d pattern(s)", t.Patterns))
+			if len(t.Patterns) > 0 {
+				names = append(append([]string{}, names...), fmt.Sprintf("%d pattern(s)", len(t.Patterns)))
 			}
 			what = append(what, "DNS "+strings.Join(names, ", "))
 		}

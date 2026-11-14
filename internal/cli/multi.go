@@ -900,6 +900,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 
 	// Status: counters per tunnel, its state, the control socket.
 	es := newEngineStatus(mp, eo.control)
+	es.configPath = configPath(g)
 	utun := make([]meter.Dialer, n)
 	for i := range n {
 		utun[i] = es.meters[i].Dialer(meter.ViaUtun, lives[i])

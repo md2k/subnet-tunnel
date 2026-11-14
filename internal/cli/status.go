@@ -6,11 +6,13 @@ import (
 	"net/netip"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/md2k/subnet-tunnel/internal/capture"
+	"github.com/md2k/subnet-tunnel/internal/config"
 	"github.com/md2k/subnet-tunnel/internal/control"
 	"github.com/md2k/subnet-tunnel/internal/dns"
 	"github.com/md2k/subnet-tunnel/internal/logring"
@@ -73,6 +75,8 @@ type engineStatus struct {
 	capt      atomic.Pointer[capture.Capture]
 	// change makes a change through the engine's loop; nil: read only.
 	change func(context.Context, control.Change) (control.Result, error)
+	// configPath is the config file profiles are added from.
+	configPath string
 }
 
 // matcher is the run's DNS matcher; nil: no DNS.
@@ -164,8 +168,9 @@ func (es *engineStatus) status() control.Status {
 		for _, p := range mp.final(i) {
 			t.Routes = append(t.Routes, p.String())
 		}
+		t.Include, t.Exclude = slices.Clone(sp.s.routes), slices.Clone(sp.s.excludes)
 		if es.dnsOpts != nil {
-			t.Domains, t.Patterns = mp.dnsNames[i].Domains, len(mp.dnsNames[i].Patterns)
+			t.Domains, t.Patterns = mp.dnsNames[i].Domains, mp.dnsNames[i].Patterns
 		}
 		if mp.ks[i] != "off" {
 			t.KillSwitch = mp.ks[i]
@@ -234,6 +239,63 @@ func (es *engineStatus) conns() []control.TunnelConns {
 	return out
 }
 
+// samples are every tunnel's 1 s traffic samples.
+func (es *engineStatus) samples() []control.TunnelSamples {
+	es.mp.smu.RLock()
+	defer es.mp.smu.RUnlock()
+	out := make([]control.TunnelSamples, len(es.mp.specs))
+	for i, sp := range es.mp.specs {
+		out[i] = control.TunnelSamples{Name: sp.name, Samples: es.meters[i].Samples()}
+	}
+	return out
+}
+
+// configProfiles reads the profiles of the run's config file (path), and
+// says which are in the run; nil config: none (no config file to read).
+func (es *engineStatus) configProfiles(path string) control.ConfigProfiles {
+	cp := control.ConfigProfiles{Path: path, Profiles: []control.ConfigProfile{}}
+	f, err := config.Load(path)
+	if err != nil {
+		cp.Error = err.Error()
+		return cp
+	}
+	es.mp.smu.RLock()
+	var running []string
+	for _, sp := range es.mp.specs {
+		running = append(running, sp.name)
+	}
+	es.mp.smu.RUnlock()
+	for _, name := range f.Names() {
+		p, err := f.Profile(name)
+		if err != nil {
+			continue
+		}
+		c := control.ConfigProfile{Name: name, Target: configTarget(p.Target), Routes: p.Routes, Exclude: p.Exclude,
+			Domains: p.DNS.Domains, Patterns: p.DNS.Patterns, SOCKS: p.Socks, InRun: slices.Contains(running, name)}
+		if m := string(p.KillSwitch.Mode); m != "" && m != "off" {
+			c.KillSwitch = m
+		}
+		cp.Profiles = append(cp.Profiles, c)
+	}
+	return cp
+}
+
+// configTarget is a configured target for people: "pod ns/name",
+// "container name".
+func configTarget(t config.Target) string {
+	switch {
+	case t.K8s != nil:
+		pod := strings.TrimPrefix(t.K8s.Pod, "pod/")
+		if t.K8s.Namespace != "" {
+			pod = t.K8s.Namespace + "/" + pod
+		}
+		return "pod " + pod
+	case t.Docker != nil:
+		return "container " + t.Docker.Container
+	}
+	return ""
+}
+
 // startControl opens this run's control socket; a failure only costs
 // status, so it's a warning. Replaced in tests.
 var startControl = func(ctx context.Context, es *engineStatus, ring *logring.Ring, log *slog.Logger) {
@@ -247,7 +309,11 @@ var startControl = func(ctx context.Context, es *engineStatus, ring *logring.Rin
 		log.Warn("no control socket, so subtun status can't see this run", "err", err)
 		return
 	}
-	srv := &control.Server{Status: es.status, Conns: es.conns, Logs: ring, Change: es.change, Log: log}
+	srv := &control.Server{Status: es.status, Conns: es.conns, Samples: es.samples, Logs: ring, Change: es.change, Log: log}
+	if es.configPath != "" {
+		path := es.configPath
+		srv.Config = func() control.ConfigProfiles { return es.configProfiles(path) }
+	}
 	go func() {
 		if err := srv.Serve(ctx, ln, path); err != nil {
 			log.Debug("control socket stopped", "err", err)
