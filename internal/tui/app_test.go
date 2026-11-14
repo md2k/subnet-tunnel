@@ -649,3 +649,29 @@ func TestMouse(t *testing.T) {
 	u.sim.InjectMouse(10, row, tcell.ButtonNone, tcell.ModNone)
 	u.wait("subtun › dev")
 }
+
+// A click beside the rows (tview reports row -1) or on the list's hint
+// selects nothing and breaks nothing, in both layouts.
+func TestClickBesideRows(t *testing.T) {
+	f := newFake("full")
+	u := startSized(t, f, Options{Mouse: true, Layout: config.LayoutDetail}, 120, 40)
+	u.wait("add from config", "▶ ● work")
+	click := func(x, y int) {
+		time.Sleep(600 * time.Millisecond) // apart: not a double-click
+		u.sim.InjectMouse(x, y, tcell.Button1, tcell.ModNone)
+		u.sim.InjectMouse(x, y, tcell.ButtonNone, tcell.ModNone)
+	}
+	lines := strings.Split(u.text(), "\n")
+	for y, l := range lines {
+		if strings.Contains(l, "add from config") {
+			click(5, y)   // the hint
+			click(5, y+2) // below it: no row
+		}
+	}
+	u.press("v")
+	u.wait("Profiles (3)")
+	click(20, 2) // the table's heading: no profile
+	u.wait("▶ ● work")
+	u.key(tcell.KeyDown)
+	u.wait("▶ ◐ dev") // still answering
+}

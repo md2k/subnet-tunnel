@@ -27,7 +27,7 @@ func (a *app) buildDash() {
 	a.table = tview.NewTable().SetSelectable(true, false).SetFixed(1, 0).SetSelectedStyle(sel)
 	boxed(a.table.Box, "Profiles")
 	a.table.SetSelectionChangedFunc(func(row, _ int) {
-		if row >= 1 {
+		if row >= 1 && row <= len(a.st.Tunnels) { // not the heading, not a click beside the rows (-1)
 			a.sel = row - 1
 			a.markSelected(a.table, 1)
 		}
@@ -37,8 +37,8 @@ func (a *app) buildDash() {
 	a.list.SetMouseCapture(onDoubleClick(a.list, func(row int) { a.openProfile(row) }))
 	boxed(a.list.Box, "Profiles")
 	a.list.SetSelectionChangedFunc(func(row, _ int) {
-		if row >= len(a.st.Tunnels) || row == a.sel {
-			return // a render selecting the same row again
+		if row < 0 || row >= len(a.st.Tunnels) || row == a.sel {
+			return // a click beside the rows (-1), the hint, or a render selecting it again
 		}
 		a.sel = row
 		a.markSelected(a.list, 0)
@@ -134,9 +134,7 @@ func (a *app) rate(n uint64) string     { return rateText(n, a.bits) }
 func (a *app) rateCell(n uint64) string { return strings.TrimSuffix(a.rate(n), "/s") }
 
 func (a *app) renderDash(now time.Time) {
-	if a.sel >= len(a.st.Tunnels) {
-		a.sel = max(len(a.st.Tunnels)-1, 0)
-	}
+	a.sel = min(max(a.sel, 0), max(len(a.st.Tunnels)-1, 0))
 	if h := a.topHeight(); h != a.topH {
 		a.topH = h
 		a.body.ResizeItem(a.top, h, 0)
@@ -378,7 +376,7 @@ func (a *app) renderList(now time.Time) {
 }
 
 func (a *app) renderDetail(now time.Time) {
-	if a.sel >= len(a.st.Tunnels) {
+	if a.sel < 0 || a.sel >= len(a.st.Tunnels) {
 		a.detail.SetTitle("")
 		a.detail.SetText("")
 		return
