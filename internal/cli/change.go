@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/md2k/subnet-tunnel/internal/config"
 	"github.com/md2k/subnet-tunnel/internal/control"
@@ -236,6 +237,7 @@ func (mp *multiPlan) applyRouteChange(rc *routeChange) {
 	sp := mp.specs[rc.i]
 	mp.smu.Lock()
 	sp.s.routes, sp.s.excludes = rc.routes, rc.excludes
+	sp.noteChanges(time.Now())
 	mp.smu.Unlock()
 	mp.rps[rc.i] = rc.rp
 	final := rc.final
@@ -394,6 +396,7 @@ func (mp *multiPlan) applyDNSChange(dc *dnsChange, m *dns.Matcher) error {
 	sp := mp.specs[dc.i]
 	mp.smu.Lock()
 	sp.s.dnsDomains, sp.s.dnsPatterns = dc.domains, dc.patterns
+	sp.noteChanges(time.Now())
 	mp.smu.Unlock()
 	return nil
 }
@@ -632,6 +635,20 @@ func (mp *multiPlan) applyReload(rl *reloadChange, m *dns.Matcher) error {
 	mp.policies[i] = rl.policy
 	mp.hosts[i] = rl.host
 	return nil
+}
+
+// noteChanges records when each of the profile's runtime changes was made
+// (for status); the caller holds mp.smu.
+func (sp *tunnelSpec) noteChanges(now time.Time) {
+	next := map[string]time.Time{}
+	for _, c := range runtimeChanges(sp.base, sp.s) {
+		if t, ok := sp.changedAt[c]; ok {
+			next[c] = t
+		} else {
+			next[c] = now
+		}
+	}
+	sp.changedAt = next
 }
 
 // runtimeChanges lists what changed in a profile's routes and DNS names

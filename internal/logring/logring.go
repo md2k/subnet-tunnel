@@ -26,10 +26,16 @@ type Line struct {
 	Text   string    `json:"text"`
 	Level  string    `json:"level,omitempty"`  // DEBUG, INFO, WARN, ERROR
 	Tunnel string    `json:"tunnel,omitempty"` // the profile; "": none, or the only one
+	// Component is the part of subtun that logged it (logx's components).
+	Component string `json:"component,omitempty"`
 }
 
-// TunnelKey is the log attribute naming the profile a record is about.
-const TunnelKey = "tunnel"
+// The log attributes naming the profile a record is about, and the part of
+// subtun that logged it (logx.ComponentKey).
+const (
+	TunnelKey    = "tunnel"
+	ComponentKey = "component"
+)
 
 // Ring is the buffer: a circular one, so adding a line costs the same
 // however many are held.
@@ -150,20 +156,23 @@ func (w *writer) Write(p []byte) (int, error) {
 }
 
 type handler struct {
-	h       slog.Handler
-	w       *writer
-	tunnel  string
-	grouped bool // attributes from now on are in a group: not the profile
+	h                 slog.Handler
+	w                 *writer
+	tunnel, component string
+	grouped           bool // attributes from now on are in a group: neither
 }
 
 func (h *handler) Enabled(ctx context.Context, l slog.Level) bool { return h.h.Enabled(ctx, l) }
 
 func (h *handler) Handle(ctx context.Context, rec slog.Record) error {
-	meta := Line{Level: rec.Level.String(), Tunnel: h.tunnel}
+	meta := Line{Level: rec.Level.String(), Tunnel: h.tunnel, Component: h.component}
 	if !h.grouped {
 		rec.Attrs(func(a slog.Attr) bool {
-			if a.Key == TunnelKey {
+			switch a.Key {
+			case TunnelKey:
 				meta.Tunnel = a.Value.String()
+			case ComponentKey:
+				meta.Component = a.Value.String()
 			}
 			return true
 		})
@@ -179,8 +188,11 @@ func (h *handler) WithAttrs(as []slog.Attr) slog.Handler {
 	out.h = h.h.WithAttrs(as)
 	if !h.grouped {
 		for _, a := range as {
-			if a.Key == TunnelKey {
+			switch a.Key {
+			case TunnelKey:
 				out.tunnel = a.Value.String()
+			case ComponentKey:
+				out.component = a.Value.String()
 			}
 		}
 	}

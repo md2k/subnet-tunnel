@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -82,6 +83,20 @@ func TestEngineStatus(t *testing.T) {
 	}
 	if !slices.Equal(w.Include, []string{"10.0.0.0/8", "203.0.113.0/24"}) || len(w.Exclude) != 0 {
 		t.Errorf("work's routes asked for: %v %v", w.Include, w.Exclude)
+	}
+	// What of its routes work doesn't carry: dev's more specific route, and
+	// subtun's own endpoint (work's Docker host) once known.
+	if n := w.RouteNotes["10.0.0.0/8"]; n != "parts carried by dev (more specific)" {
+		t.Errorf("route notes: %q", w.RouteNotes)
+	}
+	if w.Unrouted != "warn" || dv.Unrouted != "warn" {
+		t.Errorf("unrouted: %q %q", w.Unrouted, dv.Unrouted)
+	}
+	if _, err := mp.addEndpoints([]netip.Addr{netip.MustParseAddr("203.0.113.200")}); err != nil {
+		t.Fatal(err)
+	}
+	if n := routeNotes(mp, 0, mp.endpointList()); !strings.Contains(n["203.0.113.0/24"], "minus 203.0.113.200/32: subtun's own endpoint") {
+		t.Errorf("carved endpoint: %q", n)
 	}
 	es.meters[0].Sample(time.Now())
 	if s := es.samples(); len(s) != 2 || s[0].Name != "work" || len(s[0].Samples) != 1 || len(s[1].Samples) != 0 {

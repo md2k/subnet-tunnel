@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"net/netip"
 	"os"
 	"slices"
@@ -17,6 +18,7 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/dns"
 	"github.com/md2k/subnet-tunnel/internal/logring"
 	"github.com/md2k/subnet-tunnel/internal/meter"
+	"github.com/md2k/subnet-tunnel/internal/routes"
 	"github.com/md2k/subnet-tunnel/internal/version"
 )
 
@@ -154,6 +156,7 @@ func (es *engineStatus) status() control.Status {
 			st.Helper = "session"
 		}
 	}
+	endpoints := mp.endpointList()
 	mp.smu.RLock()
 	defer mp.smu.RUnlock()
 	for i, sp := range mp.specs {
@@ -169,13 +172,20 @@ func (es *engineStatus) status() control.Status {
 			t.Routes = append(t.Routes, p.String())
 		}
 		t.Include, t.Exclude = slices.Clone(sp.s.routes), slices.Clone(sp.s.excludes)
+		t.RouteNotes = routeNotes(mp, i, endpoints)
 		if es.dnsOpts != nil {
 			t.Domains, t.Patterns = mp.dnsNames[i].Domains, mp.dnsNames[i].Patterns
+			if len(t.Domains)+len(t.Patterns) > 0 && i < len(mp.unrouted) {
+				t.Unrouted = mp.unrouted[i]
+			}
 		}
 		if mp.ks[i] != "off" {
 			t.KillSwitch = mp.ks[i]
 		}
 		t.Changes = runtimeChanges(sp.base, sp.s)
+		if len(t.Changes) > 0 {
+			t.ChangedAt = maps.Clone(sp.changedAt)
+		}
 		t.Counts = es.meters[i].Counts()
 		t.DNSCounts = control.DNSCounts{Answered: es.dnsCounts[i].Answered.Load(), Failed: es.dnsCounts[i].Failed.Load()}
 		st.Tunnels = append(st.Tunnels, t)
@@ -214,6 +224,51 @@ func (es *engineStatus) status() control.Status {
 		st.KillSwitch = ks
 	}
 	return st
+}
+
+// routeNotes say, by route profile i asks for, what of it the profile
+// doesn't carry: parts other profiles' more specific routes carry, and
+// subtun's own endpoints carved out. The caller holds mp.smu.
+func routeNotes(mp *multiPlan, i int, endpoints []netip.Addr) map[string]string {
+	notes := map[string]string{}
+	mine := mp.final(i)
+	for _, r := range mp.specs[i].s.routes {
+		rp, err := routes.ParseRoute(r)
+		if err != nil {
+			continue
+		}
+		var others, carved []string
+		for j := range mp.specs {
+			if j == i {
+				continue
+			}
+			for _, q := range mp.final(j) {
+				if q.Bits() > rp.Bits() && rp.Contains(q.Addr()) && !slices.Contains(others, mp.specs[j].name) {
+					others = append(others, mp.specs[j].name)
+				}
+			}
+		}
+		for _, e := range endpoints {
+			if rp.Contains(e) && !slices.ContainsFunc(mine, func(q netip.Prefix) bool { return q.Contains(e) }) {
+				carved = append(carved, netip.PrefixFrom(e, e.BitLen()).String())
+			}
+		}
+		var parts []string
+		if len(others) > 0 {
+			slices.Sort(others)
+			parts = append(parts, "parts carried by "+strings.Join(others, ", ")+" (more specific)")
+		}
+		if len(carved) > 0 {
+			parts = append(parts, "minus "+strings.Join(carved, ", ")+": subtun's own endpoint")
+		}
+		if len(parts) > 0 {
+			notes[r] = strings.Join(parts, "; ")
+		}
+	}
+	if len(notes) == 0 {
+		return nil
+	}
+	return notes
 }
 
 // dnsHold is what happens to DNS while the kill switch holds: nothing to

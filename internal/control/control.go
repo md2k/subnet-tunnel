@@ -61,17 +61,22 @@ type Tunnel struct {
 	// (configured, plus changes while running); Routes are what it carries:
 	// excludes, other profiles' more specific routes and the API servers
 	// taken out.
-	Include    []string     `json:"include,omitempty"`
-	Exclude    []string     `json:"exclude,omitempty"`
-	Routes     []string     `json:"routes,omitempty"`
-	RoutesOn   bool         `json:"routesOn"` // on the utun now
-	Domains    []string     `json:"domains,omitempty"`
-	Patterns   []string     `json:"patterns,omitempty"`
-	SOCKS      string       `json:"socks,omitempty"`
-	KillSwitch string       `json:"killSwitch,omitempty"`
-	Changes    []string     `json:"runtimeChanges,omitempty"` // made through the control socket, until the run ends
-	Counts     meter.Counts `json:"counts"`
-	DNSCounts  DNSCounts    `json:"dnsCounts"`
+	Include  []string `json:"include,omitempty"`
+	Exclude  []string `json:"exclude,omitempty"`
+	Routes   []string `json:"routes,omitempty"`
+	RoutesOn bool     `json:"routesOn"` // on the utun now
+	// RouteNotes say, by route asked for, what of it the profile doesn't
+	// carry: parts other profiles carry, subtun's own endpoints.
+	RouteNotes map[string]string    `json:"routeNotes,omitempty"`
+	Domains    []string             `json:"domains,omitempty"`
+	Patterns   []string             `json:"patterns,omitempty"`
+	Unrouted   string               `json:"dnsUnrouted,omitempty"` // answers outside the routes: warn, fallback, block
+	SOCKS      string               `json:"socks,omitempty"`
+	KillSwitch string               `json:"killSwitch,omitempty"`
+	Changes    []string             `json:"runtimeChanges,omitempty"` // made through the control socket, until the run ends
+	ChangedAt  map[string]time.Time `json:"changedAt,omitempty"`      // when each of Changes was made
+	Counts     meter.Counts         `json:"counts"`
+	DNSCounts  DNSCounts            `json:"dnsCounts"`
 }
 
 // DNSCounts are the names a tunnel (or the fallback) answered.

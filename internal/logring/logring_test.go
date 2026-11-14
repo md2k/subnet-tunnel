@@ -95,11 +95,12 @@ func TestLineMeta(t *testing.T) {
 	base.With("tunnel", "dev").Debug("from With")
 	base.Error("from the record", "tunnel", "vault")
 	base.WithGroup("g").Info("grouped", "tunnel", "nope")
+	base.With("component", "helper").Info("from the helper")
 	var got []string
 	for _, l := range r.Lines() {
-		got = append(got, l.Level+"/"+l.Tunnel)
+		got = append(got, l.Level+"/"+l.Tunnel+"/"+l.Component)
 	}
-	if want := "WARN/,DEBUG/dev,ERROR/vault,INFO/"; strings.Join(got, ",") != want {
+	if want := "WARN//,DEBUG/dev/,ERROR/vault/,INFO//,INFO//helper"; strings.Join(got, ",") != want {
 		t.Fatalf("got %v, want %s", got, want)
 	}
 }

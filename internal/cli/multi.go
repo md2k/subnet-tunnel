@@ -57,6 +57,8 @@ type tunnelSpec struct {
 	// reload reads the profile from the config file again, as the run read
 	// it at start (profile start --reload); nil: not from a config file.
 	reload func() (*tunnelSpec, error)
+	// changedAt is when each runtime change was made (under mp.smu).
+	changedAt map[string]time.Time
 }
 
 // multiPlan is the validated setup of a run with several profiles. Index i
