@@ -77,6 +77,27 @@ func TestHandlerAndTee(t *testing.T) {
 	if !strings.Contains(term.String(), `msg="tunnel up" tunnel=work`) || strings.Contains(term.String(), "hidden") {
 		t.Fatalf("terminal: %q", term.String())
 	}
+	if l := lines[0]; l.Level != "INFO" || l.Tunnel != "work" {
+		t.Fatalf("level %q, tunnel %q", l.Level, l.Tunnel)
+	}
+}
+
+// Each line carries its record's level and profile: from With, from the
+// record, none, never from a group.
+func TestLineMeta(t *testing.T) {
+	r := New(0, 0)
+	base := slog.New(r.Handler(&slog.HandlerOptions{Level: slog.LevelDebug}))
+	base.Warn("no profile")
+	base.With("tunnel", "dev").Debug("from With")
+	base.Error("from the record", "tunnel", "vault")
+	base.WithGroup("g").Info("grouped", "tunnel", "nope")
+	var got []string
+	for _, l := range r.Lines() {
+		got = append(got, l.Level+"/"+l.Tunnel)
+	}
+	if want := "WARN/,DEBUG/dev,ERROR/vault,INFO/"; strings.Join(got, ",") != want {
+		t.Fatalf("got %v, want %s", got, want)
+	}
 }
 
 // Follow hands over the lines held and then new ones, none twice, also
