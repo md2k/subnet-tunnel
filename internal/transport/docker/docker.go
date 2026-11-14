@@ -57,11 +57,13 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	if err != nil {
 		return nil, err
 	}
-	if t.Create {
-		return nil, errors.New("creating containers isn't there yet: use create: false with name or selector")
-	}
 	target := t.Name
-	if t.Selector != "" {
+	switch {
+	case t.Create:
+		if target, err = ensureContainer(ctx, cli, t, log); err != nil {
+			return nil, err
+		}
+	case t.Selector != "":
 		if target, err = pickContainer(ctx, cli, t); err != nil {
 			return nil, err
 		}
@@ -83,7 +85,10 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 		return nil, fmt.Errorf("container %s is not running", name)
 	}
 	d := &dockerExec{cli: cli, id: c.ID, name: name}
-	if t.Selector != "" {
+	switch {
+	case t.Create:
+		d.follows = "created by subtun"
+	case t.Selector != "":
 		d.follows = "containers with " + t.Selector
 	}
 	carrier, err := transport.Bootstrap(ctx, d, agents, opts, log.With("container", name))

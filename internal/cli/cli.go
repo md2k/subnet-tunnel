@@ -472,11 +472,15 @@ func profileTarget(name string, tg config.Target, s *settings, g *globalOpts) (c
 		if r := d.Resources; r != nil {
 			t.LimitCPU, t.LimitMem = r.Limits.CPU, r.Limits.Memory
 		}
+		var release func(*slog.Logger)
+		if t.Create {
+			release = func(log *slog.Logger) { docker.Release(context.Background(), t, log) }
+		}
 		return func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
 				return docker.Connect(ctx, t, agents, s.transport(g), log)
 			}, func() (string, error) {
 				return docker.Endpoint(t)
-			}, nil
+			}, release
 	}
 }
 

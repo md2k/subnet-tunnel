@@ -81,3 +81,26 @@ func TestChoose(t *testing.T) {
 		t.Errorf("selector: %v %v", parts, err)
 	}
 }
+
+// A container subtun creates: no capabilities, no new privileges, a
+// read-only root with an exec-able /tmp, removed once it exits, with the
+// limits given.
+func TestHostConfig(t *testing.T) {
+	hc, err := hostConfig(Target{Network: "dev_default", LimitCPU: "500m", LimitMem: "256Mi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hc.AutoRemove || !hc.ReadonlyRootfs || hc.CapDrop[0] != "ALL" || hc.SecurityOpt[0] != "no-new-privileges" ||
+		!strings.Contains(hc.Tmpfs["/tmp"], "exec") || strings.Contains(hc.Tmpfs["/tmp"], "noexec") {
+		t.Errorf("security: %+v", hc)
+	}
+	if hc.NetworkMode != "dev_default" || hc.NanoCPUs != 500_000_000 || hc.Memory != 256<<20 {
+		t.Errorf("network, limits: %q %d %d", hc.NetworkMode, hc.NanoCPUs, hc.Memory)
+	}
+	if _, err := hostConfig(Target{LimitMem: "lots"}); err == nil {
+		t.Error("a bad quantity")
+	}
+	if n := generatedName("work"); !strings.HasPrefix(n, "subtun-work-") || len(n) != len("subtun-work-")+6 {
+		t.Errorf("name: %q", n)
+	}
+}

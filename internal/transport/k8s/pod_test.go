@@ -30,7 +30,7 @@ func TestPodSpec(t *testing.T) {
 	switch {
 	case p.GenerateName != "subtun-work-" || p.Name != "" || p.Namespace != "ops":
 		t.Errorf("name: %q %q", p.GenerateName, p.Name)
-	case p.Labels[labelManagedBy] != managedBy || p.Labels[labelOwner] != owner() || p.Labels[labelProfile] != "work" || p.Labels[labelPID] == "":
+	case !transport.Ours(p.Labels) || p.Labels[transport.LabelProfile] != "work" || p.Labels[transport.LabelPID] == "":
 		t.Errorf("labels: %v", p.Labels)
 	case *p.Spec.AutomountServiceAccountToken || *p.Spec.EnableServiceLinks || p.Spec.RestartPolicy != corev1.RestartPolicyNever:
 		t.Error("token, service links or restarts")
@@ -77,9 +77,9 @@ func kubelet(cs *fake.Clientset) {
 func TestEnsurePod(t *testing.T) {
 	ctx := context.Background()
 	left := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "subtun-old", Namespace: "ops",
-		Labels: map[string]string{labelManagedBy: managedBy, labelOwner: owner(), labelPID: "999999999"}}}
+		Labels: map[string]string{transport.LabelManagedBy: transport.ManagedBy, transport.LabelOwner: transport.Owner(), transport.LabelPID: "999999999"}}}
 	otherUser := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "subtun-theirs", Namespace: "ops",
-		Labels: map[string]string{labelManagedBy: managedBy, labelOwner: "someone-else", labelPID: "999999999"}}}
+		Labels: map[string]string{transport.LabelManagedBy: transport.ManagedBy, transport.LabelOwner: "someone-else", transport.LabelPID: "999999999"}}}
 	cs := fake.NewClientset(left, otherUser)
 	kubelet(cs)
 	tg := Target{Create: true, Profile: "work", Picked: &transport.Picked{}}

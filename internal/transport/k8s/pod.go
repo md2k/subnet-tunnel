@@ -2,17 +2,9 @@ package k8s
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"os/user"
-	"strconv"
 	"strings"
-	"sync"
-	"syscall"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -24,41 +16,11 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/transport"
 )
 
-// The labels on the pods subtun creates: who made them, so leftovers can
-// be told from another running subtun's pods.
-const (
-	labelManagedBy = "app.kubernetes.io/managed-by"
-	labelProfile   = "subtun.dev/profile"
-	labelOwner     = "subtun.dev/owner" // this user on this machine, hashed
-	labelPID       = "subtun.dev/pid"
-	managedBy      = "subtun"
-)
-
 // The created pod's one container, and how long it may take to run.
 const (
 	podContainer = "subtun"
 	startTimeout = 2 * time.Minute
-	idleExit     = 5 * time.Minute // a pod left without an agent this long exits
 )
-
-// idleScript is a created pod's main process: it exits once no agent has
-// run in it for idleExit, so a pod a killed subtun left behind stops using
-// anything. The bracket keeps grep from finding itself.
-var idleScript = fmt.Sprintf(`i=0; while sleep 30; do
-if cat /proc/[0-9]*/cmdline 2>/dev/null | tr '\0' ' ' | grep -q '[s]ubtun-agent'; then i=0; else i=$((i+30)); fi
-[ "$i" -ge %d ] && exit 0
-done`, int(idleExit.Seconds()))
-
-// owner is this user on this machine, hashed: a label value.
-var owner = sync.OnceValue(func() string {
-	who := strconv.Itoa(os.Getuid())
-	if u, err := user.Current(); err == nil {
-		who = u.Username
-	}
-	host, _ := os.Hostname()
-	sum := sha256.Sum256([]byte(who + "@" + host))
-	return hex.EncodeToString(sum[:])[:16]
-})
 
 // podSpec is the pod subtun creates: an unprivileged user, no token, no
 // writable root, a scratch /tmp for the agent: the restricted pod
@@ -75,9 +37,7 @@ func podSpec(t Target, ns string) (*corev1.Pod, error) {
 	no, yes, nobody := false, true, int64(65534)
 	grace := int64(1)
 	p := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Labels: map[string]string{
-			labelManagedBy: managedBy, labelOwner: owner(), labelPID: strconv.Itoa(os.Getpid()),
-		}},
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Labels: transport.OwnLabels(t.Profile)},
 		Spec: corev1.PodSpec{
 			RestartPolicy:                 corev1.RestartPolicyNever,
 			AutomountServiceAccountToken:  &no,
@@ -90,7 +50,7 @@ func podSpec(t Target, ns string) (*corev1.Pod, error) {
 			Containers: []corev1.Container{{
 				Name:      podContainer,
 				Image:     image,
-				Command:   []string{"sh", "-c", idleScript},
+				Command:   []string{"sh", "-c", transport.IdleScript},
 				Env:       []corev1.EnvVar{{Name: "HOME", Value: "/tmp"}},
 				Resources: res,
 				SecurityContext: &corev1.SecurityContext{
@@ -101,9 +61,6 @@ func podSpec(t Target, ns string) (*corev1.Pod, error) {
 			}},
 			Volumes: []corev1.Volume{{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
 		},
-	}
-	if t.Profile != "" {
-		p.Labels[labelProfile] = t.Profile
 	}
 	if t.Name != "" {
 		p.Name = t.Name
@@ -147,9 +104,7 @@ func (r Resources) requirements() (corev1.ResourceRequirements, error) {
 	return out, nil
 }
 
-func ours(p *corev1.Pod) bool {
-	return p.Labels[labelManagedBy] == managedBy && p.Labels[labelOwner] == owner()
-}
+func ours(p *corev1.Pod) bool { return transport.Ours(p.Labels) }
 
 // ensurePod returns the pod subtun created for t, running: the one from
 // before while it still runs (a reconnect), else a new one. This user's
@@ -284,7 +239,7 @@ func podTrouble(p *corev1.Pod) (string, bool) {
 // ended, or whose subtun no longer runs on this machine (keep: the pod in
 // use).
 func cleanupLeftovers(ctx context.Context, cs kubernetes.Interface, ns, keep string, log *slog.Logger) {
-	list, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: labelManagedBy + "=" + managedBy + "," + labelOwner + "=" + owner()})
+	list, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: transport.LabelManagedBy + "=" + transport.ManagedBy + "," + transport.LabelOwner + "=" + transport.Owner()})
 	if err != nil {
 		log.Debug("listing leftover pods", "namespace", ns, "err", err)
 		return
@@ -294,24 +249,11 @@ func cleanupLeftovers(ctx context.Context, cs kubernetes.Interface, ns, keep str
 			continue
 		}
 		ended := p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed
-		if ended || !alive(p.Labels[labelPID]) {
+		if ended || !transport.Alive(p.Labels[transport.LabelPID]) {
 			log.Info("deleting a pod an earlier subtun left", "pod", ns+"/"+p.Name)
 			deletePod(ctx, cs, ns, p.Name, log)
 		}
 	}
-}
-
-// alive reports whether the subtun of that process id still runs here.
-func alive(pid string) bool {
-	n, err := strconv.Atoi(pid)
-	if err != nil || n <= 0 {
-		return false
-	}
-	if n == os.Getpid() {
-		return true
-	}
-	err = syscall.Kill(n, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 func deletePod(ctx context.Context, cs kubernetes.Interface, ns, name string, log *slog.Logger) {
