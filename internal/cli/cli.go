@@ -59,7 +59,7 @@ func newRoot() *cobra.Command {
 	}
 	root.PersistentFlags().BoolVarP(&g.verbose, "verbose", "v", false, "debug logging")
 	root.PersistentFlags().StringVar(&g.config, "config", "", "config file (default: $SUBTUN_CONFIG or ~/.config/subtun/config.yaml)")
-	root.AddCommand(newUpCmd(g), newK8sCmd(g), newDockerCmd(g), newStatusCmd(), newLogsCmd(), newRouteCmd(), newDNSCmd(), newProfileCmd(),
+	root.AddCommand(newUpCmd(g), newK8sCmd(g), newDockerCmd(g), newStatusCmd(), newLogsCmd(), newTUICmd(g), newRouteCmd(), newDNSCmd(), newProfileCmd(),
 		newImportCmd(g), newCleanupCmd(g), newVersionCmd(), newHelperCmd())
 	return root
 }
