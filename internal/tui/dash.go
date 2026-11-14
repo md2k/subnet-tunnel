@@ -44,9 +44,6 @@ func (a *app) buildDash() {
 		a.markSelected(a.list, 0)
 		if a.have {
 			a.renderDetail(time.Now())
-			if a.screen == scrDash {
-				a.rebuildLogs() // the logs follow the selected profile
-			}
 		}
 	})
 	a.detail = tview.NewTextView().SetDynamicColors(true).SetWrap(false)

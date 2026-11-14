@@ -300,10 +300,9 @@ func TestDashboard(t *testing.T) {
 	if l := next(); l != config.LayoutDetail {
 		t.Errorf("remembered %q", l)
 	}
-	// The list moves the detail, and the logs, with it.
+	// The list moves the detail with it; the logs stay every profile's.
 	u.key(tcell.KeyDown)
-	u.wait("last error: pod dev/debug: not found", "Logs · profile: dev")
-	u.gone("reconnected via")
+	u.wait("last error: pod dev/debug: not found", "Logs · profile: all", "reconnected via")
 	u.press("v")
 	u.wait("Profiles (3)")
 	if l := next(); l != config.LayoutTable {

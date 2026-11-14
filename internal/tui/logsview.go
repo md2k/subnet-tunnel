@@ -8,7 +8,6 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
-	"github.com/md2k/subnet-tunnel/internal/config"
 	"github.com/md2k/subnet-tunnel/internal/logring"
 )
 
@@ -69,15 +68,11 @@ func (a *app) logView() *tview.TextView {
 }
 
 // viewFilter is the filter of the log view on screen: the profile screen's
-// shows its profile; in layout detail the dashboard's follows the selected
-// profile.
+// shows its profile's lines; the dashboard's every profile's.
 func (a *app) viewFilter() logFilter {
 	f := a.filter
-	switch {
-	case a.screen == scrProfile && a.open >= 0 && a.open < len(a.st.Tunnels):
+	if a.screen == scrProfile && a.open >= 0 && a.open < len(a.st.Tunnels) {
 		f.profile = a.st.Tunnels[a.open].Name
-	case a.screen == scrDash && a.layout == config.LayoutDetail && a.sel < len(a.st.Tunnels):
-		f.profile = a.st.Tunnels[a.sel].Name
 	}
 	return f
 }
@@ -225,9 +220,5 @@ func (a *app) rebuildLogs() {
 }
 
 func (a *app) renderLogTitles() {
-	f := a.filter
-	if a.layout == config.LayoutDetail && a.sel < len(a.st.Tunnels) {
-		f.profile = a.st.Tunnels[a.sel].Name
-	}
-	a.dashLogs.SetTitle(boxTitle("Logs · " + tview.Escape(f.describe()) + " · " + a.followText()))
+	a.dashLogs.SetTitle(boxTitle("Logs · " + tview.Escape(a.filter.describe()) + " · " + a.followText()))
 }

@@ -655,7 +655,8 @@ subtun tui --layout detail
   way and a gauge of its traffic now (against the scale of its last 5 minutes); below, the log lines
   of every profile (a line no profile logged names its source, such as `helper`). Two layouts,
   switched with `v`: `table` (the profiles above the logs) and `detail` (a list, and the selected
-  profile's detail with its traffic graph next to it; the logs follow the selected profile).
+  profile's detail with its traffic graph next to it). The dashboard's logs are every profile's;
+  the profile screen has its own.
 - **Profile screen** (`enter`): its name, state, target, agent and kill switch in the header; then
   panes, each shown or hidden with `1` to `4` and remembered:
   - `2` traffic: where its own connection goes (the kube context, the API server or Docker host and
