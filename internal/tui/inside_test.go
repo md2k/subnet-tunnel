@@ -93,6 +93,23 @@ func TestTerminalLend(t *testing.T) {
 		t.Fatal("not run without a TUI")
 	}
 
+	// Starting: Lend waits for the TUI to run (or to have ended), so sudo
+	// never asks while the TUI takes the terminal over.
+	term.Starting()
+	lentEarly := make(chan struct{})
+	go term.Lend(func() { close(lentEarly) })
+	select {
+	case <-lentEarly:
+		t.Fatal("run while the TUI was starting")
+	case <-time.After(100 * time.Millisecond):
+	}
+	term.Ended()
+	select {
+	case <-lentEarly:
+	case <-time.After(5 * time.Second):
+		t.Fatal("not run once the TUI had ended")
+	}
+
 	t.Run("running", func(t *testing.T) {
 		u := start(t, newFake("full"), Options{Stop: func() {}, Terminal: term})
 		lent := make(chan struct{})

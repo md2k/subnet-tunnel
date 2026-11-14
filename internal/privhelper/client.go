@@ -79,6 +79,9 @@ func Start(ctx context.Context, helperLog io.Writer, log *slog.Logger, lend Lend
 	if err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil { // stopping: no sudo, no TUI stepping aside
+		return nil, err
+	}
 	log.Info("asking sudo for the root helper")
 	var c *Client
 	connect := func() { c, err = connectHelper(ctx, cmd, stdin, ln, token, log) }
