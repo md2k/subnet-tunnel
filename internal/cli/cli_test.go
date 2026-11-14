@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/md2k/subnet-tunnel/internal/config"
 	"github.com/md2k/subnet-tunnel/internal/privhelper"
 )
 
@@ -82,6 +83,46 @@ func TestK8sDryRunWithoutConfig(t *testing.T) {
 	}
 	if !strings.Contains(out, "routes on the utun (8, from 1 given, 1 excluded)") {
 		t.Fatalf("got\n%s", out)
+	}
+}
+
+// The target is named kubectl style, or picked by labels: then every
+// argument is a CIDR.
+func TestFollowArgs(t *testing.T) {
+	for _, args := range [][]string{
+		{"k8s", "deploy/toolbox", "203.0.113.0/24", "--dry-run"},
+		{"k8s", "pod/debug", "203.0.113.0/24", "--dry-run"},
+		{"k8s", "-l", "app=toolbox", "203.0.113.0/24", "--dry-run"},
+		{"docker", "-l", "com.docker.compose.service=web", "203.0.113.0/24", "--dry-run"},
+	} {
+		if out, err := runCLI(t, args...); err != nil || !strings.Contains(out, "routes on the utun") {
+			t.Errorf("%v: %v\n%s", args, err, out)
+		}
+	}
+	for want, args := range map[string][]string{
+		"name the pod, or pick one by its labels with --selector":              {"k8s", "--dry-run"},
+		`"debug": with --selector, the arguments are CIDRs (no pod name)`:      {"k8s", "-l", "app=x", "debug", "--dry-run"},
+		`"svc/web": name a pod (NAME, pod/NAME) or a Deployment (deploy/NAME)`: {"k8s", "svc/web", "--dry-run"},
+		`"deploy/": the name is missing`:                                       {"k8s", "deploy/", "--dry-run"},
+		`selector "x in (a"`:                                                   {"k8s", "-l", "x in (a", "--dry-run"},
+		`selector "a!=b": use key=value or key`:                                {"docker", "-l", "a!=b", "--dry-run"},
+		"name the container, or pick one by its labels with --selector":        {"docker", "--dry-run"},
+	} {
+		if _, err := runCLI(t, args...); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%v: %v, want %q", args, err, want)
+		}
+	}
+	for want, tg := range map[string]config.Target{
+		"deployment ops/toolbox":  {K8s: &config.K8sTarget{Namespace: "ops", Deployment: "toolbox"}},
+		"pods in ops with app=x":  {K8s: &config.K8sTarget{Namespace: "ops", Selector: "app=x"}},
+		"pods with app=x":         {K8s: &config.K8sTarget{Selector: "app=x"}},
+		"pod ops/debug":           {K8s: &config.K8sTarget{Namespace: "ops", Pod: "pod/debug"}},
+		"containers with app=web": {Docker: &config.DockerTarget{Selector: "app=web"}},
+		"container web":           {Docker: &config.DockerTarget{Container: "web"}},
+	} {
+		if got := configTarget(tg); got != want {
+			t.Errorf("configTarget: %q, want %q", got, want)
+		}
 	}
 }
 

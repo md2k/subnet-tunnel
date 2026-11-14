@@ -382,15 +382,26 @@ func (es *engineStatus) configProfiles(path string) control.ConfigProfiles {
 }
 
 // configTarget is a configured target for people: "pod ns/name",
-// "container name".
+// "deployment ns/name", "pods in ns with app=x", "container name",
+// "containers with key=value".
 func configTarget(t config.Target) string {
 	switch {
 	case t.K8s != nil:
-		pod := strings.TrimPrefix(t.K8s.Pod, "pod/")
+		ns := ""
 		if t.K8s.Namespace != "" {
-			pod = t.K8s.Namespace + "/" + pod
+			ns = t.K8s.Namespace + "/"
 		}
-		return "pod " + pod
+		switch {
+		case t.K8s.Deployment != "":
+			return "deployment " + ns + t.K8s.Deployment
+		case t.K8s.Selector != "" && t.K8s.Namespace != "":
+			return "pods in " + t.K8s.Namespace + " with " + t.K8s.Selector
+		case t.K8s.Selector != "":
+			return "pods with " + t.K8s.Selector
+		}
+		return "pod " + ns + strings.TrimPrefix(t.K8s.Pod, "pod/")
+	case t.Docker != nil && t.Docker.Selector != "":
+		return "containers with " + t.Docker.Selector
 	case t.Docker != nil:
 		return "container " + t.Docker.Container
 	}
