@@ -349,7 +349,7 @@ func (a *app) tabsTitle(t control.Tunnel) string {
 // work (a read-only run, a profile without routes, a run without DNS
 // capture).
 func (a *app) tabHint(t control.Tunnel) string {
-	works := a.st.Control == "full"
+	works := a.writable() && !a.stopping
 	other := "DNS names"
 	keys := []string{"a add", "x exclude", "d delete"}
 	if a.cfgTab == tabRoutes {

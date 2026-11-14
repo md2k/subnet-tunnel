@@ -24,7 +24,11 @@ type Source interface {
 }
 
 // Socket is the Source of the subtun whose control socket is at path.
-func Socket(path string) Source { return socket{control.NewClient(path)} }
+func Socket(path string) Source { return API(control.NewClient(path)) }
+
+// API is the Source a control API client talks to: a socket's, or the
+// in-memory one of subtun itself (control.Server.InMemory).
+func API(c *control.Client) Source { return socket{c} }
 
 type socket struct{ c *control.Client }
 

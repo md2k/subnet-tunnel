@@ -1,7 +1,8 @@
 // Package tui is subtun's terminal UI: it attaches to a running subtun's
-// control socket, shows its profiles, traffic and logs, and with control:
-// full changes it (stop, start, reconnect, routes, DNS names, profiles
-// added from the config file). Every change shows its dry run first.
+// control socket (or runs inside subtun: subtun up --tui), shows its
+// profiles, traffic and logs, and with control: full changes it (stop,
+// start, reconnect, routes, DNS names, profiles added from the config
+// file). Every change shows its dry run first.
 package tui
 
 import (
@@ -58,6 +59,17 @@ type Options struct {
 	Screen tcell.Screen
 	// Interval between status polls; 0: a second.
 	Interval time.Duration
+
+	// Stop, when set, means the TUI runs inside subtun (subtun up --tui):
+	// q and Ctrl-C ask, then call Stop to stop subtun, and the TUI shows
+	// the stop until ctx ends. Changes are allowed whatever control says
+	// (it governs the socket: other terminals).
+	Stop func()
+	// Stopping, when set, is closed once subtun is stopping, for whatever
+	// reason (q, a signal, --max-duration).
+	Stopping <-chan struct{}
+	// Terminal, when set, is how subtun lends the TUI's terminal to sudo.
+	Terminal *Terminal
 }
 
 const (
@@ -145,6 +157,8 @@ type app struct {
 	flashText  string
 	flashUntil time.Time
 	searching  bool
+	stopping   bool // inside subtun: it is stopping
+	quitDlg    *dlg // inside subtun: the stop question
 
 	// The terminal's size at the last draw; layouts fit it.
 	scrW, scrH int
@@ -157,6 +171,7 @@ type app struct {
 	ui        chan func()
 	started   chan struct{} // closed at the first draw
 	startOnce sync.Once
+	ended     chan struct{} // closed when the event loop has ended
 
 	wantConns atomic.Bool
 	pollNow   chan struct{}
@@ -165,7 +180,7 @@ type app struct {
 	pending []logring.Line
 }
 
-// Run shows the TUI until q, Ctrl-C or ctx ends.
+// Run shows the TUI until q, Ctrl-C or ctx ends (inside subtun: ctx).
 func Run(ctx context.Context, o Options) error {
 	if o.Interval <= 0 {
 		o.Interval = time.Second
@@ -178,13 +193,25 @@ func Run(ctx context.Context, o Options) error {
 	}
 	a.tv.SetBeforeDrawFunc(a.resized)
 	a.tv.SetAfterDrawFunc(func(tcell.Screen) { a.startOnce.Do(func() { close(a.started) }) })
-	ended := make(chan struct{})
-	go a.pump(ended)
+	if o.Terminal != nil {
+		o.Terminal.set(a)
+		defer o.Terminal.set(nil)
+	}
+	go a.pump()
 	go a.poll()
 	go a.streamLogs()
 	go a.flushLogs()
+	if o.Stopping != nil {
+		go func() {
+			select {
+			case <-o.Stopping:
+				a.update(a.stopped)
+			case <-ctx.Done():
+			}
+		}()
+	}
 	err := a.tv.Run()
-	close(ended)
+	close(a.ended)
 	return err
 }
 
@@ -192,10 +219,10 @@ func Run(ctx context.Context, o Options) error {
 // only caller of QueueUpdate, which waits until the update has run, and it
 // is the one that stops the event loop once ctx ends (q, Ctrl-C, the
 // caller): so nothing ever waits on an event loop that has stopped.
-func (a *app) pump(ended <-chan struct{}) {
+func (a *app) pump() {
 	select {
 	case <-a.started:
-	case <-ended:
+	case <-a.ended:
 		return
 	}
 	for {
@@ -205,7 +232,7 @@ func (a *app) pump(ended <-chan struct{}) {
 		}
 		select {
 		case <-a.ctx.Done():
-		case <-ended:
+		case <-a.ended:
 			return
 		case f := <-a.ui:
 			a.tv.QueueUpdateDraw(f)
@@ -243,7 +270,7 @@ func newApp(ctx context.Context, quit context.CancelFunc, o Options) *app {
 
 	a := &app{o: o, ctx: ctx, quit: quit, tv: tview.NewApplication(), pages: tview.NewPages(), samples: map[string][]meter.Sample{},
 		conns: map[string][]meter.ConnInfo{}, following: true, screen: scrDash, open: -1, pollNow: make(chan struct{}, 1),
-		ui: make(chan func(), 64), started: make(chan struct{})}
+		ui: make(chan func(), 64), started: make(chan struct{}), ended: make(chan struct{})}
 	a.bits = o.Units == config.UnitsBits
 	a.mouse = o.Mouse
 	for _, h := range o.HiddenLevels {
@@ -267,7 +294,7 @@ func newApp(ctx context.Context, quit context.CancelFunc, o Options) *app {
 	a.buildDash()
 	a.buildProfile()
 	a.buildLogs()
-	a.helpView = tview.NewTextView().SetDynamicColors(true).SetText(helpText)
+	a.helpView = tview.NewTextView().SetDynamicColors(true).SetText(helpText(o.Stop != nil))
 	boxed(a.helpView.Box, "Keys")
 
 	a.pages.AddPage(scrDash, a.body, true, true)
@@ -428,6 +455,8 @@ func (a *app) renderHeader() {
 	switch {
 	case a.gone != nil && !a.have:
 		s = " subtun · [red]no answer:[-] " + tview.Escape(a.gone.Error())
+	case !a.have && a.inside():
+		s = " subtun · starting…"
 	case !a.have:
 		s = " subtun · connecting to the control socket…"
 	case a.screen == scrProfile && a.open >= 0 && a.open < len(a.st.Tunnels):
@@ -447,22 +476,35 @@ func (a *app) renderHeader() {
 		} else if slices.ContainsFunc(st.Tunnels, func(t control.Tunnel) bool { return len(t.Include) > 0 }) {
 			s += " · capture not started yet"
 		}
-		if st.Control == "full" {
-			s += " · control full"
+		if st.Control == "full" || a.inside() { // inside: control is the socket's, for other terminals
+			s += " · control " + st.Control
 		} else {
 			s += " · control " + st.Control + " (read only)"
 		}
 	}
-	if a.gone != nil && a.have { // first: a long header is cut at the end
+	switch { // first: a long header is cut at the end
+	case a.stopping:
+		s = strings.Replace(s, " subtun ", " subtun · [yellow]stopping…[-] (this closes once routes and rules are off) ", 1)
+	case a.gone != nil && a.have:
 		s = strings.Replace(s, " subtun ", " subtun · [red]no answer: subtun stopped?[-] ", 1)
 	}
 	a.header.SetText(s)
 	right := "esc back · ? help "
-	if a.screen == scrDash {
+	switch {
+	case a.screen == scrDash && a.inside():
+		right = "? help · q stop "
+	case a.screen == scrDash:
 		right = "? help · q quit "
 	}
 	a.headerRight.SetText(right)
 }
+
+// inside reports whether the TUI runs inside subtun (subtun up --tui).
+func (a *app) inside() bool { return a.o.Stop != nil }
+
+// writable reports whether the run takes changes from here: control: full,
+// or the TUI inside subtun.
+func (a *app) writable() bool { return a.inside() || a.st.Control == "full" }
 
 func (a *app) followText() string {
 	if a.following {
@@ -476,7 +518,7 @@ func (a *app) followText() string {
 
 // key is a key for the key bar; an action greyed out in a read-only run.
 func (a *app) key(k, what string, action bool) string {
-	if action && (a.st.Control != "full" || a.gone != nil) {
+	if action && (!a.writable() || a.gone != nil || a.stopping) {
 		return "[darkgray]" + k + " " + what + "[-]"
 	}
 	return "[yellow]" + k + "[-] " + what
@@ -515,7 +557,7 @@ func (a *app) renderMsg(now time.Time) {
 	switch {
 	case a.flashText != "" && now.Before(a.flashUntil):
 		a.msg.SetText(" " + a.flashText)
-	case a.have && a.st.Control != "full":
+	case a.have && !a.writable():
 		a.msg.SetText(" [yellow]" + readOnlyText + "[-]")
 	default:
 		a.msg.SetText("")
@@ -525,7 +567,7 @@ func (a *app) renderMsg(now time.Time) {
 // onKey routes a key: dialogs and the search field take their own keys.
 func (a *app) onKey(ev *tcell.EventKey) *tcell.EventKey {
 	if ev.Key() == tcell.KeyCtrlC { // tview's own Ctrl-C would skip pump
-		a.quit()
+		a.quitKey(true)
 		return nil
 	}
 	if a.dialog != nil || a.searching {
@@ -533,7 +575,7 @@ func (a *app) onKey(ev *tcell.EventKey) *tcell.EventKey {
 	}
 	switch ev.Rune() {
 	case 'q':
-		a.quit()
+		a.quitKey(false)
 		return nil
 	case '?':
 		if a.screen != scrHelp {
@@ -590,9 +632,11 @@ func (a *app) onKey(ev *tcell.EventKey) *tcell.EventKey {
 func (a *app) act(f func()) {
 	switch {
 	case !a.have:
+	case a.stopping:
+		a.flash("yellow", "subtun is stopping")
 	case a.gone != nil:
 		a.flash("red", "subtun doesn't answer")
-	case a.st.Control != "full":
+	case !a.writable():
 		a.flash("yellow", readOnlyText)
 	default:
 		f()
@@ -656,7 +700,22 @@ func (a *app) nameWidth() int {
 	return w
 }
 
-const helpText = `
+// helpText is the key list; inside: the TUI runs inside subtun.
+func helpText(inside bool) string {
+	first := `
+ q quits the TUI; subtun goes on. Changes need control: full; each one
+ shows its dry run before it is made, and lasts until subtun stops.
+`
+	if inside {
+		first = `
+ q (or Ctrl-C) stops subtun, after asking. Each change shows its dry run
+ before it is made, and lasts until subtun stops.
+`
+	}
+	return first + helpKeys
+}
+
+const helpKeys = `
  [yellow]Dashboard[-]
    ↑ ↓ j k     select a profile
    enter       open the profile screen
@@ -692,7 +751,4 @@ const helpText = `
    /           search (enter applies, esc cancels; empty: none)
    g G         top, bottom
    esc         back
-
- Changes need control: full. Each one shows its dry run before it is made,
- and lasts until subtun stops. q quits the TUI; subtun goes on.
 `
