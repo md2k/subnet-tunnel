@@ -9,9 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -258,20 +260,25 @@ type Target struct {
 	Docker *DockerTarget `json:"docker,omitempty"`
 }
 
-// K8sTarget selects a pod.
+// K8sTarget selects a pod: one of Pod, Deployment (a running pod of it)
+// or Selector (a running pod with these labels).
 type K8sTarget struct {
 	Kubeconfig string `json:"kubeconfig,omitempty"`
 	Context    string `json:"context,omitempty"`
 	Namespace  string `json:"namespace,omitempty"`
-	Pod        string `json:"pod"`
+	Pod        string `json:"pod,omitempty"`
+	Deployment string `json:"deployment,omitempty"`
+	Selector   string `json:"selector,omitempty"`
 	Container  string `json:"container,omitempty"`
 }
 
-// DockerTarget selects a container.
+// DockerTarget selects a container: Container, or Selector (a running
+// container with these labels).
 type DockerTarget struct {
 	Host      string `json:"host,omitempty"`
 	Context   string `json:"context,omitempty"`
-	Container string `json:"container"`
+	Container string `json:"container,omitempty"`
+	Selector  string `json:"selector,omitempty"`
 }
 
 // Tun configures subtun's own interface.
@@ -440,6 +447,24 @@ func (f *File) Names() []string {
 	return names
 }
 
+// oneOf checks that exactly one of the keys under what is set.
+func oneOf(what string, vals map[string]string) error {
+	keys := slices.Sorted(maps.Keys(vals))
+	var set []string
+	for _, k := range keys {
+		if vals[k] != "" {
+			set = append(set, k)
+		}
+	}
+	switch len(set) {
+	case 1:
+		return nil
+	case 0:
+		return fmt.Errorf("%s needs one of %s", what, strings.Join(keys, ", "))
+	}
+	return fmt.Errorf("%s: %s don't go together (one of %s)", what, strings.Join(set, " and "), strings.Join(keys, ", "))
+}
+
 func (p Profile) validate(name string) error {
 	if !profileName.MatchString(name) {
 		return fmt.Errorf("profile %q: names are lowercase letters, digits, '.', '_' and '-'", name)
@@ -449,12 +474,12 @@ func (p Profile) validate(name string) error {
 	case p.Target.K8s != nil && p.Target.Docker != nil:
 		return fail(errors.New("target: set either k8s or docker, not both"))
 	case p.Target.K8s != nil:
-		if p.Target.K8s.Pod == "" {
-			return fail(errors.New("target.k8s.pod is required"))
+		if err := oneOf("target.k8s", map[string]string{"pod": p.Target.K8s.Pod, "deployment": p.Target.K8s.Deployment, "selector": p.Target.K8s.Selector}); err != nil {
+			return fail(err)
 		}
 	case p.Target.Docker != nil:
-		if p.Target.Docker.Container == "" {
-			return fail(errors.New("target.docker.container is required"))
+		if err := oneOf("target.docker", map[string]string{"container": p.Target.Docker.Container, "selector": p.Target.Docker.Selector}); err != nil {
+			return fail(err)
 		}
 	default:
 		return fail(errors.New("target: set k8s or docker"))

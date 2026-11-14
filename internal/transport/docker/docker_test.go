@@ -1,6 +1,11 @@
 package docker
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/moby/moby/api/types/container"
+)
 
 // testdata/dockerconfig is laid out like ~/.docker: config.json names the
 // current context, contexts/meta/<sha256(name)>/meta.json holds each endpoint.
@@ -32,5 +37,47 @@ func TestResolveHost(t *testing.T) {
 	}
 	if _, err := ResolveHost("", "missing", fixture); err == nil {
 		t.Error("unknown context accepted")
+	}
+}
+
+// A followed container: running and not unhealthy or starting; the one
+// picked before while it still is, else the newest.
+func TestChoose(t *testing.T) {
+	c := func(name string, created int64, state container.ContainerState, health container.HealthStatus) container.Summary {
+		s := container.Summary{Names: []string{"/" + name}, Created: created, State: state}
+		if health != "" {
+			s.Health = &container.HealthSummary{Status: health}
+		}
+		return s
+	}
+	items := []container.Summary{
+		c("web-1", 100, container.StateRunning, ""),
+		c("web-2", 200, container.StateRunning, container.Healthy),
+		c("web-3", 300, container.StateRunning, container.Starting),
+		c("web-4", 400, container.StateExited, ""),
+		c("web-5", 500, container.StateRunning, container.Unhealthy),
+	}
+	if got, err := choose(items, "app=web", ""); err != nil || got != "web-2" {
+		t.Errorf("newest usable: %q %v", got, err)
+	}
+	if got, _ := choose(items, "app=web", "web-1"); got != "web-1" {
+		t.Errorf("picked before: %q", got)
+	}
+	if got, _ := choose(items, "app=web", "web-5"); got != "web-2" {
+		t.Errorf("picked before, now unhealthy: %q", got)
+	}
+	if _, err := choose(nil, "app=web", ""); err == nil || err.Error() != "containers with app=web: none running" {
+		t.Errorf("none: %v", err)
+	}
+	if _, err := choose(items[2:], "app=web", ""); err == nil || !strings.Contains(err.Error(), "none running and healthy (3 found)") {
+		t.Errorf("none usable: %v", err)
+	}
+	for _, sel := range []string{"", "a=b,", "=b", "a!=b"} {
+		if _, err := ParseSelector(sel); err == nil {
+			t.Errorf("selector %q accepted", sel)
+		}
+	}
+	if parts, err := ParseSelector("com.docker.compose.service=web, tier"); err != nil || len(parts) != 2 || parts[1] != "tier" {
+		t.Errorf("selector: %v %v", parts, err)
 	}
 }

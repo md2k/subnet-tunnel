@@ -68,22 +68,53 @@ func TestParse(t *testing.T) {
 	}
 }
 
+// A target follows a Deployment or labels, instead of naming one pod or
+// container; the messages say which keys go together.
+func TestFollowTargets(t *testing.T) {
+	f, err := Parse([]byte(`profiles:
+  a: {target: {k8s: {namespace: ops, deployment: toolbox}}, socks: 127.0.0.1:1}
+  b: {target: {k8s: {selector: "app=toolbox,tier!=db"}}, socks: 127.0.0.1:2}
+  c: {target: {docker: {selector: com.docker.compose.service=web}}, socks: 127.0.0.1:3}
+`), "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := f.Profile("a"); p.Target.K8s.Deployment != "toolbox" || p.Target.K8s.Pod != "" {
+		t.Errorf("a: %+v", p.Target.K8s)
+	}
+	if p, _ := f.Profile("c"); p.Target.Docker.Selector != "com.docker.compose.service=web" {
+		t.Errorf("c: %+v", p.Target.Docker)
+	}
+	for doc, want := range map[string]string{
+		`profiles: {a: {target: {k8s: {pod: p, selector: x}}, socks: x}}`: "target.k8s: pod and selector don't go together (one of deployment, pod, selector)",
+		`profiles: {a: {target: {k8s: {context: c}}, socks: x}}`:          "target.k8s needs one of deployment, pod, selector",
+		`profiles: {a: {target: {docker: {context: c}}, socks: x}}`:       "target.docker needs one of container, selector",
+	} {
+		if _, err := Parse([]byte(doc), "t"); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", doc, err, want)
+		}
+	}
+}
+
 func TestParseRejects(t *testing.T) {
 	cases := map[string]string{
-		"typo in key": `profiles: {a: {target: {k8s: {pod: p}}, socks: x, rotues: [10.0.0.0/8]}}`,
-		"no target":   `profiles: {a: {socks: 127.0.0.1:1080}}`,
-		"two targets": `profiles: {a: {target: {k8s: {pod: p}, docker: {container: c}}, socks: x}}`,
-		"no pod":      `profiles: {a: {target: {k8s: {namespace: n}}, socks: x}}`,
-		"bad route":   `profiles: {a: {target: {k8s: {pod: p}}, routes: [10.1.2.0/16]}}`,
-		"loopback":    `profiles: {a: {target: {k8s: {pod: p}}, routes: [127.0.0.0/8]}}`,
-		"bad agent":   `profiles: {a: {target: {k8s: {pod: p}}, socks: x, agent: perl}}`,
-		"bad name":    `profiles: {"Dev Cluster": {target: {k8s: {pod: p}}, socks: x}}`,
-		"nothing":     `profiles: {a: {target: {k8s: {pod: p}}}}`,
-		"empty":       `profiles: {}`,
-		"dns capture": `profiles: {a: {target: {k8s: {pod: p}}, socks: x, dns: {capture: magic}}}`,
-		"dns regex":   `profiles: {a: {target: {k8s: {pod: p}}, socks: x, dns: {domains: ['.*\.x\.com']}}}`,
-		"dns pattern": `profiles: {a: {target: {k8s: {pod: p}}, socks: x, dns: {patterns: ['(']}}}`,
-		"dns servers": `profiles: {a: {target: {k8s: {pod: p}}, socks: x, dns: {servers: {a: b}}}}`,
+		"typo in key":            `profiles: {a: {target: {k8s: {pod: p}}, socks: x, rotues: [10.0.0.0/8]}}`,
+		"no target":              `profiles: {a: {socks: 127.0.0.1:1080}}`,
+		"two targets":            `profiles: {a: {target: {k8s: {pod: p}, docker: {container: c}}, socks: x}}`,
+		"no pod":                 `profiles: {a: {target: {k8s: {namespace: n}}, socks: x}}`,
+		"pod and deployment":     `profiles: {a: {target: {k8s: {pod: p, deployment: d}}, socks: x}}`,
+		"no container":           `profiles: {a: {target: {docker: {host: h}}, socks: x}}`,
+		"container and selector": `profiles: {a: {target: {docker: {container: c, selector: app=x}}, socks: x}}`,
+		"bad route":              `profiles: {a: {target: {k8s: {pod: p}}, routes: [10.1.2.0/16]}}`,
+		"loopback":               `profiles: {a: {target: {k8s: {pod: p}}, routes: [127.0.0.0/8]}}`,
+		"bad agent":              `profiles: {a: {target: {k8s: {pod: p}}, socks: x, agent: perl}}`,
+		"bad name":               `profiles: {"Dev Cluster": {target: {k8s: {pod: p}}, socks: x}}`,
+		"nothing":                `profiles: {a: {target: {k8s: {pod: p}}}}`,
+		"empty":                  `profiles: {}`,
+		"dns capture":            `profiles: {a: {target: {k8s: {pod: p}}, socks: x, dns: {capture: magic}}}`,
+		"dns regex":              `profiles: {a: {target: {k8s: {pod: p}}, socks: x, dns: {domains: ['.*\.x\.com']}}}`,
+		"dns pattern":            `profiles: {a: {target: {k8s: {pod: p}}, socks: x, dns: {patterns: ['(']}}}`,
+		"dns servers":            `profiles: {a: {target: {k8s: {pod: p}}, socks: x, dns: {servers: {a: b}}}}`,
 	}
 	for name, doc := range cases {
 		if _, err := Parse([]byte(doc), name); err == nil {

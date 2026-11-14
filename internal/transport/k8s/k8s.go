@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +20,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -36,8 +39,17 @@ type Target struct {
 	Context    string // empty: current context
 	Namespace  string // empty: the context's namespace
 	Pod        string
+	// Deployment or Selector, instead of Pod, follows: a running, ready pod
+	// of the Deployment (by its own selector) or with these labels, picked
+	// at each connect (see pickPod).
+	Deployment string
+	Selector   string
 	Container  string // empty: kubectl's default container
+	// Picked remembers the pod a followed target picked last.
+	Picked *transport.Picked
 }
+
+func (t Target) followed() bool { return t.Deployment != "" || t.Selector != "" }
 
 const defaultContainerAnnotation = "kubectl.kubernetes.io/default-container"
 
@@ -51,6 +63,15 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	if err != nil {
 		return nil, err
 	}
+	if t.followed() {
+		if prev := t.Picked.Get(); prev != k.pod {
+			msg := "pod picked"
+			if prev != "" {
+				msg = "pod picked: the one before is gone or not ready"
+			}
+			log.Info(msg, "follows", k.follows, "pod", k.ns+"/"+k.pod)
+		}
+	}
 	c, err := transport.Bootstrap(ctx, k, agents, opts, log.With("pod", k.ns+"/"+k.pod, "container", k.container))
 	if err != nil {
 		return nil, err
@@ -58,6 +79,7 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	c.Host = k.cfg.Host
 	c.Endpoints = transport.ResolveEndpoint(ctx, k.cfg.Host)
 	c.Local = transport.IsLocal(k.cfg.Host, c.Endpoints)
+	t.Picked.Set(k.pod)
 	return c, nil
 }
 
@@ -94,6 +116,7 @@ type kube struct {
 	cs        kubernetes.Interface
 	ns, pod   string
 	container string
+	follows   string // followed: what, as pickPod says it ("deployment ns/name")
 }
 
 func newKube(ctx context.Context, t Target) (*kube, error) {
@@ -119,18 +142,102 @@ func newKube(ctx context.Context, t Target) (*kube, error) {
 	if err != nil {
 		return nil, err
 	}
-	pod, err := cs.CoreV1().Pods(ns).Get(ctx, t.Pod, metav1.GetOptions{})
+	name, follows := t.Pod, ""
+	if t.followed() {
+		if name, follows, err = pickPod(ctx, cs, ns, t); err != nil {
+			return nil, err
+		}
+	}
+	pod, err := cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("pod %s/%s: %w", ns, t.Pod, err)
+		return nil, fmt.Errorf("pod %s/%s: %w", ns, name, err)
 	}
 	if pod.Status.Phase != corev1.PodRunning {
-		return nil, fmt.Errorf("pod %s/%s is %s, not Running", ns, t.Pod, pod.Status.Phase)
+		return nil, fmt.Errorf("pod %s/%s is %s, not Running", ns, name, pod.Status.Phase)
 	}
 	container, err := pickContainer(pod, t.Container)
 	if err != nil {
 		return nil, err
 	}
-	return &kube{cfg: cfg, cs: cs, ns: ns, pod: t.Pod, container: container}, nil
+	return &kube{cfg: cfg, cs: cs, ns: ns, pod: name, container: container, follows: follows}, nil
+}
+
+// pickPod picks the pod a followed target connects to: running, ready and
+// not being deleted; the one picked last time while it still is (its
+// agent is cached there), else the newest (during a rollout the older ones
+// are going). follows says what was followed, for people.
+func pickPod(ctx context.Context, cs kubernetes.Interface, ns string, t Target) (name, follows string, err error) {
+	sel := t.Selector
+	follows = "pods in " + ns + " with " + sel
+	if t.Deployment != "" {
+		follows = "deployment " + ns + "/" + t.Deployment
+		d, err := cs.AppsV1().Deployments(ns).Get(ctx, t.Deployment, metav1.GetOptions{})
+		if err != nil {
+			return "", follows, fmt.Errorf("%s: %w", follows, err)
+		}
+		s, err := metav1.LabelSelectorAsSelector(d.Spec.Selector)
+		if err != nil {
+			return "", follows, fmt.Errorf("%s: its selector: %w", follows, err)
+		}
+		sel = s.String()
+	} else if _, err := labels.Parse(sel); err != nil {
+		return "", follows, fmt.Errorf("selector %q: %w", sel, err)
+	}
+	list, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: sel})
+	if err != nil {
+		return "", follows, fmt.Errorf("%s: %w", follows, err)
+	}
+	var ready []corev1.Pod
+	other := map[string]int{}
+	for _, p := range list.Items {
+		switch {
+		case p.DeletionTimestamp != nil:
+			other["terminating"]++
+		case p.Status.Phase != corev1.PodRunning:
+			other[strings.ToLower(string(p.Status.Phase))]++
+		case !podReady(&p):
+			other["not ready"]++
+		default:
+			ready = append(ready, p)
+		}
+	}
+	if len(ready) == 0 {
+		if len(list.Items) == 0 {
+			return "", follows, fmt.Errorf("%s: no pods", follows)
+		}
+		var parts []string
+		for _, k := range slices.Sorted(maps.Keys(other)) {
+			parts = append(parts, fmt.Sprintf("%d %s", other[k], k))
+		}
+		return "", follows, fmt.Errorf("%s: no running, ready pod (%s)", follows, strings.Join(parts, ", "))
+	}
+	prev := t.Picked.Get()
+	if i := slices.IndexFunc(ready, func(p corev1.Pod) bool { return p.Name == prev }); i >= 0 {
+		return prev, follows, nil
+	}
+	newest := slices.MaxFunc(ready, func(a, b corev1.Pod) int {
+		if c := startTime(a).Compare(startTime(b)); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	return newest.Name, follows, nil
+}
+
+func podReady(p *corev1.Pod) bool {
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func startTime(p corev1.Pod) time.Time {
+	if p.Status.StartTime != nil {
+		return p.Status.StartTime.Time
+	}
+	return p.CreationTimestamp.Time
 }
 
 // pickContainer follows kubectl: the named container, else the
@@ -160,7 +267,18 @@ func pickContainer(pod *corev1.Pod, name string) (string, error) {
 }
 
 func (k *kube) Describe() string {
+	if k.follows != "" {
+		return fmt.Sprintf("pod %s/%s (%s), container %s", k.ns, k.pod, k.follows, k.container)
+	}
 	return fmt.Sprintf("pod %s/%s, container %s", k.ns, k.pod, k.container)
+}
+
+// ParseSelector checks a label selector (kubectl's syntax).
+func ParseSelector(sel string) error {
+	if _, err := labels.Parse(sel); err != nil {
+		return fmt.Errorf("selector %q: %w", sel, err)
+	}
+	return nil
 }
 
 func (k *kube) executor(cmd []string, stdin bool) (remotecommand.Executor, error) {
