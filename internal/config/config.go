@@ -294,10 +294,6 @@ type DockerTarget struct {
 	OldContainer string `json:"container,omitempty"` // renamed: name, with create: false
 }
 
-// DefaultImage is what a pod or container subtun creates runs, unless the
-// target says: it needs a shell, for the agent's upload.
-const DefaultImage = "busybox:1.37"
-
 // Resources are a created pod's or container's (a container takes limits
 // only), as Kubernetes quantities: cpu "100m" or "1", memory "64Mi".
 type Resources struct {

@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/md2k/subnet-tunnel/internal/config"
@@ -42,6 +43,10 @@ type runner struct {
 	gen    int                // events of other generations are ignored
 	cancel context.CancelFunc // nil: stopped
 	done   chan struct{}      // closed once it has finished
+	// keep, set before the runner is replaced by a reconnect of the same
+	// profile, keeps what it created (a pod) for the next one.
+	keep *atomic.Bool
+	spec *tunnelSpec
 }
 
 // socksListener is a profile's SOCKS proxy.

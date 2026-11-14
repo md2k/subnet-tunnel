@@ -7,7 +7,6 @@ package k8s
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -70,11 +69,11 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	// client-go reports stream teardown noise through klog; keep it in our
 	// log, at debug level.
 	klog.SetSlogLogger(slog.New(debugOnly{log.Handler()}).With("src", "client-go"))
-	k, err := newKube(ctx, t)
+	k, err := newKube(ctx, t, log)
 	if err != nil {
 		return nil, err
 	}
-	if t.followed() {
+	if t.followed() && !t.Create {
 		if prev := t.Picked.Get(); prev != k.pod {
 			msg := "pod picked"
 			if prev != "" {
@@ -130,7 +129,9 @@ type kube struct {
 	follows   string // followed: what, as pickPod says it ("deployment ns/name")
 }
 
-func newKube(ctx context.Context, t Target) (*kube, error) {
+// clients reads the kubeconfig for t: the REST config, a clientset and
+// the namespace.
+func clients(t Target) (*rest.Config, kubernetes.Interface, string, error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if t.Kubeconfig != "" {
 		rules.ExplicitPath = t.Kubeconfig
@@ -138,7 +139,7 @@ func newKube(ctx context.Context, t Target) (*kube, error) {
 	cc := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{CurrentContext: t.Context})
 	cfg, err := cc.ClientConfig()
 	if err != nil {
-		return nil, fmt.Errorf("kubeconfig: %w", err)
+		return nil, nil, "", fmt.Errorf("kubeconfig: %w", err)
 	}
 	if why := stdinBusy.Load(); why != nil && cfg.ExecProvider != nil {
 		cfg.ExecProvider.StdinUnavailable, cfg.ExecProvider.StdinUnavailableMessage = true, *why
@@ -146,18 +147,29 @@ func newKube(ctx context.Context, t Target) (*kube, error) {
 	ns := t.Namespace
 	if ns == "" {
 		if ns, _, err = cc.Namespace(); err != nil {
-			return nil, fmt.Errorf("kubeconfig namespace: %w", err)
+			return nil, nil, "", fmt.Errorf("kubeconfig namespace: %w", err)
 		}
 	}
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
+		return nil, nil, "", err
+	}
+	return cfg, cs, ns, nil
+}
+
+func newKube(ctx context.Context, t Target, log *slog.Logger) (*kube, error) {
+	cfg, cs, ns, err := clients(t)
+	if err != nil {
 		return nil, err
 	}
-	if t.Create {
-		return nil, errors.New("creating pods isn't there yet: use create: false with name or selector")
-	}
 	name, follows := t.Name, ""
-	if t.followed() {
+	switch {
+	case t.Create:
+		if name, err = ensurePod(ctx, cs, ns, t, log); err != nil {
+			return nil, err
+		}
+		follows = "created by subtun"
+	case t.followed():
 		if name, follows, err = pickPod(ctx, cs, ns, t); err != nil {
 			return nil, err
 		}

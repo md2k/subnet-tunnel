@@ -397,7 +397,7 @@ func profileSpec(f *config.File, path, name string, base settings, extra []strin
 	sp.s.routes = slices.Clone(extra)
 	sp.s.applyProfile(p, flags)
 	sp.base = sp.s
-	sp.connect, sp.endpoint = profileTarget(name, p.Target, &sp.s, g)
+	sp.connect, sp.endpoint, sp.release = profileTarget(name, p.Target, &sp.s, g)
 	sp.reload = func() (*tunnelSpec, error) {
 		f, err := config.Load(path)
 		if err != nil {
@@ -433,10 +433,11 @@ func configSpecs(path string, g *globalOpts) func(name string) (*tunnelSpec, err
 	}
 }
 
-// profileTarget returns how to connect to a profile's target, and how to
-// find its endpoint (API server, Docker daemon) without connecting. name
-// is the profile's ("": a target given on the command line).
-func profileTarget(name string, tg config.Target, s *settings, g *globalOpts) (connectFunc, func() (string, error)) {
+// profileTarget returns how to connect to a profile's target, how to find
+// its endpoint (API server, Docker daemon) without connecting, and how to
+// release what connecting created (nil: nothing). name is the profile's
+// ("": a target given on the command line).
+func profileTarget(name string, tg config.Target, s *settings, g *globalOpts) (connectFunc, func() (string, error), func(*slog.Logger)) {
 	switch {
 	case tg.K8s != nil:
 		k := tg.K8s
@@ -455,11 +456,15 @@ func profileTarget(name string, tg config.Target, s *settings, g *globalOpts) (c
 		if r := k.Resources; r != nil {
 			t.Resources = k8s.Resources{RequestCPU: r.Requests.CPU, RequestMemory: r.Requests.Memory, LimitCPU: r.Limits.CPU, LimitMemory: r.Limits.Memory}
 		}
+		var release func(*slog.Logger)
+		if t.Create {
+			release = func(log *slog.Logger) { k8s.Release(context.Background(), t, log) }
+		}
 		return func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
 				return k8s.Connect(ctx, t, agents, s.transport(g), log)
 			}, func() (string, error) {
 				return k8s.Endpoint(t)
-			}
+			}, release
 	default: // validated: there is one
 		d := tg.Docker
 		t := docker.Target{Host: d.Host, Context: d.Context, Create: d.Creates(), Name: d.Name, Selector: d.Selector,
@@ -471,7 +476,7 @@ func profileTarget(name string, tg config.Target, s *settings, g *globalOpts) (c
 				return docker.Connect(ctx, t, agents, s.transport(g), log)
 			}, func() (string, error) {
 				return docker.Endpoint(t)
-			}
+			}, nil
 	}
 }
 

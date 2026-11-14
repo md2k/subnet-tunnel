@@ -394,6 +394,7 @@ func TestEngineChanges(t *testing.T) {
 	}
 	mp := multiPlanFor(t, "work", "dev")
 	connects := make(chan string, 16)
+	releases := make(chan string, 16) // what connecting created goes when a tunnel ends for good
 	for _, sp := range mp.specs {
 		sp.s.socks = "" // no listening sockets in tests
 		name := sp.name
@@ -401,6 +402,18 @@ func TestEngineChanges(t *testing.T) {
 			connects <- name
 			<-ctx.Done()
 			return nil, ctx.Err()
+		}
+		sp.release = func(*slog.Logger) { releases <- name }
+	}
+	released := func(want string) {
+		t.Helper()
+		select {
+		case got := <-releases:
+			if got != want {
+				t.Errorf("released %s, want %s", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("%s not released", want)
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -449,6 +462,7 @@ func TestEngineChanges(t *testing.T) {
 	if err != nil || !strings.HasPrefix(res.Message, "stopped: its routes and DNS names are removed") || state(1) != "stopped" {
 		t.Fatalf("stop: %+v %v, state %s", res, err, state(1))
 	}
+	released("dev") // stopped: its pod goes
 	if res, _ := change(control.Change{Kind: control.KindProfile, Op: "stop", Profile: "dev"}); res.Changed || res.Message != "already stopped" {
 		t.Errorf("stop again: %+v", res)
 	}
@@ -470,6 +484,11 @@ func TestEngineChanges(t *testing.T) {
 	if name := <-connects; name != "work" {
 		t.Errorf("reconnected %s", name)
 	}
+	select {
+	case got := <-releases:
+		t.Errorf("released %s on a reconnect: the next runner uses its pod", got)
+	case <-time.After(200 * time.Millisecond):
+	}
 	if _, err := change(control.Change{Kind: control.KindProfile, Op: "start", Profile: "dev", Reload: true}); err == nil || !strings.Contains(err.Error(), "is connecting") {
 		t.Errorf("reload while running: %v", err)
 	}
@@ -482,6 +501,9 @@ func TestEngineChanges(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("runEngine didn't stop")
+	}
+	if got := []string{<-releases, <-releases}; !slices.Contains(got, "work") || !slices.Contains(got, "dev") {
+		t.Errorf("released at the end: %v", got)
 	}
 	if _, err := es.change(context.Background(), routeReq("add", "dev", "10.80.0.0/16")); err == nil || err.Error() != "subtun is stopping" {
 		t.Errorf("after the run: %v", err)

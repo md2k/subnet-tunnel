@@ -54,6 +54,9 @@ type tunnelSpec struct {
 	cfg      config.Profile // as configured (defaults applied): which shared values it sets
 	connect  connectFunc
 	endpoint func() (string, error) // the target's endpoint, without connecting
+	// release deletes what connecting created (a pod subtun runs), when
+	// the profile's tunnel ends for good; nil: nothing.
+	release func(*slog.Logger)
 	// reload reads the profile from the config file again, as the run read
 	// it at start (profile start --reload); nil: not from a config file.
 	reload func() (*tunnelSpec, error)
@@ -1096,7 +1099,11 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	runners := make([]runner, n)
 	startRunner := func(i int, mode startMode) {
 		r := &runners[i]
+		sp := mp.specs[i]
 		if r.cancel != nil {
+			if mode == startReconnect && r.spec == sp {
+				r.keep.Store(true) // the next runner connects to the same pod
+			}
 			r.cancel()
 		}
 		prev := r.done
@@ -1104,9 +1111,10 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 		gen := r.gen
 		rctx, rcancel := context.WithCancel(tctx)
 		done := make(chan struct{})
-		r.cancel, r.done = rcancel, done
+		keep := &atomic.Bool{}
+		r.cancel, r.done, r.keep, r.spec = rcancel, done, keep, sp
 		started[i] = time.Now()
-		sp, policy, live, tl, info := mp.specs[i], mp.policies[i], lives[i], logs[i], es.infos[i]
+		policy, live, tl, info := mp.policies[i], lives[i], logs[i], es.infos[i]
 		tt := tl.With(logx.ComponentKey, "transport")
 		try := func(ctx context.Context) (*session, error) {
 			carrier, err := sp.connect(ctx, agents, tt)
@@ -1149,6 +1157,9 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 				<-prev // its last act clears the live tunnel
 			}
 			runTunnel(rctx, i, live, policy, mode, try, send, tl, progress)
+			if sp.release != nil && !keep.Load() {
+				sp.release(tt)
+			}
 		}()
 	}
 	stopRunner := func(i int) {

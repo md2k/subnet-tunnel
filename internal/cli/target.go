@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/md2k/subnet-tunnel/internal/config"
+	"github.com/md2k/subnet-tunnel/internal/transport"
 	"github.com/md2k/subnet-tunnel/internal/transport/docker"
 	"github.com/md2k/subnet-tunnel/internal/transport/k8s"
 )
@@ -42,7 +43,7 @@ func (tf *targetFlags) register(cmd *cobra.Command) {
 	f.BoolVar(&tf.create, "create", true, "--k8s, --docker: create the pod or container (and delete it on stop); false: use an existing one")
 	f.StringVar(&tf.name, "name", "", "--k8s, --docker: the pod's or container's name: to create (default: generated), or the existing one")
 	f.StringVarP(&tf.selector, "selector", "l", "", "--k8s, --docker: an existing pod or container with these labels, picked at each connect (k8s: kubectl's syntax; docker: key=value, comma-separated); implies --create=false")
-	f.StringVar(&tf.image, "image", "", "--k8s, --docker: the image of the pod or container subtun creates (default: "+config.DefaultImage+")")
+	f.StringVar(&tf.image, "image", "", "--k8s, --docker: the image of the pod or container subtun creates (default: "+transport.DefaultImage+")")
 	f.StringVar(&tf.network, "network", "", "--docker: the network the container subtun creates joins (default: the default bridge)")
 	f.StringVar(&tf.requests, "requests", "", "--k8s: the created pod's requests, e.g. cpu=50m,memory=64Mi")
 	f.StringVar(&tf.limits, "limits", "", "--k8s, --docker: the created pod's or container's limits, e.g. cpu=1,memory=512Mi")
@@ -114,7 +115,7 @@ func (tf *targetFlags) spec(flags *pflag.FlagSet, args []string, s settings, g *
 	}
 	s.routes = args
 	sp := &tunnelSpec{s: s}
-	sp.connect, sp.endpoint = profileTarget("", tg, &sp.s, g)
+	sp.connect, sp.endpoint, sp.release = profileTarget("", tg, &sp.s, g)
 	return sp, nil
 }
 
