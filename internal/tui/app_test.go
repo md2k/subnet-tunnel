@@ -26,6 +26,7 @@ type fake struct {
 	lines   []logring.Line
 	changes []control.Change // the ones made (not dry runs)
 	dry     []control.Change
+	more    chan logring.Line // lines that come later
 }
 
 func newFake(controlMode string) *fake {
@@ -46,10 +47,10 @@ func newFake(controlMode string) *fake {
 		{Name: "staging", Target: "pod stg/toolbox", Routes: []string{"10.80.0.0/16"}},
 		{Name: "prod", Target: "pod prd/toolbox", Routes: []string{"10.0.0.0/8"}},
 	}}, lines: []logring.Line{
-		{Time: now.Add(-3 * time.Second), Text: `time=15:01:02.114 level=INFO msg=reconnected tunnel=work via="pod ops/toolbox"`, Level: "INFO", Tunnel: "work"},
-		{Time: now.Add(-2 * time.Second), Text: `time=15:01:05.551 level=WARN msg="connection to the agent lost; reconnecting" tunnel=dev`, Level: "WARN", Tunnel: "dev"},
-		{Time: now.Add(-time.Second), Text: `time=15:01:06.000 level=DEBUG msg="dns query" tunnel=dev name=api.dev.example`, Level: "DEBUG", Tunnel: "dev"},
-	}}
+		{Seq: 1, Time: now.Add(-3 * time.Second), Text: `time=15:01:02.114 level=INFO msg=reconnected tunnel=work via="pod ops/toolbox"`, Level: "INFO", Tunnel: "work"},
+		{Seq: 2, Time: now.Add(-2 * time.Second), Text: `time=15:01:05.551 level=WARN msg="connection to the agent lost; reconnecting" tunnel=dev`, Level: "WARN", Tunnel: "dev"},
+		{Seq: 3, Time: now.Add(-time.Second), Text: `time=15:01:06.000 level=DEBUG msg="dns query" tunnel=dev name=api.dev.example`, Level: "DEBUG", Tunnel: "dev"},
+	}, more: make(chan logring.Line, 8)}
 }
 
 func (f *fake) Status(context.Context) (control.Status, error) {
@@ -58,10 +59,7 @@ func (f *fake) Status(context.Context) (control.Status, error) {
 	return f.st, f.fail
 }
 
-func (f *fake) Samples(_ context.Context, since time.Time) ([]control.TunnelSamples, error) {
-	if !since.IsZero() {
-		return nil, nil
-	}
+func (f *fake) Samples(context.Context) ([]control.TunnelSamples, error) {
 	now := time.Now()
 	var ss []meter.Sample
 	for i := range 30 {
@@ -83,8 +81,14 @@ func (f *fake) Logs(ctx context.Context, fn func(logring.Line)) error {
 	for _, l := range lines {
 		fn(l)
 	}
-	<-ctx.Done()
-	return nil
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case l := <-f.more:
+			fn(l)
+		}
+	}
 }
 
 func (f *fake) Change(_ context.Context, c control.Change) (control.Result, error) {
@@ -113,6 +117,7 @@ func (f *fake) made() []control.Change {
 // goroutine: the simulation's cells may only be read there.
 type sized struct {
 	tcell.SimulationScreen
+	w, h  int
 	ready chan struct{} // closed once Init is done
 	mu    *sync.Mutex
 	shown *string
@@ -120,7 +125,7 @@ type sized struct {
 
 func (s sized) Init() error {
 	err := s.SimulationScreen.Init()
-	s.SetSize(120, 40)
+	s.SetSize(s.w, s.h)
 	close(s.ready)
 	return err
 }
@@ -159,11 +164,16 @@ type ui struct {
 	scr sized
 }
 
-// start runs the TUI on a simulation screen until the test ends.
+// start runs the TUI on a 120x40 simulation screen until the test ends.
 func start(t *testing.T, f *fake, o Options) *ui {
 	t.Helper()
+	return startSized(t, f, o, 120, 40)
+}
+
+func startSized(t *testing.T, f *fake, o Options, w, h int) *ui {
+	t.Helper()
 	sim := tcell.NewSimulationScreen("UTF-8")
-	scr := sized{SimulationScreen: sim, ready: make(chan struct{}), mu: &sync.Mutex{}, shown: new(string)}
+	scr := sized{SimulationScreen: sim, w: w, h: h, ready: make(chan struct{}), mu: &sync.Mutex{}, shown: new(string)}
 	o.Source, o.Screen, o.Interval = f, scr, 50*time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -257,9 +267,17 @@ func TestDashboard(t *testing.T) {
 	u := start(t, f, Options{OnLayout: func(l string) { layouts <- l }})
 	u.wait("Profiles (3)", "up 1h12m", "reconnecting 2/10", "pod ops/toolbox", "10.0.0.0/8 +1", "lockdown",
 		"120.0 kB/s", "3.1 MB/s", "reconnected", "connection to the agent lost; reconnecting", "control full")
+	next := func() string {
+		select {
+		case l := <-layouts:
+			return l
+		case <-time.After(5 * time.Second):
+			return "nothing"
+		}
+	}
 	u.press("v")
 	u.wait("routes", "+10.70.0.0/16", "kill switch on", "conns 3 open")
-	if l := <-layouts; l != config.LayoutDetail {
+	if l := next(); l != config.LayoutDetail {
 		t.Errorf("remembered %q", l)
 	}
 	// The list moves the detail with it.
@@ -267,7 +285,7 @@ func TestDashboard(t *testing.T) {
 	u.wait("last error: pod dev/debug: not found")
 	u.press("v")
 	u.wait("Profiles (3)")
-	if l := <-layouts; l != config.LayoutTable {
+	if l := next(); l != config.LayoutTable {
 		t.Errorf("remembered %q", l)
 	}
 }
@@ -279,9 +297,13 @@ func TestReadOnly(t *testing.T) {
 	u.wait("control status (read only)", "read only: this subtun runs with control: status")
 	u.press("s")
 	u.press("a")
-	time.Sleep(100 * time.Millisecond)
-	if strings.Contains(u.text(), "Stop work?") || len(f.made()) != 0 {
-		t.Fatal("an action ran in a read-only run")
+	u.press("l") // keys are handled in order: s and a are done once the logs show
+	u.wait("subtun › logs")
+	f.mu.Lock()
+	n := len(f.changes) + len(f.dry)
+	f.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("a read-only run was asked for %d changes", n)
 	}
 }
 
@@ -404,4 +426,89 @@ func TestNoAnswer(t *testing.T) {
 	u.wait("no answer: subtun stopped?", "Profiles (3)")
 	u.press("s")
 	u.wait("subtun doesn't answer")
+}
+
+// f pauses the logs: new lines are counted, not shown, until f again.
+func TestPause(t *testing.T) {
+	f := newFake("full")
+	u := start(t, f, Options{})
+	u.wait("dns query", "following")
+	u.press("f")
+	u.wait("paused")
+	f.more <- logring.Line{Seq: 4, Time: time.Now(), Text: "time=1 level=INFO msg=later tunnel=work", Level: "INFO", Tunnel: "work"}
+	u.wait("paused (1 new)")
+	if strings.Contains(u.text(), "later") {
+		t.Fatal("a paused view got a new line")
+	}
+	u.press("f")
+	u.wait("later", "following")
+	// A repeat (a stream that reconnected) isn't shown twice.
+	f.more <- logring.Line{Seq: 4, Time: time.Now(), Text: "time=1 level=INFO msg=later tunnel=work", Level: "INFO", Tunnel: "work"}
+	f.more <- logring.Line{Seq: 5, Time: time.Now(), Text: "time=1 level=INFO msg=latest tunnel=work", Level: "INFO", Tunnel: "work"}
+	u.wait("latest")
+	if n := strings.Count(u.text(), "later"); n != 1 {
+		t.Fatalf("the repeat shown: %d times", n)
+	}
+}
+
+// The key list returns to the screen it was opened from.
+func TestHelpReturns(t *testing.T) {
+	f := newFake("full")
+	u := start(t, f, Options{})
+	u.wait("Profiles (3)")
+	u.key(tcell.KeyEnter)
+	u.wait("subtun › work")
+	u.press("l")
+	u.wait("subtun › logs")
+	u.press("?")
+	u.wait("subtun › keys")
+	u.key(tcell.KeyEscape)
+	u.wait("subtun › logs")
+	u.key(tcell.KeyEscape)
+	u.wait("subtun › work")
+}
+
+// On 80x24 the table drops columns rather than lose the rates, the keys to
+// get help and out come first, and dialogs fit.
+func TestNarrow(t *testing.T) {
+	f := newFake("full")
+	u := startSized(t, f, Options{}, 80, 24)
+	u.wait("Profiles (3)", "120.0 kB/s", "3.1 MB/s", "reconnecting 2/10", "? help  q quit")
+	u.press("a")
+	u.wait("staging", "can't join")
+	for _, l := range strings.Split(u.text(), "\n") {
+		if strings.Contains(l, "staging") && !strings.Contains(l, "│ staging") && !strings.Contains(l, "║ staging") {
+			t.Fatalf("the dialog's first column is cut: %q", l)
+		}
+	}
+	u.key(tcell.KeyEscape)
+	u.gone("staging")
+	u.key(tcell.KeyDown)
+	u.key(tcell.KeyDown)
+	u.press("s")
+	u.wait("Stop vault?", "Dry run: would stop")
+	u.key(tcell.KeyEscape)
+}
+
+// The TUI follows the terminal's size: the table and an open dialog fit
+// again at once.
+func TestResize(t *testing.T) {
+	f := newFake("full")
+	u := start(t, f, Options{})
+	u.wait("Profiles (3)", "TARGET", "pod ops/toolbox")
+	u.press("a")
+	u.wait("Add a profile from", "can join")
+	u.sim.SetSize(80, 24)
+	u.sim.PostEvent(tcell.NewEventResize(80, 24))
+	u.wait("? help  q quit")
+	u.gone("pod ops/toolbox") // the table's TARGET column went; the dialog has its own
+	for _, l := range strings.Split(u.text(), "\n") {
+		if strings.Contains(l, "staging") && !strings.Contains(l, "│ staging") && !strings.Contains(l, "║ staging") {
+			t.Fatalf("the dialog's first column is cut after the resize: %q", l)
+		}
+	}
+	u.key(tcell.KeyEscape)
+	u.sim.SetSize(120, 40)
+	u.sim.PostEvent(tcell.NewEventResize(120, 40))
+	u.wait("TARGET", "pod ops/toolbox")
 }

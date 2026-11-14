@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/rivo/tview"
 
@@ -18,18 +17,18 @@ const maxLines = logring.DefaultLines
 // logBuf is the log lines the TUI got, oldest first.
 type logBuf struct {
 	lines []logring.Line
-	last  time.Time // the newest line's time: a stream that reconnects repeats the held lines
+	last  uint64 // the newest line's Seq: a stream that reconnects repeats the held lines
 }
 
-// add keeps l unless it is older than the newest line kept (a repeat).
+// add keeps l unless it was kept already.
 func (b *logBuf) add(l logring.Line) bool {
-	if !b.last.IsZero() && !l.Time.After(b.last) {
+	if l.Seq <= b.last {
 		return false
 	}
-	b.last = l.Time
+	b.last = l.Seq
 	b.lines = append(b.lines, l)
 	if len(b.lines) > maxLines {
-		b.lines = append(b.lines[:0], b.lines[len(b.lines)-maxLines:]...)
+		b.lines = b.lines[len(b.lines)-maxLines:] // append copies only the lines kept when it grows
 	}
 	return true
 }

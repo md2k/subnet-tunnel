@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
-	"time"
 
 	"github.com/md2k/subnet-tunnel/internal/control"
 	"github.com/md2k/subnet-tunnel/internal/logring"
@@ -14,8 +12,8 @@ import (
 // Source is a running subtun: its control socket, or a fake in tests.
 type Source interface {
 	Status(ctx context.Context) (control.Status, error)
-	// Samples returns each tunnel's samples newer than since (zero: all).
-	Samples(ctx context.Context, since time.Time) ([]control.TunnelSamples, error)
+	// Samples returns each tunnel's samples (the last 5 minutes).
+	Samples(ctx context.Context) ([]control.TunnelSamples, error)
 	Conns(ctx context.Context) ([]control.TunnelConns, error)
 	Config(ctx context.Context) (control.ConfigProfiles, error)
 	// Logs calls fn with the log lines held, then with new ones, until ctx
@@ -36,13 +34,9 @@ func (s socket) Status(ctx context.Context) (control.Status, error) {
 	return st, err
 }
 
-func (s socket) Samples(ctx context.Context, since time.Time) ([]control.TunnelSamples, error) {
-	endpoint := "/v1/samples"
-	if !since.IsZero() {
-		endpoint += "?since=" + url.QueryEscape(since.Format(time.RFC3339Nano))
-	}
+func (s socket) Samples(ctx context.Context) ([]control.TunnelSamples, error) {
 	var out []control.TunnelSamples
-	err := s.c.Get(ctx, endpoint, &out)
+	err := s.c.Get(ctx, "/v1/samples", &out)
 	return out, err
 }
 

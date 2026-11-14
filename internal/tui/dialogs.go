@@ -19,10 +19,15 @@ type dlg struct {
 	text   *tview.TextView
 	form   *tview.Form
 	result *tview.TextView
-	gen    int // the dry run asked last; older answers are dropped
+	gen    int  // the dry run asked last; older answers are dropped
+	shown  int  // the dry run on show
+	busy   bool // the change is on its way
 }
 
-const dialogWidth = 84
+const (
+	dialogWidth = 84
+	resultRows  = 4
+)
 
 func (a *app) newDlg(title, text string) *dlg {
 	d := &dlg{
@@ -32,48 +37,69 @@ func (a *app) newDlg(title, text string) *dlg {
 		result: tview.NewTextView().SetDynamicColors(true).SetWordWrap(true),
 	}
 	d.flex.SetBorder(true).SetTitle(" " + tview.Escape(title) + " ")
-	d.form.SetCancelFunc(func() { a.closeDialog(d.flex) })
+	d.form.SetCancelFunc(func() { a.closeDlg(d) })
 	return d
 }
 
-// show opens the dialog; formRows is the form's height.
-func (a *app) show(d *dlg, formRows int) {
-	inner := dialogWidth - 4
+// fit is a dialog's size on this screen: the pages part (the screen less
+// the header, message and key lines).
+func (a *app) fit(w, h int) (int, int) {
+	if a.scrW > 0 {
+		return max(min(w, a.scrW), 1), max(min(h, a.scrH-3), 1)
+	}
+	return w, h
+}
+
+// showDlg opens the dialog; formRows is the form's height.
+func (a *app) showDlg(d *dlg, formRows int) {
+	w, _ := a.fit(dialogWidth, 0)
 	textRows := 0
 	if d.text.GetText(false) != "" {
-		textRows = textHeight(d.text.GetText(false), inner)
+		textRows = textHeight(d.text.GetText(false), w-4)
 		d.flex.AddItem(d.text, textRows, 0, false)
 	}
-	resultRows := 3
 	d.flex.AddItem(d.form, formRows, 0, true)
 	d.flex.AddItem(d.result, resultRows, 0, false)
 	d.flex.SetBorderPadding(0, 0, 1, 1)
-	a.openDialog(d.flex, dialogWidth, textRows+resultRows+formRows+2, d.form)
+	a.openDialog(d.flex, w, textRows+formRows+resultRows+2, d.form)
 }
 
 // textHeight is how many rows text takes wrapped to width.
 func textHeight(text string, width int) int {
 	n := 0
 	for _, l := range strings.Split(text, "\n") {
-		n += max(1, (tview.TaggedStringWidth(l)+width-1)/width)
+		n += max(1, (tview.TaggedStringWidth(l)+width-1)/max(width, 1))
 	}
 	return n + 1 // a blank row before what follows
 }
 
 func (a *app) openDialog(p tview.Primitive, w, h int, focus tview.Primitive) {
+	a.dlgW, a.dlgH = w, h
+	w, h = a.fit(w, h)
 	a.focusWas = a.tv.GetFocus()
 	a.dialog = p
 	// A Flex leaves what is behind it; the frame clears the dialog's area.
-	bg := tview.NewFrame(p).SetBorders(0, 0, 0, 0, 0, 0)
-	centred := tview.NewFlex().
+	a.dlgBox = tview.NewFrame(p).SetBorders(0, 0, 0, 0, 0, 0)
+	a.dlgCell = tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(nil, 0, 1, false).
-		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
-			AddItem(nil, 0, 1, false).
-			AddItem(bg, h, 0, true).
-			AddItem(nil, 0, 1, false), w, 0, true).
+		AddItem(a.dlgBox, h, 0, true).
 		AddItem(nil, 0, 1, false)
-	a.pages.AddPage("dialog", centred, true, true)
+	a.dlgCol = tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(a.dlgCell, w, 0, true).
+		AddItem(nil, 0, 1, false)
+	a.pages.AddPage("dialog", a.dlgCol, true, true)
 	a.tv.SetFocus(focus)
+}
+
+// refitDialog fits the open dialog to the screen again.
+func (a *app) refitDialog() {
+	if a.dialog == nil {
+		return
+	}
+	w, h := a.fit(a.dlgW, a.dlgH)
+	a.dlgCol.ResizeItem(a.dlgCell, w, 0)
+	a.dlgCell.ResizeItem(a.dlgBox, h, 0)
 }
 
 // closeDialog closes p if it is still the open dialog.
@@ -86,6 +112,12 @@ func (a *app) closeDialog(p tview.Primitive) {
 	if a.focusWas != nil {
 		a.tv.SetFocus(a.focusWas)
 	}
+}
+
+// closeDlg closes d; dry runs still on their way are dropped.
+func (a *app) closeDlg(d *dlg) {
+	d.gen++
+	a.closeDialog(d.flex)
 }
 
 // resultText is a change's answer for a dialog.
@@ -115,12 +147,13 @@ func (a *app) dryRun(d *dlg, delay time.Duration, build func() (control.Change, 
 	}
 	ch.DryRun = true
 	ask := func() {
-		if gen != d.gen {
+		if gen != d.gen || a.dialog != d.flex {
 			return
 		}
 		a.send(ch, func(res control.Result, err error) {
 			if gen == d.gen {
 				d.result.SetText(resultText(res, err))
+				d.shown = gen
 			}
 		})
 	}
@@ -128,52 +161,55 @@ func (a *app) dryRun(d *dlg, delay time.Duration, build func() (control.Change, 
 		ask()
 		return
 	}
-	time.AfterFunc(delay, func() {
-		if a.ctx.Err() == nil {
-			a.tv.QueueUpdate(ask)
-		}
-	})
+	time.AfterFunc(delay, func() { a.update(ask) })
 }
 
-// submit makes the change: the dialog closes when it is made, and shows
-// why when it is refused.
-func (a *app) submit(d *dlg, ch control.Change) {
+// submit makes build's change once its dry run is on show (asked for
+// earlier, it asks for the dry run now instead). The dialog closes when the
+// change is made, and says why when it is refused; an answer that comes
+// after the dialog was closed is said below.
+func (a *app) submit(d *dlg, build func() (control.Change, bool)) {
+	ch, ok := build()
+	if !ok || d.busy {
+		return
+	}
+	if d.shown != d.gen {
+		a.dryRun(d, 0, build)
+		return
+	}
+	d.busy = true
 	d.gen++ // a dry run still on its way is old now
 	d.result.SetText("[gray]working…[-]")
 	a.send(ch, func(res control.Result, err error) {
+		d.busy = false
 		if a.dialog != d.flex {
-			if err == nil {
-				a.flashResult(res)
-			}
+			a.flashAnswer(res, err)
 			return
 		}
 		if err != nil {
 			d.result.SetText(resultText(res, err))
 			return
 		}
-		a.closeDialog(d.flex)
-		a.flashResult(res)
+		a.closeDlg(d)
+		a.flashAnswer(res, nil)
 	})
 }
 
 // confirm asks before a change, showing its dry run.
 func (a *app) confirm(title, text, button string, ch control.Change) {
 	d := a.newDlg(title, text)
-	d.form.AddButton(button, func() { a.submit(d, ch) }).AddButton("Cancel", func() { a.closeDialog(d.flex) })
-	a.show(d, 3)
-	a.dryRun(d, 0, func() (control.Change, bool) { return ch, true })
+	build := func() (control.Change, bool) { return ch, true }
+	d.form.AddButton(button, func() { a.submit(d, build) }).AddButton("Cancel", func() { a.closeDlg(d) })
+	a.showDlg(d, 3)
+	a.dryRun(d, 0, build)
 }
 
 func (a *app) confirmStop() {
-	t, ok := a.current()
+	t, i, ok := a.current()
 	if !ok {
 		return
 	}
-	idx := a.sel
-	if a.screen == scrProfile {
-		idx = a.open
-	}
-	a.confirm("Stop "+nameOf(t)+"?", stopText(t, a.running(idx)), "Stop",
+	a.confirm("Stop "+nameOf(t)+"?", stopText(t, a.running(i)), "Stop",
 		control.Change{Kind: control.KindProfile, Op: "stop", Profile: t.Name})
 }
 
@@ -218,16 +254,15 @@ func (a *app) confirmDelete(t control.Tunnel, it item) {
 
 // routeDialog adds routes (or excludes) to a profile.
 func (a *app) routeDialog(t control.Tunnel, exclude bool) {
-	d := a.newDlg("Add a route to "+nameOf(t), "")
+	title := "Add a route to " + nameOf(t)
+	if exclude {
+		title = "Add an exclude to " + nameOf(t)
+	}
+	d := a.newDlg(title, "")
 	var cidrs string
 	build := func() (control.Change, bool) {
 		f := strings.Fields(strings.ReplaceAll(cidrs, ",", " "))
 		return control.Change{Kind: control.KindRoute, Op: "add", Profile: t.Name, CIDRs: f, Exclude: exclude}, len(f) > 0
-	}
-	add := func() {
-		if ch, ok := build(); ok {
-			a.submit(d, ch)
-		}
 	}
 	d.form.AddInputField("CIDRs or IPs", "", 50, nil, func(s string) {
 		cidrs = s
@@ -237,9 +272,9 @@ func (a *app) routeDialog(t control.Tunnel, exclude bool) {
 		exclude = on
 		a.dryRun(d, 0, build)
 	})
-	d.form.AddButton("Add", add).AddButton("Cancel", func() { a.closeDialog(d.flex) })
-	enterAdds(d.form, add)
-	a.show(d, 7)
+	d.form.AddButton("Add", func() { a.submit(d, build) }).AddButton("Cancel", func() { a.closeDlg(d) })
+	enterSubmits(d.form, func() { a.submit(d, build) })
+	a.showDlg(d, 7)
 }
 
 // dnsDialog adds DNS domains or patterns to a profile.
@@ -250,11 +285,6 @@ func (a *app) dnsDialog(t control.Tunnel) {
 		ch := control.Change{Kind: control.KindDNS, Op: "add", Profile: t.Name, Domains: strings.Fields(domains), Patterns: strings.Fields(patterns)}
 		return ch, len(ch.Domains)+len(ch.Patterns) > 0
 	}
-	add := func() {
-		if ch, ok := build(); ok {
-			a.submit(d, ch)
-		}
-	}
 	d.form.AddInputField("Domains", "", 50, nil, func(s string) {
 		domains = s
 		a.dryRun(d, dryRunDelay, build)
@@ -263,18 +293,18 @@ func (a *app) dnsDialog(t control.Tunnel) {
 		patterns = s
 		a.dryRun(d, dryRunDelay, build)
 	})
-	d.form.AddButton("Add", add).AddButton("Cancel", func() { a.closeDialog(d.flex) })
-	enterAdds(d.form, add)
-	a.show(d, 7)
+	d.form.AddButton("Add", func() { a.submit(d, build) }).AddButton("Cancel", func() { a.closeDlg(d) })
+	enterSubmits(d.form, func() { a.submit(d, build) })
+	a.showDlg(d, 7)
 }
 
-// enterAdds makes enter in the form's input fields submit it.
-func enterAdds(f *tview.Form, add func()) {
+// enterSubmits makes enter in the form's input fields submit it.
+func enterSubmits(f *tview.Form, submit func()) {
 	for i := range f.GetFormItemCount() {
 		if in, ok := f.GetFormItem(i).(*tview.InputField); ok {
 			in.SetDoneFunc(func(k tcell.Key) {
 				if k == tcell.KeyEnter {
-					add()
+					submit()
 				}
 			})
 		}
@@ -301,6 +331,7 @@ func (a *app) addProfileDialog() {
 	var cands []control.ConfigProfile
 	answers := map[string]string{} // dry run answers by name
 	refused := map[string]bool{}
+	busy := false
 	showRow := func(row int) {
 		if row < 1 || row > len(cands) {
 			return
@@ -318,13 +349,19 @@ func (a *app) addProfileDialog() {
 		}
 	})
 	table.SetSelectedFunc(func(row, _ int) {
-		if row < 1 || row > len(cands) || refused[cands[row-1].Name] {
+		if busy || row < 1 || row > len(cands) {
 			return
 		}
 		name := cands[row-1].Name
+		if _, checked := answers[name]; !checked || refused[name] {
+			return // its dry run first; a profile that can't join isn't added
+		}
+		busy = true
 		result.SetText("[gray]working…[-]")
 		a.send(control.Change{Kind: control.KindProfile, Op: "start", Profile: name}, func(res control.Result, err error) {
+			busy = false
 			if a.dialog != flex {
+				a.flashAnswer(res, err)
 				return
 			}
 			if err != nil {
@@ -332,7 +369,7 @@ func (a *app) addProfileDialog() {
 				return
 			}
 			a.closeDialog(flex)
-			a.flashResult(res)
+			a.flashAnswer(res, nil)
 		})
 	})
 	a.openDialog(flex, 110, 16, table)
@@ -341,11 +378,10 @@ func (a *app) addProfileDialog() {
 		ctx, cancel := context.WithTimeout(a.ctx, queryTimeout)
 		cp, err := a.o.Source.Config(ctx)
 		cancel()
-		if a.ctx.Err() != nil {
-			return
-		}
-		a.tv.QueueUpdateDraw(func() {
+		a.update(func() {
 			switch {
+			case a.dialog != flex: // closed meanwhile
+				return
 			case err != nil:
 				result.SetText(resultText(control.Result{}, err))
 				return

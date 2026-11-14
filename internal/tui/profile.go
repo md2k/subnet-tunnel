@@ -35,21 +35,10 @@ func (a *app) openProfile(i int) {
 	if !a.have || i < 0 || i >= len(a.st.Tunnels) {
 		return
 	}
-	a.open, a.screen = i, scrProfile
-	a.wantConns.Store(true)
-	a.pages.SwitchToPage(scrProfile)
+	a.open = i
 	a.profItems.Select(1, 0)
-	a.tv.SetFocus(a.profItems)
-	a.refresh()
+	a.goTo(scrProfile)
 	a.pollSoon()
-}
-
-func (a *app) closeProfile() {
-	a.open, a.screen = -1, scrDash
-	a.wantConns.Store(false)
-	a.pages.SwitchToPage(scrDash)
-	a.tv.SetFocus(a.top)
-	a.refresh()
 }
 
 func (a *app) renderProfile(now time.Time) {
@@ -58,7 +47,10 @@ func (a *app) renderProfile(now time.Time) {
 	}
 	t := a.st.Tunnels[a.open]
 	a.profInfo.SetTitle(" " + tview.Escape(nameOf(t)) + " ")
-	_, _, w, _ := a.profInfo.GetInnerRect()
+	w := 118 // before the first draw
+	if a.scrW > 0 {
+		w = a.scrW - 2
+	}
 	a.profInfo.SetText(a.profileText(t, now, max(w-18, 10)))
 
 	// What it asks for, as rows to act on.
@@ -162,7 +154,8 @@ func (a *app) selectedItem() (item, bool) {
 func (a *app) profileKey(ev *tcell.EventKey) *tcell.EventKey {
 	switch ev.Key() {
 	case tcell.KeyEscape:
-		a.closeProfile()
+		a.open = -1
+		a.goTo(scrDash)
 		return nil
 	case tcell.KeyTab, tcell.KeyBacktab:
 		if a.tv.GetFocus() == a.profConns {
@@ -172,7 +165,7 @@ func (a *app) profileKey(ev *tcell.EventKey) *tcell.EventKey {
 		}
 		return nil
 	}
-	t, ok := a.current()
+	t, _, ok := a.current()
 	if !ok {
 		return ev
 	}
@@ -205,7 +198,6 @@ func (a *app) profileKey(ev *tcell.EventKey) *tcell.EventKey {
 		})
 	case 'l':
 		a.filter.profile = t.Name
-		a.rebuildLogs()
 		a.openLogs()
 	default:
 		return ev

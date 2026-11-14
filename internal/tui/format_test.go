@@ -151,20 +151,43 @@ func TestLogFilter(t *testing.T) {
 }
 
 // The buffer drops repeats (a stream that reconnected sends the held lines
-// again) and keeps the newest lines.
+// again, with their numbers) and keeps the newest lines.
 func TestLogBuf(t *testing.T) {
 	var b logBuf
 	t0 := time.Now()
-	if !b.add(logring.Line{Time: t0, Text: "a"}) || !b.add(logring.Line{Time: t0.Add(1), Text: "b"}) {
-		t.Fatal("new lines refused")
+	if !b.add(logring.Line{Seq: 1, Time: t0, Text: "a"}) || !b.add(logring.Line{Seq: 2, Time: t0, Text: "b"}) {
+		t.Fatal("new lines refused (the same time is fine)")
 	}
-	if b.add(logring.Line{Time: t0, Text: "a"}) || b.add(logring.Line{Time: t0.Add(1), Text: "b"}) {
+	if b.add(logring.Line{Seq: 1, Text: "a"}) || b.add(logring.Line{Seq: 2, Text: "b"}) {
 		t.Fatal("repeats kept")
 	}
 	for i := range maxLines + 5 {
-		b.add(logring.Line{Time: t0.Add(time.Duration(i + 2))})
+		b.add(logring.Line{Seq: uint64(i + 3)})
 	}
-	if len(b.lines) != maxLines {
+	if len(b.lines) != maxLines || b.lines[len(b.lines)-1].Seq != maxLines+7 {
 		t.Fatalf("kept %d", len(b.lines))
+	}
+}
+
+func TestFitColumns(t *testing.T) {
+	want := map[string]int{"": 1, "NAME": 5, "STATE": 17, "TARGET": 15, "ROUTES": 13, "DNS": 15, "KS": 8, "↑/s": 10, "↓/s": 8, "5 MIN": 10}
+	if got := fitColumns(200, want); len(got) != len(want) || got["TARGET"] != 15 {
+		t.Errorf("wide: %v", got)
+	}
+	got := fitColumns(78, want)
+	total := -1
+	for _, v := range got {
+		total += v + 1
+	}
+	if total > 78 {
+		t.Errorf("78: %d wide: %v", total, got)
+	}
+	for _, c := range []string{"NAME", "STATE", "ROUTES", "↑/s", "↓/s"} {
+		if _, ok := got[c]; !ok {
+			t.Errorf("78: %s dropped: %v", c, got)
+		}
+	}
+	if _, ok := got["TARGET"]; ok {
+		t.Errorf("78: TARGET kept before DNS went: %v", got)
 	}
 }

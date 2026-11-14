@@ -39,7 +39,6 @@ type Options struct {
 const (
 	queryTimeout  = 3 * time.Second
 	changeTimeout = 15 * time.Second // a reload looks the target's endpoint up
-	keepSamples   = 300              // 5 minutes, as the run keeps
 	flashFor      = 8 * time.Second
 	dryRunDelay   = 300 * time.Millisecond // after the last key typed
 )
@@ -57,6 +56,7 @@ const readOnlyText = "read only: this subtun runs with control: status; start it
 type app struct {
 	o     Options
 	ctx   context.Context
+	quit  context.CancelFunc
 	tv    *tview.Application
 	pages *tview.Pages
 
@@ -91,20 +91,33 @@ type app struct {
 	samples    map[string][]meter.Sample
 	conns      map[string][]meter.ConnInfo
 	logs       logBuf
-	logText    bool // the log views hold text
+	logText    bool // the log view on screen holds text
 	filter     logFilter
 	following  bool
-	unseen     int // lines added while not following
+	unseen     int // lines that came while paused
 	layout     string
 	sel        int // the selected profile (index in st.Tunnels: a run never drops one)
-	open       int // the profile screen's profile
+	open       int // the profile screen's profile; -1: none
 	screen     string
-	back       string          // the screen esc returns to from logs and help
+	logsBack   string          // the screen esc on the logs returns to
+	helpBack   string          // the screen the key list returns to
 	dialog     tview.Primitive // the open dialog; nil: none
 	focusWas   tview.Primitive
 	flashText  string
 	flashUntil time.Time
 	searching  bool
+
+	// The terminal's size at the last draw; layouts fit it.
+	scrW, scrH int
+	// The open dialog's wanted size and its place, to fit it again.
+	dlgW, dlgH      int
+	dlgCol, dlgCell *tview.Flex
+	dlgBox          tview.Primitive
+
+	// Handing work to the UI goroutine (see pump).
+	ui        chan func()
+	started   chan struct{} // closed at the first draw
+	startOnce sync.Once
 
 	wantConns atomic.Bool
 	pollNow   chan struct{}
@@ -120,21 +133,68 @@ func Run(ctx context.Context, o Options) error {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	a := newApp(ctx, o)
+	a := newApp(ctx, cancel, o)
 	if o.Screen != nil {
 		a.tv.SetScreen(o.Screen)
 	}
-	go func() {
-		<-ctx.Done()
-		a.tv.QueueUpdate(a.tv.Stop) // runs once the event loop does
-	}()
+	a.tv.SetBeforeDrawFunc(a.resized)
+	a.tv.SetAfterDrawFunc(func(tcell.Screen) { a.startOnce.Do(func() { close(a.started) }) })
+	ended := make(chan struct{})
+	go a.pump(ended)
 	go a.poll()
 	go a.streamLogs()
 	go a.flushLogs()
-	return a.tv.Run()
+	err := a.tv.Run()
+	close(ended)
+	return err
 }
 
-func newApp(ctx context.Context, o Options) *app {
+// pump hands the background goroutines' work to the UI goroutine. It is the
+// only caller of QueueUpdate, which waits until the update has run, and it
+// is the one that stops the event loop once ctx ends (q, Ctrl-C, the
+// caller): so nothing ever waits on an event loop that has stopped.
+func (a *app) pump(ended <-chan struct{}) {
+	select {
+	case <-a.started:
+	case <-ended:
+		return
+	}
+	for {
+		if a.ctx.Err() != nil {
+			a.tv.Stop()
+			return
+		}
+		select {
+		case <-a.ctx.Done():
+		case <-ended:
+			return
+		case f := <-a.ui:
+			a.tv.QueueUpdateDraw(f)
+		}
+	}
+}
+
+// resized fits everything to the terminal again when its size changed
+// (before tview lays out the draw).
+func (a *app) resized(scr tcell.Screen) bool {
+	if w, h := scr.Size(); w != a.scrW || h != a.scrH {
+		a.scrW, a.scrH = w, h
+		a.refitDialog()
+		a.refresh()
+	}
+	return false
+}
+
+// update runs f on the UI goroutine, then redraws; dropped once the TUI is
+// stopping.
+func (a *app) update(f func()) {
+	select {
+	case a.ui <- f:
+	case <-a.ctx.Done():
+	}
+}
+
+func newApp(ctx context.Context, quit context.CancelFunc, o Options) *app {
 	// The terminal's own colours, not tview's black.
 	tview.Styles.PrimitiveBackgroundColor = tcell.ColorDefault
 	tview.Styles.PrimaryTextColor = tcell.ColorDefault
@@ -142,8 +202,9 @@ func newApp(ctx context.Context, o Options) *app {
 	tview.Styles.TitleColor = tcell.ColorDefault
 	tview.Styles.GraphicsColor = tcell.ColorGray
 
-	a := &app{o: o, ctx: ctx, tv: tview.NewApplication(), pages: tview.NewPages(), samples: map[string][]meter.Sample{},
-		conns: map[string][]meter.ConnInfo{}, following: true, screen: scrDash, open: -1, pollNow: make(chan struct{}, 1)}
+	a := &app{o: o, ctx: ctx, quit: quit, tv: tview.NewApplication(), pages: tview.NewPages(), samples: map[string][]meter.Sample{},
+		conns: map[string][]meter.ConnInfo{}, following: true, screen: scrDash, open: -1, pollNow: make(chan struct{}, 1),
+		ui: make(chan func(), 64), started: make(chan struct{})}
 	a.filter.level = levels[0]
 
 	a.header = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
@@ -178,34 +239,25 @@ func newApp(ctx context.Context, o Options) *app {
 	return a
 }
 
-// poll asks for the status (and samples, and connections while the profile
-// screen is open) every interval, or at once after a change.
+// poll asks for the status, the samples, and the connections while the
+// profile screen is open, every interval or at once after a change.
 func (a *app) poll() {
 	t := time.NewTicker(a.o.Interval)
 	defer t.Stop()
-	var since time.Time
 	for {
 		ctx, cancel := context.WithTimeout(a.ctx, queryTimeout)
 		st, err := a.o.Source.Status(ctx)
 		var ts []control.TunnelSamples
 		var conns []control.TunnelConns
 		if err == nil {
-			if ts, _ = a.o.Source.Samples(ctx, since); len(ts) > 0 {
-				for _, s := range ts {
-					if n := len(s.Samples); n > 0 && s.Samples[n-1].Time.After(since) {
-						since = s.Samples[n-1].Time
-					}
-				}
-			}
+			// All 5 minutes each time: no cursor to lose when the clock steps.
+			ts, _ = a.o.Source.Samples(ctx)
 			if a.wantConns.Load() {
 				conns, _ = a.o.Source.Conns(ctx)
 			}
 		}
 		cancel()
-		if a.ctx.Err() != nil {
-			return
-		}
-		a.tv.QueueUpdateDraw(func() { a.apply(st, ts, conns, err) })
+		a.update(func() { a.apply(st, ts, conns, err) })
 		select {
 		case <-a.ctx.Done():
 			return
@@ -230,12 +282,11 @@ func (a *app) apply(st control.Status, ts []control.TunnelSamples, conns []contr
 	}
 	renew := !a.have || len(st.Tunnels) != len(a.st.Tunnels)
 	a.st, a.have, a.gone = st, true, nil
-	for _, t := range ts {
-		s := append(a.samples[t.Name], t.Samples...)
-		if len(s) > keepSamples {
-			s = s[len(s)-keepSamples:]
+	if ts != nil {
+		a.samples = map[string][]meter.Sample{}
+		for _, t := range ts {
+			a.samples[t.Name] = t.Samples
 		}
-		a.samples[t.Name] = s
 	}
 	if conns != nil {
 		a.conns = map[string][]meter.ConnInfo{}
@@ -256,7 +307,7 @@ func (a *app) streamLogs() {
 			a.pendMu.Lock()
 			a.pending = append(a.pending, l)
 			if n := len(a.pending); n > maxLines {
-				a.pending = append(a.pending[:0], a.pending[n-maxLines:]...)
+				a.pending = a.pending[n-maxLines:]
 			}
 			a.pendMu.Unlock()
 		})
@@ -282,9 +333,28 @@ func (a *app) flushLogs() {
 		a.pending = nil
 		a.pendMu.Unlock()
 		if len(batch) > 0 {
-			a.tv.QueueUpdateDraw(func() { a.addLines(batch) })
+			a.update(func() { a.addLines(batch) })
 		}
 	}
+}
+
+// goTo shows screen s.
+func (a *app) goTo(s string) {
+	a.screen = s
+	a.wantConns.Store(s == scrProfile)
+	a.pages.SwitchToPage(s)
+	switch s {
+	case scrDash:
+		a.tv.SetFocus(a.top)
+	case scrProfile:
+		a.tv.SetFocus(a.profItems)
+	case scrLogs:
+		a.tv.SetFocus(a.fullLogs)
+	}
+	if s == scrDash || s == scrLogs {
+		a.follow() // a log view comes on screen: fresh, following
+	}
+	a.refresh()
 }
 
 // refresh redraws everything from the state.
@@ -308,6 +378,12 @@ func (a *app) renderHeader() {
 		s = " subtun · [red]no answer:[-] " + tview.Escape(a.gone.Error())
 	case !a.have:
 		s = " subtun · connecting to the control socket…"
+	case a.screen == scrProfile && a.open >= 0 && a.open < len(a.st.Tunnels):
+		s = " subtun › " + tview.Escape(nameOf(a.st.Tunnels[a.open]))
+	case a.screen == scrLogs:
+		s = " subtun › logs · " + tview.Escape(a.filter.describe()) + " · " + a.followText()
+	case a.screen == scrHelp:
+		s = " subtun › keys"
 	default:
 		st := a.st
 		s = fmt.Sprintf(" subtun · pid %d · up %s", st.PID, short(time.Since(st.Started)))
@@ -321,19 +397,9 @@ func (a *app) renderHeader() {
 		} else {
 			s += " · control " + st.Control + " (read only)"
 		}
-		if a.gone != nil {
-			s += " · [red]no answer: subtun stopped?[-]"
-		}
 	}
-	switch a.screen {
-	case scrProfile:
-		if a.open >= 0 && a.open < len(a.st.Tunnels) {
-			s = " subtun › " + tview.Escape(nameOf(a.st.Tunnels[a.open]))
-		}
-	case scrLogs:
-		s = " subtun › logs · " + tview.Escape(a.filter.describe()) + " · " + a.followText()
-	case scrHelp:
-		s = " subtun › keys"
+	if a.gone != nil && a.have {
+		s += " · [red]no answer: subtun stopped?[-]"
 	}
 	a.header.SetText(s)
 }
@@ -356,22 +422,24 @@ func (a *app) key(k, what string, action bool) string {
 	return "[yellow]" + k + "[-] " + what
 }
 
+// renderKeys shows the screen's keys, the ones to get help, out and back
+// first (a narrow terminal cuts the end).
 func (a *app) renderKeys() {
 	var ks []string
 	switch a.screen {
 	case scrDash:
-		ks = []string{a.key("↑↓", "select", false), a.key("enter", "open", false), a.key("v", "layout", false),
-			a.key("s", "stop", true), a.key("S", "start", true), a.key("r", "reconnect", true), a.key("a", "add profile", true),
-			a.key("l", "logs", false), a.key("tab", "focus", false), a.key("?", "help", false), a.key("q", "quit", false)}
+		ks = []string{a.key("?", "help", false), a.key("q", "quit", false), a.key("↑↓", "select", false), a.key("enter", "open", false),
+			a.key("v", "layout", false), a.key("s", "stop", true), a.key("S", "start", true), a.key("r", "reconnect", true),
+			a.key("a", "add profile", true), a.key("l", "logs", false), a.key("tab", "focus", false), a.key("f", "follow", false)}
 	case scrProfile:
-		ks = []string{a.key("s", "stop", true), a.key("S", "start", true), a.key("r", "reconnect", true), a.key("R", "reload", true),
-			a.key("a/x", "add route/exclude", true), a.key("A", "add DNS", true), a.key("d", "delete", true),
-			a.key("l", "logs", false), a.key("esc", "back", false), a.key("?", "help", false)}
+		ks = []string{a.key("esc", "back", false), a.key("?", "help", false), a.key("s", "stop", true), a.key("S", "start", true),
+			a.key("r", "reconnect", true), a.key("R", "reload", true), a.key("a/x", "add route/exclude", true), a.key("A", "add DNS", true),
+			a.key("d", "delete", true), a.key("l", "logs", false), a.key("tab", "focus", false)}
 	case scrLogs:
-		ks = []string{a.key("f", "follow", false), a.key("p", "profile", false), a.key("v", "level", false), a.key("/", "search", false),
-			a.key("g/G", "top/bottom", false), a.key("esc", "back", false)}
+		ks = []string{a.key("esc", "back", false), a.key("f", "follow", false), a.key("p", "profile", false), a.key("v", "level", false),
+			a.key("/", "search", false), a.key("g/G", "top/bottom", false)}
 	case scrHelp:
-		ks = []string{a.key("esc", "back", false)}
+		ks = []string{a.key("esc", "back", false), a.key("q", "quit", false)}
 	}
 	a.keys.SetText(" " + strings.Join(ks, "  "))
 }
@@ -396,27 +464,31 @@ func (a *app) renderMsg(now time.Time) {
 
 // onKey routes a key: dialogs and the search field take their own keys.
 func (a *app) onKey(ev *tcell.EventKey) *tcell.EventKey {
-	if a.dialog != nil || a.searching {
-		return ev
+	if ev.Key() == tcell.KeyCtrlC { // tview's own Ctrl-C would skip pump
+		a.quit()
+		return nil
 	}
-	if a.screen == scrHelp {
-		if ev.Key() == tcell.KeyEscape || ev.Rune() == '?' || ev.Rune() == 'q' {
-			a.leave()
-			return nil
-		}
+	if a.dialog != nil || a.searching {
 		return ev
 	}
 	switch ev.Rune() {
 	case 'q':
-		a.tv.Stop()
+		a.quit()
 		return nil
 	case '?':
-		a.back, a.screen = a.screen, scrHelp
-		a.pages.SwitchToPage(scrHelp)
-		a.refresh()
+		if a.screen != scrHelp {
+			a.helpBack = a.screen
+			a.goTo(scrHelp)
+		}
 		return nil
 	}
 	switch a.screen {
+	case scrHelp:
+		if ev.Key() == tcell.KeyEscape {
+			a.goTo(a.helpBack)
+			return nil
+		}
+		return ev
 	case scrDash:
 		return a.dashKey(ev)
 	case scrProfile:
@@ -425,25 +497,6 @@ func (a *app) onKey(ev *tcell.EventKey) *tcell.EventKey {
 		return a.logsKey(ev)
 	}
 	return ev
-}
-
-// leave goes back from the logs or help screen.
-func (a *app) leave() {
-	switch a.back {
-	case scrProfile:
-		if a.open >= 0 {
-			a.screen = scrProfile
-			a.pages.SwitchToPage(scrProfile)
-			a.tv.SetFocus(a.profItems)
-			break
-		}
-		fallthrough
-	default:
-		a.screen = scrDash
-		a.pages.SwitchToPage(scrDash)
-		a.tv.SetFocus(a.top)
-	}
-	a.refresh()
 }
 
 // act runs an action that changes the run, if the run takes changes.
@@ -466,10 +519,7 @@ func (a *app) send(ch control.Change, done func(control.Result, error)) {
 		ctx, cancel := context.WithTimeout(a.ctx, changeTimeout)
 		defer cancel()
 		res, err := a.o.Source.Change(ctx, ch)
-		if a.ctx.Err() != nil {
-			return
-		}
-		a.tv.QueueUpdateDraw(func() {
+		a.update(func() {
 			done(res, err)
 			if !ch.DryRun {
 				a.pollSoon()
@@ -480,16 +530,15 @@ func (a *app) send(ch control.Change, done func(control.Result, error)) {
 
 // do makes a change now and says what it did.
 func (a *app) do(ch control.Change) {
-	a.send(ch, func(res control.Result, err error) {
-		if err != nil {
-			a.flash("red", err.Error())
-			return
-		}
-		a.flashResult(res)
-	})
+	a.send(ch, a.flashAnswer)
 }
 
-func (a *app) flashResult(res control.Result) {
+// flashAnswer says what a change did, or why it was refused.
+func (a *app) flashAnswer(res control.Result, err error) {
+	if err != nil {
+		a.flash("red", err.Error())
+		return
+	}
 	text := res.Message
 	if res.Profile != "" {
 		text = "profile " + res.Profile + ": " + text
@@ -542,7 +591,7 @@ const helpText = `
    esc         back
 
  [yellow]Logs[-]
-   f           follow, or pause
+   f           follow, or pause (scrolling back pauses too)
    p           the profile shown: all, or one
    v           the lowest level shown
    /           search (enter applies, esc cancels; empty: none)

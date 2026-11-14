@@ -11,6 +11,12 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/logring"
 )
 
+// Two views show the log lines: the dashboard's and the full screen's.
+// Only the one on screen gets new lines (tview trims a view to its maximum
+// only when drawing it); a view coming on screen is filled again from the
+// lines kept. Paused, it gets none: what it shows stays put, and the lines
+// that came are counted.
+
 func (a *app) buildLogs() {
 	a.fullLogs = newLogView()
 	a.search = tview.NewInputField().SetLabel(" / ")
@@ -18,29 +24,27 @@ func (a *app) buildLogs() {
 		switch key {
 		case tcell.KeyEnter:
 			a.filter.search = strings.TrimSpace(a.search.GetText())
-			a.rebuildLogs()
 		case tcell.KeyEscape:
 		default:
 			return
 		}
-		a.endSearch()
+		a.searching = false
+		a.logsFlex.ResizeItem(a.search, 0, 0)
+		a.tv.SetFocus(a.fullLogs)
+		a.rebuildLogs()
+		a.refresh()
 	})
 	a.logsFlex = tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(a.fullLogs, 0, 1, true).
 		AddItem(a.search, 0, 0, false) // shown while searching
 }
 
+// openLogs shows the logs full screen; esc returns to where it came from.
 func (a *app) openLogs() {
 	if a.screen != scrLogs {
-		a.back = a.screen
+		a.logsBack = a.screen
 	}
-	a.screen = scrLogs
-	a.pages.SwitchToPage(scrLogs)
-	a.tv.SetFocus(a.fullLogs)
-	if a.following {
-		a.fullLogs.ScrollToEnd()
-	}
-	a.refresh()
+	a.goTo(scrLogs)
 }
 
 func (a *app) startSearch() {
@@ -50,11 +54,15 @@ func (a *app) startSearch() {
 	a.tv.SetFocus(a.search)
 }
 
-func (a *app) endSearch() {
-	a.searching = false
-	a.logsFlex.ResizeItem(a.search, 0, 0)
-	a.tv.SetFocus(a.fullLogs)
-	a.refresh()
+// logView is the log view on screen; nil: none.
+func (a *app) logView() *tview.TextView {
+	switch a.screen {
+	case scrDash:
+		return a.dashLogs
+	case scrLogs:
+		return a.fullLogs
+	}
+	return nil
 }
 
 // scrollsBack reports whether a key scrolls a log view away from its end.
@@ -66,27 +74,43 @@ func scrollsBack(ev *tcell.EventKey) bool {
 	return ev.Rune() == 'k' || ev.Rune() == 'g'
 }
 
+// toEnd reports whether a key goes to a log view's end.
+func toEnd(ev *tcell.EventKey) bool { return ev.Key() == tcell.KeyEnd || ev.Rune() == 'G' }
+
+// logScrollKey handles the keys that pause or follow the log view on
+// screen; false: not one of them.
+func (a *app) logScrollKey(ev *tcell.EventKey) bool {
+	switch {
+	case toEnd(ev):
+		a.follow()
+	case scrollsBack(ev):
+		a.pause()
+		return false // the view scrolls
+	case ev.Rune() == 'f':
+		if a.following {
+			a.pause()
+		} else {
+			a.follow()
+		}
+	default:
+		return false
+	}
+	return true
+}
+
 func (a *app) logsKey(ev *tcell.EventKey) *tcell.EventKey {
 	if ev.Key() == tcell.KeyEscape {
-		a.leave()
+		if a.logsBack == scrProfile && a.open >= 0 {
+			a.goTo(scrProfile)
+		} else {
+			a.goTo(scrDash)
+		}
 		return nil
 	}
-	if ev.Key() == tcell.KeyEnd || ev.Rune() == 'G' {
-		a.following = true
-		a.unseen = 0
-		a.fullLogs.ScrollToEnd()
-		a.refresh()
+	if a.logScrollKey(ev) {
 		return nil
-	}
-	if scrollsBack(ev) {
-		a.following = false
-		a.refresh()
-		return ev
 	}
 	switch ev.Rune() {
-	case 'f':
-		a.toggleFollow()
-		return nil
 	case 'p':
 		names := []string{""}
 		for _, t := range a.st.Tunnels {
@@ -112,21 +136,27 @@ func (a *app) logsKey(ev *tcell.EventKey) *tcell.EventKey {
 	return ev
 }
 
-func (a *app) toggleFollow() {
-	a.following = !a.following
-	if a.following {
-		a.unseen = 0
-		a.dashLogs.ScrollToEnd()
-		a.fullLogs.ScrollToEnd()
-	}
+// follow fills the log view on screen with the lines kept and follows new
+// ones.
+func (a *app) follow() {
+	a.following = true
+	a.rebuildLogs()
 	a.refresh()
+}
+
+// pause keeps the log view on screen as it is.
+func (a *app) pause() {
+	if a.following {
+		a.following, a.unseen = false, 0
+		a.refresh()
+	}
 }
 
 func (a *app) formatLine(l logring.Line) string {
 	return formatLine(l, a.filter, a.nameWidth(), a.profileColor)
 }
 
-// addLines adds new log lines to the views.
+// addLines keeps new log lines, and shows them if following.
 func (a *app) addLines(batch []logring.Line) {
 	var shown []string
 	for _, l := range batch {
@@ -137,19 +167,16 @@ func (a *app) addLines(batch []logring.Line) {
 	if len(shown) == 0 {
 		return
 	}
-	text := strings.Join(shown, "\n")
-	if a.logText {
-		text = "\n" + text
-	}
-	a.logText = true
-	for _, tv := range []*tview.TextView{a.dashLogs, a.fullLogs} {
-		fmt.Fprint(tv, text)
-		if a.following {
-			tv.ScrollToEnd()
-		}
-	}
 	if !a.following {
 		a.unseen += len(shown)
+	} else if tv := a.logView(); tv != nil {
+		text := strings.Join(shown, "\n")
+		if a.logText {
+			text = "\n" + text
+		}
+		a.logText = true
+		fmt.Fprint(tv, text)
+		tv.ScrollToEnd()
 	}
 	a.renderLogTitles()
 	if a.screen == scrLogs {
@@ -157,24 +184,24 @@ func (a *app) addLines(batch []logring.Line) {
 	}
 }
 
-// rebuildLogs shows the lines kept again, as the filter picks them.
+// rebuildLogs fills the log view on screen with the lines kept, as the
+// filter picks them, and goes to its end.
 func (a *app) rebuildLogs() {
+	a.unseen = 0
+	a.renderLogTitles()
+	tv := a.logView()
+	if tv == nil {
+		return
+	}
 	var shown []string
 	for _, l := range a.logs.lines {
 		if a.filter.match(l) {
 			shown = append(shown, a.formatLine(l))
 		}
 	}
-	text := strings.Join(shown, "\n")
 	a.logText = len(shown) > 0
-	a.unseen = 0
-	for _, tv := range []*tview.TextView{a.dashLogs, a.fullLogs} {
-		tv.SetText(text)
-		if a.following {
-			tv.ScrollToEnd()
-		}
-	}
-	a.renderLogTitles()
+	tv.SetText(strings.Join(shown, "\n"))
+	tv.ScrollToEnd()
 }
 
 func (a *app) renderLogTitles() {

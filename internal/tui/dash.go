@@ -2,9 +2,11 @@ package tui
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -17,6 +19,7 @@ import (
 const (
 	listWidth  = 34 // layout detail's profile list
 	detailRows = 11 // layout detail's profile part: the detail's lines and borders
+	maxTopRows = 15 // the profiles part at most; more profiles scroll
 	sparkCells = 10 // the table's sparkline
 )
 
@@ -69,9 +72,9 @@ func (a *app) setLayout(l string) {
 func (a *app) topHeight() int {
 	n := max(len(a.st.Tunnels), 1)
 	if a.layout == config.LayoutDetail {
-		return max(n+2, detailRows)
+		return min(max(n+2, detailRows), maxTopRows)
 	}
-	return min(n+3, 15)
+	return min(n+3, maxTopRows)
 }
 
 func (a *app) renderDash(now time.Time) {
@@ -91,44 +94,133 @@ func (a *app) renderDash(now time.Time) {
 	a.renderLogTitles()
 }
 
-var tableHeads = []string{"", "NAME", "STATE", "TARGET", "ROUTES", "DNS", "KS", "↑/s", "↓/s", "5 MIN"}
+// The table's columns, in order; the flexible ones shrink to flexMin when
+// the terminal is narrow, then columns go in dropOrder.
+var (
+	tableHeads = []string{"", "NAME", "STATE", "TARGET", "ROUTES", "DNS", "KS", "↑/s", "↓/s", "5 MIN"}
+	flexCols   = []string{"TARGET", "ROUTES", "DNS"}
+	flexCap    = map[string]int{"TARGET": 24, "ROUTES": 22, "DNS": 22}
+	dropOrder  = []string{"TARGET", "DNS", "5 MIN", "KS"}
+)
+
+const flexMin = 8
+
+// fitColumns fits columns of the widths wanted into width (one space
+// between columns): the flexible ones shrink first, then columns are
+// dropped, then what is left over goes back to the flexible ones.
+func fitColumns(width int, want map[string]int) map[string]int {
+	w := maps.Clone(want)
+	total := func() int {
+		n := -1
+		for _, v := range w {
+			n += v + 1
+		}
+		return n
+	}
+	for total() > width {
+		widest := ""
+		for _, c := range flexCols {
+			if v, ok := w[c]; ok && v > flexMin && (widest == "" || v > w[widest]) {
+				widest = c
+			}
+		}
+		if widest != "" {
+			w[widest]--
+			continue
+		}
+		i := slices.IndexFunc(dropOrder, func(c string) bool { _, ok := w[c]; return ok })
+		if i < 0 {
+			break
+		}
+		delete(w, dropOrder[i])
+	}
+	for spare := width - total(); spare > 0; {
+		grown := false
+		for _, c := range flexCols {
+			if v, ok := w[c]; ok && v < want[c] && spare > 0 {
+				w[c]++
+				spare--
+				grown = true
+			}
+		}
+		if !grown {
+			break
+		}
+	}
+	return w
+}
 
 func (a *app) renderTable(now time.Time) {
 	t := a.table
 	t.Clear()
 	t.SetTitle(fmt.Sprintf(" Profiles (%d) ", len(a.st.Tunnels)))
-	for c, h := range tableHeads {
-		cell := tview.NewTableCell(h).SetTextColor(tcell.ColorGray).SetSelectable(false)
-		if c == 7 || c == 8 {
-			cell.SetAlign(tview.AlignRight)
-		}
-		t.SetCell(0, c, cell)
+	// The plain texts, to measure; colours come after cutting.
+	rows := make([]map[string]string, len(a.st.Tunnels))
+	want := map[string]int{}
+	for _, h := range tableHeads {
+		want[h] = utf8.RuneCountInString(h)
 	}
+	want[""] = 1
 	for i, tn := range a.st.Tunnels {
-		r := i + 1
-		set := func(c int, text string) *tview.TableCell {
-			cell := tview.NewTableCell(text)
-			t.SetCell(r, c, cell)
-			return cell
-		}
-		set(0, glyph(tn.State))
-		set(1, tview.Escape(nameOf(tn)))
-		state := stateText(tn, now)
-		if tn.State != "up" {
-			state = "[" + stateColor(tn.State) + "]" + state + "[-]"
-		}
-		set(2, state)
-		set(3, tview.Escape(cut(targetShort(tn.Target), 24)))
-		set(4, tview.Escape(cut(routesShort(tn), 22)))
-		set(5, tview.Escape(cut(dnsShort(tn), 22)))
-		set(6, ksText(tn.KillSwitch))
 		up, down := "-", "-"
 		if tn.State == "up" {
 			up, down = rate(tn.Counts.UpRate), rate(tn.Counts.DownRate)
 		}
-		set(7, up).SetAlign(tview.AlignRight)
-		set(8, down).SetAlign(tview.AlignRight)
-		set(9, a.sparkFor(tn, totalOf, sparkCells))
+		ks := tn.KillSwitch
+		if ks == "" {
+			ks = "-"
+		}
+		rows[i] = map[string]string{"NAME": nameOf(tn), "STATE": stateText(tn, now), "TARGET": targetShort(tn.Target),
+			"ROUTES": routesShort(tn), "DNS": dnsShort(tn), "KS": ks, "↑/s": up, "↓/s": down, "5 MIN": strings.Repeat(" ", sparkCells)}
+		for c, v := range rows[i] {
+			n := utf8.RuneCountInString(v)
+			if limit, ok := flexCap[c]; ok {
+				n = min(n, limit)
+			}
+			want[c] = max(want[c], n)
+		}
+	}
+	width := 118 // before the first draw
+	if a.scrW > 0 {
+		width = a.scrW - 2 // the table spans the screen, less its borders
+	}
+	widths := fitColumns(width, want)
+	col := 0
+	for _, h := range tableHeads {
+		cw, ok := widths[h]
+		if !ok {
+			continue
+		}
+		right := h == "↑/s" || h == "↓/s"
+		head := tview.NewTableCell(h).SetTextColor(tcell.ColorGray).SetSelectable(false)
+		if right {
+			head.SetAlign(tview.AlignRight)
+		}
+		t.SetCell(0, col, head)
+		for i, tn := range a.st.Tunnels {
+			var text string
+			switch h {
+			case "":
+				text = glyph(tn.State)
+			case "STATE":
+				text = tview.Escape(cut(rows[i][h], cw))
+				if tn.State != "up" {
+					text = "[" + stateColor(tn.State) + "]" + text + "[-]"
+				}
+			case "KS":
+				text = ksText(tn.KillSwitch)
+			case "5 MIN":
+				text = a.sparkFor(tn, totalOf, sparkCells)
+			default:
+				text = tview.Escape(cut(rows[i][h], cw))
+			}
+			cell := tview.NewTableCell(text).SetMaxWidth(cw)
+			if right {
+				cell.SetAlign(tview.AlignRight)
+			}
+			t.SetCell(i+1, col, cell)
+		}
+		col++
 	}
 	t.Select(a.sel+1, 0)
 }
@@ -179,7 +271,10 @@ func (a *app) renderDetail(now time.Time) {
 	}
 	t := a.st.Tunnels[a.sel]
 	a.detail.SetTitle(" " + tview.Escape(nameOf(t)) + " ")
-	_, _, w, _ := a.detail.GetInnerRect()
+	w := 84 // before the first draw
+	if a.scrW > 0 {
+		w = a.scrW - listWidth - 2 // next to the list, less its borders
+	}
 	a.detail.SetText(a.detailText(t, now, max(w-12, 10)))
 }
 
@@ -225,37 +320,36 @@ func (a *app) detailText(t control.Tunnel, now time.Time, sparkW int) string {
 }
 
 // current is the profile the keys act on: the profile screen's, or the
-// selected one.
-func (a *app) current() (control.Tunnel, bool) {
-	i := a.sel
+// selected one; i is its index.
+func (a *app) current() (t control.Tunnel, i int, ok bool) {
+	i = a.sel
 	if a.screen == scrProfile {
 		i = a.open
 	}
 	if !a.have || i < 0 || i >= len(a.st.Tunnels) {
-		return control.Tunnel{}, false
+		return control.Tunnel{}, -1, false
 	}
-	return a.st.Tunnels[i], true
+	return a.st.Tunnels[i], i, true
 }
 
 func (a *app) dashKey(ev *tcell.EventKey) *tcell.EventKey {
+	logsFocused := a.tv.GetFocus() == a.dashLogs
 	switch ev.Key() {
 	case tcell.KeyEnter:
-		if a.tv.GetFocus() != a.dashLogs {
+		if !logsFocused {
 			a.openProfile(a.sel)
 			return nil
 		}
 	case tcell.KeyTab, tcell.KeyBacktab:
-		if a.tv.GetFocus() == a.dashLogs {
+		if logsFocused {
 			a.tv.SetFocus(a.top)
 		} else {
 			a.tv.SetFocus(a.dashLogs)
 		}
 		return nil
 	}
-	if a.tv.GetFocus() == a.dashLogs && scrollsBack(ev) {
-		a.following = false
-		a.renderLogTitles()
-		return ev
+	if logsFocused && a.logScrollKey(ev) || !logsFocused && ev.Rune() == 'f' && a.logScrollKey(ev) {
+		return nil
 	}
 	switch ev.Rune() {
 	case 'v':
@@ -288,20 +382,15 @@ func (a *app) dashKey(ev *tcell.EventKey) *tcell.EventKey {
 		a.openLogs()
 		a.startSearch()
 		return nil
-	case 'f':
-		a.toggleFollow()
-		return nil
 	}
 	return ev
 }
 
 // profileOp starts or reconnects the current profile.
 func (a *app) profileOp(op string) {
-	t, ok := a.current()
-	if !ok {
-		return
+	if t, _, ok := a.current(); ok {
+		a.do(control.Change{Kind: control.KindProfile, Op: op, Profile: t.Name})
 	}
-	a.do(control.Change{Kind: control.KindProfile, Op: op, Profile: t.Name})
 }
 
 // running lists the other profiles that are up or connecting.
