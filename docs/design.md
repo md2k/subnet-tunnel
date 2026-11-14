@@ -784,28 +784,42 @@ The same keys are flags of `subtun up --k8s` / `--docker` for a target given on 
 
 **Created** (`create`, the default):
 - **Start:** pull the image if Docker doesn't have it, create the pod or container, wait until it
-  runs (2 minutes for a pod; a reason that waiting won't fix ends it at once: the image can't be
-  pulled, the container can't be created), then connect as to any target: the agent is uploaded
+  runs (2 minutes for a pod; a reason that waiting won't fix ends it at once: the image pull
+  backing off, an invalid image name, the container can't be created; a first failed pull, such as
+  a registry's rate limit, is waited out), then connect as to any target: the agent is uploaded
   through exec and started.
+- **Where:** the kube context and namespace (or the Docker host from a context) are fixed at the
+  first connect (`transport.Picked`): switching kubectl's or docker's context while subtun runs
+  moves neither the reconnects nor what subtun deletes.
+- **Only its own:** subtun remembers the pod's UID (the container's ID) and deletes by it (a UID
+  precondition), so a pod that took the name meanwhile is never touched; a create whose answer was
+  lost (a stop meanwhile) is found again by a per-request label and deleted.
 - **Reconnect:** the same pod again while it runs (the agent's cache too); gone or ended, a new
   one. A `profile reconnect` hands the pod to the next runner (`runner.keep`).
 - **Stop:** deleted when the profile's tunnel ends for good: the profile stopped, given up, or
   subtun stopping (`tunnelSpec.release`, from the runner goroutine, after the routes are gone).
-- **The pod:** a name from `name`, else `subtun-<profile>-<random>` (`generateName`); no service
+- **The pod:** a name from `name`, else `subtun-<profile>-<random>` (`generateName`, the profile
+  made fit for a pod name: `_` and `.` become `-`, at most 40 characters); no service
   account token or service links; user and group 65534, non-root, all capabilities dropped, no
   privilege escalation, the default seccomp profile, a read-only root with an emptyDir on `/tmp`
   (`HOME=/tmp`, so the agent goes to `/tmp/.cache/subtun`): the restricted pod security level.
-  Requests 10m CPU and 32Mi unless `resources` says; no limits by default (a namespace that
-  requires them needs `resources`). `restartPolicy: Never`, a 1 s grace period.
+  Requests 10m CPU and 32Mi for what `resources` leaves unset, capped at its limits (with a limit
+  alone, Kubernetes would request all of it); no limits by default (a namespace that requires them
+  needs `resources`). `restartPolicy: Never`, a 1 s grace period.
 - **The container:** the same user, no capabilities, `no-new-privileges`, a read-only root with a
   tmpfs `/tmp` mounted `exec` (Docker's default is `noexec`), `--rm`, on `network`; limits only
-  (`resources.requests` is refused).
+  (`resources.requests` is refused). The idle script is its entrypoint, so the image's own doesn't
+  run (a pod's `command` does the same).
 - **Labels:** `app.kubernetes.io/managed-by: subtun`, `subtun.dev/owner` (this user on this
-  machine, a hash), `subtun.dev/pid`, `subtun.dev/profile`. A fixed `name` that exists and isn't
-  this user's is refused; one of theirs left over is replaced.
+  machine: a hash of the user and the machine's ID, the hardware UUID on macOS, `/etc/machine-id`
+  on Linux, so it survives hostname changes), `subtun.dev/pid`; the profile as an annotation on a
+  pod (a profile name isn't always a label value), a label on a container. A fixed `name` that
+  exists and isn't this user's is refused, one another running subtun uses too; one of theirs left
+  over is replaced. A reconnect reuses a pod only if this process created it (pid and UID).
 - **Leftovers** (subtun killed, the laptop asleep): the main process is a shell loop that exits
   after 5 minutes without an agent process (`/proc/*/cmdline`, the bracketed pattern so grep
-  doesn't find itself), so a pod left behind stops using anything. The next start of a target in
+  doesn't find itself), so a pod left behind stops using anything; an image without `cat`, `tr`
+  or `grep` can't tell, so its pod never exits by itself. The next start of a target in
   that namespace (or on that daemon) deletes this owner's pods that ended or whose subtun no longer
   runs on this machine (the pid label, `kill -0`). A Job with `ttlSecondsAfterFinished` would delete
   itself, but needs permissions on Jobs too: later, if leftovers bother anyone.

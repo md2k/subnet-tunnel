@@ -98,6 +98,9 @@ A target is where the agent runs: a Kubernetes pod or a Docker container (SSH is
   the same way on `network` (default: the default bridge), with `resources.limits` only. A pod or
   container left behind (subtun killed) exits after 5 minutes without an agent, and the next start
   removes it; subtun only touches what it created for you on this machine (their labels say so).
+  Unset requests are small (10m CPU, 32Mi), capped at the limits given. The kube context and
+  namespace, or the Docker daemon, are those of the first connect: switching contexts while subtun
+  runs doesn't move it.
 - **Existing** (`create: false`): subtun only starts its agent in it, by exact `name`, or by
   `selector`: labels (kubectl's syntax for Kubernetes; `key=value`, comma-separated, for Docker),
   where a running, ready one is picked at each connect: the one used before while it still is,
