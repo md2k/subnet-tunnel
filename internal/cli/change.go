@@ -75,7 +75,7 @@ func (mp *multiPlan) profileIndex(name string) (int, error) {
 	case name == "":
 		return -1, fmt.Errorf("this run has %d profiles (%s): say which one", len(names), strings.Join(names, ", "))
 	case len(mp.specs) == 1 && mp.specs[0].name == "":
-		return -1, fmt.Errorf("no profile %q: this run's tunnel has no profile name (subtun k8s, subtun docker); leave the name out", name)
+		return -1, fmt.Errorf("no profile %q: this run's tunnel has no profile name (subtun up --k8s, --docker); leave the name out", name)
 	}
 	return -1, fmt.Errorf("no profile %q in this run (it has: %s)", name, strings.Join(names, ", "))
 }
@@ -797,7 +797,7 @@ type addChange struct {
 func (mp *multiPlan) planAdd(ns *tunnelSpec, host string, addrs []netip.Addr, m *dns.Matcher, cs captureState) (*addChange, error) {
 	label := "profile " + ns.name
 	if mp.specs[0].name == "" {
-		return nil, errors.New("this run's tunnel has no profile name (subtun k8s, subtun docker), so it couldn't be told apart from added ones: add profiles to a run started with subtun up")
+		return nil, errors.New("this run's tunnel has no profile name (subtun up --k8s, --docker), so it couldn't be told apart from added ones: add profiles to a run started with subtun up")
 	}
 	for _, d := range inheritShared(ns, mp.specs[0].s) {
 		return nil, fmt.Errorf("%s: %s %s differs from the run's (%s): it is shared by every profile of a run", label, d.key, d.got, d.run)

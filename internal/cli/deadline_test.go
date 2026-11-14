@@ -43,7 +43,7 @@ func TestMaxDurationWhileConnecting(t *testing.T) {
 }
 
 func TestMaxDurationNegative(t *testing.T) {
-	_, err := runCLI(t, "k8s", "pod", "10.0.0.0/8", "--dry-run", "--max-duration", "-1s")
+	_, err := runCLI(t, "up", "--k8s", "pod", "10.0.0.0/8", "--dry-run", "--max-duration", "-1s")
 	if err == nil || !strings.Contains(err.Error(), "must be positive") {
 		t.Fatalf("got %v", err)
 	}

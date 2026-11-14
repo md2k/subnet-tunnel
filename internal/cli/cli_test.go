@@ -77,7 +77,7 @@ func TestUpErrors(t *testing.T) {
 }
 
 func TestK8sDryRunWithoutConfig(t *testing.T) {
-	out, err := runCLI(t, "k8s", "debug", "203.0.113.0/24", "-x", "203.0.113.5", "--dry-run")
+	out, err := runCLI(t, "up", "--k8s", "debug", "203.0.113.0/24", "-x", "203.0.113.5", "--dry-run")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,23 +90,23 @@ func TestK8sDryRunWithoutConfig(t *testing.T) {
 // argument is a CIDR.
 func TestFollowArgs(t *testing.T) {
 	for _, args := range [][]string{
-		{"k8s", "deploy/toolbox", "203.0.113.0/24", "--dry-run"},
-		{"k8s", "pod/debug", "203.0.113.0/24", "--dry-run"},
-		{"k8s", "-l", "app=toolbox", "203.0.113.0/24", "--dry-run"},
-		{"docker", "-l", "com.docker.compose.service=web", "203.0.113.0/24", "--dry-run"},
+		{"up", "--k8s", "deploy/toolbox", "203.0.113.0/24", "--dry-run"},
+		{"up", "--k8s", "pod/debug", "203.0.113.0/24", "--dry-run"},
+		{"up", "--k8s", "-l", "app=toolbox", "203.0.113.0/24", "--dry-run"},
+		{"up", "--docker", "-l", "com.docker.compose.service=web", "203.0.113.0/24", "--dry-run"},
 	} {
 		if out, err := runCLI(t, args...); err != nil || !strings.Contains(out, "routes on the utun") {
 			t.Errorf("%v: %v\n%s", args, err, out)
 		}
 	}
 	for want, args := range map[string][]string{
-		"name the pod, or pick one by its labels with --selector":              {"k8s", "--dry-run"},
-		`"debug": with --selector, the arguments are CIDRs (no pod name)`:      {"k8s", "-l", "app=x", "debug", "--dry-run"},
-		`"svc/web": name a pod (NAME, pod/NAME) or a Deployment (deploy/NAME)`: {"k8s", "svc/web", "--dry-run"},
-		`"deploy/": the name is missing`:                                       {"k8s", "deploy/", "--dry-run"},
-		`selector "x in (a"`:                                                   {"k8s", "-l", "x in (a", "--dry-run"},
-		`selector "a!=b": use key=value or key`:                                {"docker", "-l", "a!=b", "--dry-run"},
-		"name the container, or pick one by its labels with --selector":        {"docker", "--dry-run"},
+		"name the pod, or pick one by its labels with --selector":              {"up", "--k8s", "--dry-run"},
+		`"debug": with --selector, the arguments are CIDRs (no pod name)`:      {"up", "--k8s", "-l", "app=x", "debug", "--dry-run"},
+		`"svc/web": name a pod (NAME, pod/NAME) or a Deployment (deploy/NAME)`: {"up", "--k8s", "svc/web", "--dry-run"},
+		`"deploy/": the name is missing`:                                       {"up", "--k8s", "deploy/", "--dry-run"},
+		`selector "x in (a"`:                                                   {"up", "--k8s", "-l", "x in (a", "--dry-run"},
+		`selector "a!=b": use key=value or key`:                                {"up", "--docker", "-l", "a!=b", "--dry-run"},
+		"name the container, or pick one by its labels with --selector":        {"up", "--docker", "--dry-run"},
 	} {
 		if _, err := runCLI(t, args...); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%v: %v, want %q", args, err, want)
@@ -126,13 +126,40 @@ func TestFollowArgs(t *testing.T) {
 	}
 }
 
+// A target given on the command line: --k8s or --docker, bare (the name
+// first) or with the name; their own flags only with them; never with a
+// profile.
+func TestUpTarget(t *testing.T) {
+	for _, args := range [][]string{
+		{"up", "--k8s=deploy/toolbox", "203.0.113.0/24", "--dry-run"},
+		{"up", "--docker=web", "203.0.113.0/24", "--dry-run"},
+		{"up", "-n", "ops", "--k8s", "debug", "203.0.113.0/24", "--dry-run"},
+	} {
+		if out, err := runCLI(t, args...); err != nil || !strings.Contains(out, "routes on the utun") {
+			t.Errorf("%v: %v\n%s", args, err, out)
+		}
+	}
+	for want, args := range map[string][]string{
+		"--k8s and --docker don't go together":             {"up", "--k8s", "--docker", "x", "--dry-run"},
+		"--profile and --k8s/--docker don't go together":   {"up", "--k8s", "x", "--profile", "work", "--dry-run"},
+		"--namespace is for --k8s":                         {"up", "--docker", "web", "-n", "ops", "--dry-run"},
+		"--host is for --docker":                           {"up", "--k8s", "debug", "-H", "tcp://h:2375", "--dry-run"},
+		"--k8s=debug and --selector don't go together":     {"up", "--k8s=debug", "-l", "app=x", "--dry-run"},
+		"--namespace, --selector: for a target given here": {"up", "work", "-n", "ops", "-l", "app=x", "--dry-run"},
+	} {
+		if _, err := runCLI(t, args...); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%v: %v, want %q", args, err, want)
+		}
+	}
+}
+
 func TestRouteSafetyChecks(t *testing.T) {
 	cases := map[string][]string{
-		"bad tun address":     {"k8s", "debug", "203.0.113.0/24", "--tun-addr", "127.0.0.1", "--dry-run"},
-		"bad MTU":             {"k8s", "debug", "203.0.113.0/24", "--mtu", "100", "--dry-run"},
-		"host bits":           {"k8s", "debug", "203.0.113.1/24", "--dry-run"},
-		"excludes remove all": {"k8s", "debug", "203.0.113.0/24", "-x", "203.0.113.0/24", "--dry-run"},
-		"nothing to do":       {"k8s", "debug", "--dry-run"},
+		"bad tun address":     {"up", "--k8s", "debug", "203.0.113.0/24", "--tun-addr", "127.0.0.1", "--dry-run"},
+		"bad MTU":             {"up", "--k8s", "debug", "203.0.113.0/24", "--mtu", "100", "--dry-run"},
+		"host bits":           {"up", "--k8s", "debug", "203.0.113.1/24", "--dry-run"},
+		"excludes remove all": {"up", "--k8s", "debug", "203.0.113.0/24", "-x", "203.0.113.0/24", "--dry-run"},
+		"nothing to do":       {"up", "--k8s", "debug", "--dry-run"},
 	}
 	for name, args := range cases {
 		if _, err := runCLI(t, args...); err == nil {
@@ -170,7 +197,7 @@ func TestExcludeEndpoints(t *testing.T) {
 // A full tunnel: two /1 halves (never merged into 0.0.0.0/0), with subtun's
 // own address carved out automatically instead of refused.
 func TestFullTunnelDryRun(t *testing.T) {
-	out, err := runCLI(t, "k8s", "debug", "0.0.0.0/1", "128.0.0.0/1", "--dry-run")
+	out, err := runCLI(t, "up", "--k8s", "debug", "0.0.0.0/1", "128.0.0.0/1", "--dry-run")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +228,7 @@ func TestFullTunnelDryRun(t *testing.T) {
 // Excluding an address inside the LAN (the API server, say) used to split
 // the routes into pieces more specific than the LAN's own route.
 func TestLANStaysLocal(t *testing.T) {
-	out, err := runCLI(t, "k8s", "debug", "0.0.0.0/1", "128.0.0.0/1", "-x", "192.168.77.50", "--dry-run")
+	out, err := runCLI(t, "up", "--k8s", "debug", "0.0.0.0/1", "128.0.0.0/1", "-x", "192.168.77.50", "--dry-run")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +240,7 @@ func TestLANStaysLocal(t *testing.T) {
 	}
 	// A route more specific than the LAN is an explicit choice: it stays,
 	// with the warning.
-	out, err = runCLI(t, "k8s", "debug", "192.168.77.128/25", "--dry-run")
+	out, err = runCLI(t, "up", "--k8s", "debug", "192.168.77.128/25", "--dry-run")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +280,7 @@ func fakeSystemDNS(t *testing.T) {
 
 func TestDNSDryRunFollowsSystem(t *testing.T) {
 	fakeSystemDNS(t)
-	out, err := runCLI(t, "k8s", "debug", "203.0.113.0/24", "--dns-domain", "svc.cluster.local,company.com", "--dns-pattern", `^db-[0-9]+\.`, "--dry-run")
+	out, err := runCLI(t, "up", "--k8s", "debug", "203.0.113.0/24", "--dns-domain", "svc.cluster.local,company.com", "--dns-pattern", `^db-[0-9]+\.`, "--dry-run")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,10 +324,10 @@ func TestDNSProfileAndFlags(t *testing.T) {
 func TestDNSErrors(t *testing.T) {
 	fakeSystemDNS(t)
 	cases := map[string][]string{
-		"use firewall or off":        {"k8s", "debug", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-capture", "magic"},
-		"unicast IPv4":               {"k8s", "debug", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-servers", "127.0.0.1"},
-		"want system, IP or IP:port": {"k8s", "debug", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-fallback", "dns.google"},
-		"regular expression":         {"k8s", "debug", "203.0.113.0/24", "--dns-domain", `.*\.company\.com`},
+		"use firewall or off":        {"up", "--k8s", "debug", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-capture", "magic"},
+		"unicast IPv4":               {"up", "--k8s", "debug", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-servers", "127.0.0.1"},
+		"want system, IP or IP:port": {"up", "--k8s", "debug", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-fallback", "dns.google"},
+		"regular expression":         {"up", "--k8s", "debug", "203.0.113.0/24", "--dns-domain", `.*\.company\.com`},
 	}
 	for want, args := range cases {
 		if _, err := runCLI(t, append(args, "--dry-run")...); err == nil || !strings.Contains(err.Error(), want) {
@@ -317,25 +344,25 @@ func TestGuardDryRun(t *testing.T) {
 		notWant []string
 	}{
 		{ // full tunnel: IPv6 blocked automatically
-			args: []string{"k8s", "debug", "0.0.0.0/1", "128.0.0.0/1"},
+			args: []string{"up", "--k8s", "debug", "0.0.0.0/1", "128.0.0.0/1"},
 			want: []string{"IPv6: outgoing IPv6 blocked (full tunnel)"}, notWant: []string{"kill switch"},
 		},
 		{ // split routes: no IPv6 block unless asked
-			args: []string{"k8s", "debug", "203.0.113.0/24"}, notWant: []string{"IPv6", "kill switch"},
+			args: []string{"up", "--k8s", "debug", "203.0.113.0/24"}, notWant: []string{"IPv6", "kill switch"},
 		},
 		{
-			args: []string{"k8s", "debug", "203.0.113.0/24", "--block-ipv6", "true"},
+			args: []string{"up", "--k8s", "debug", "203.0.113.0/24", "--block-ipv6", "true"},
 			want: []string{"IPv6: outgoing IPv6 blocked (asked for)"},
 		},
 		{
-			args: []string{"k8s", "debug", "0.0.0.0/1", "128.0.0.0/1", "--block-ipv6", "false"}, notWant: []string{"IPv6"},
+			args: []string{"up", "--k8s", "debug", "0.0.0.0/1", "128.0.0.0/1", "--block-ipv6", "false"}, notWant: []string{"IPv6"},
 		},
 		{
-			args: []string{"k8s", "debug", "203.0.113.0/24", "--kill-switch", "on", "--dns-domain", "cluster.local"},
+			args: []string{"up", "--k8s", "debug", "203.0.113.0/24", "--kill-switch", "on", "--dns-domain", "cluster.local"},
 			want: []string{"kill switch: on: traffic for 1 guarded prefixes", "Ctrl-C removes them", "DNS to the captured servers is blocked too"},
 		},
 		{
-			args: []string{"k8s", "debug", "203.0.113.0/24", "--kill-switch", "lockdown", "--kill-switch-dns", "allow", "--dns-domain", "cluster.local"},
+			args: []string{"up", "--k8s", "debug", "203.0.113.0/24", "--kill-switch", "lockdown", "--kill-switch-dns", "allow", "--dns-domain", "cluster.local"},
 			want: []string{"kill switch: lockdown:", "after subtun stops for any reason", "DNS stays allowed"},
 		},
 	}
@@ -368,9 +395,9 @@ func TestGuardProfileAndErrors(t *testing.T) {
 		t.Errorf("--kill-switch off overrides the profile: %v\n%s", err, out)
 	}
 	cases := map[string][]string{
-		"use off, on or lockdown": {"k8s", "debug", "203.0.113.0/24", "--kill-switch", "always"},
-		"use block or allow":      {"k8s", "debug", "203.0.113.0/24", "--kill-switch-dns", "maybe"},
-		"use auto, true or false": {"k8s", "debug", "203.0.113.0/24", "--block-ipv6", "sometimes"},
+		"use off, on or lockdown": {"up", "--k8s", "debug", "203.0.113.0/24", "--kill-switch", "always"},
+		"use block or allow":      {"up", "--k8s", "debug", "203.0.113.0/24", "--kill-switch-dns", "maybe"},
+		"use auto, true or false": {"up", "--k8s", "debug", "203.0.113.0/24", "--block-ipv6", "sometimes"},
 	}
 	for want, args := range cases {
 		if _, err := runCLI(t, append(args, "--dry-run")...); err == nil || !strings.Contains(err.Error(), want) {
@@ -487,14 +514,14 @@ func TestImportSSHuttle(t *testing.T) {
 
 func TestDNSCatchAllLeavesLocal(t *testing.T) {
 	fakeSystemDNS(t)
-	out, err := runCLI(t, "k8s", "debug", "203.0.113.0/24", "--dns-domain", ".", "--dry-run")
+	out, err := runCLI(t, "up", "--k8s", "debug", "203.0.113.0/24", "--dns-domain", ".", "--dry-run")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out, "except names under local, lan, 77.168.192.in-addr.arpa, 254.169.in-addr.arpa, e.f.ip6.arpa (local network") {
 		t.Fatalf("no local exception in\n%s", out)
 	}
-	out, err = runCLI(t, "k8s", "debug", "203.0.113.0/24", "--dns-domain", "cluster.local", "--dry-run")
+	out, err = runCLI(t, "up", "--k8s", "debug", "203.0.113.0/24", "--dns-domain", "cluster.local", "--dry-run")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -505,7 +532,7 @@ func TestDNSCatchAllLeavesLocal(t *testing.T) {
 
 func TestDNSUnroutedSetting(t *testing.T) {
 	fakeSystemDNS(t)
-	base := []string{"k8s", "debug", "203.0.113.0/24", "--dns-domain", "company.com", "--dry-run"}
+	base := []string{"up", "--k8s", "debug", "203.0.113.0/24", "--dns-domain", "company.com", "--dry-run"}
 	for flag, want := range map[string]string{"": "warn", "fallback": "fallback", "block": "block"} {
 		args := base
 		if flag != "" {
@@ -537,7 +564,7 @@ func TestUnreachable(t *testing.T) {
 // from defaults: they're ignored with a warning, not an error.
 func TestRouteSettingsIgnoredWithoutRoutes(t *testing.T) {
 	fakeSystemDNS(t)
-	out, err := runCLI(t, "k8s", "debug", "--socks", "127.0.0.1:1080", "--dns-domain", "company.com",
+	out, err := runCLI(t, "up", "--k8s", "debug", "--socks", "127.0.0.1:1080", "--dns-domain", "company.com",
 		"--kill-switch", "on", "--block-ipv6", "true", "--dry-run")
 	if err != nil {
 		t.Fatal(err)

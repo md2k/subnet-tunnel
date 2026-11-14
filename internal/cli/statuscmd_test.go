@@ -136,10 +136,10 @@ func TestEngineStatus(t *testing.T) {
 	}
 }
 
-// subtun k8s and subtun docker take the config file's control: and log:
+// A target given on the command line (up --k8s, --docker) takes the config file's control: and log:
 // too, under the flags given.
 func TestGlobalsFromConfig(t *testing.T) {
-	cmd := newK8sCmd(&globalOpts{})
+	cmd := newUpCmd(&globalOpts{})
 	var s settings
 	s.control = controlStatus
 	if err := globalsFromConfig(cmd, &globalOpts{config: "testdata/control-off.yaml"}, &s); err != nil {

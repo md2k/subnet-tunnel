@@ -1280,7 +1280,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 	reloadPlan := func(i int) (*reloadChange, error) {
 		sp := mp.specs[i]
 		if sp.reload == nil {
-			return nil, errors.New("--reload: this run's profile doesn't come from the config file (subtun k8s, subtun docker); restart subtun instead")
+			return nil, errors.New("--reload: this run's profile doesn't come from the config file (subtun up --k8s, --docker); restart subtun instead")
 		}
 		ns, err := sp.reload()
 		if err != nil {

@@ -59,7 +59,7 @@ func newRoot() *cobra.Command {
 	}
 	root.PersistentFlags().BoolVarP(&g.verbose, "verbose", "v", false, "debug logging")
 	root.PersistentFlags().StringVar(&g.config, "config", "", "config file (default: $SUBTUN_CONFIG or ~/.config/subtun/config.yaml)")
-	root.AddCommand(newUpCmd(g), newK8sCmd(g), newDockerCmd(g), newStatusCmd(), newLogsCmd(), newTUICmd(g), newRouteCmd(), newDNSCmd(), newProfileCmd(), newLogCmd(),
+	root.AddCommand(newUpCmd(g), newStatusCmd(), newLogsCmd(), newTUICmd(g), newRouteCmd(), newDNSCmd(), newProfileCmd(), newLogCmd(),
 		newImportCmd(g), newCleanupCmd(g), newVersionCmd(), newHelperCmd())
 	return root
 }
@@ -237,9 +237,12 @@ func (s *settings) transport(g *globalOpts) transport.Options {
 func newUpCmd(g *globalOpts) *cobra.Command {
 	var s settings
 	var profiles []string
+	var tf targetFlags
 	cmd := &cobra.Command{
-		Use:   "up [PROFILE [CIDR...]] [--profile NAME...]",
-		Short: "Start one or several profiles from the config file",
+		Use: `up [PROFILE [CIDR...]] [--profile NAME...]
+  subtun up --k8s POD|deploy/NAME [CIDR...] | --k8s -l LABELS [CIDR...]
+  subtun up --docker CONTAINER [CIDR...] | --docker -l LABELS [CIDR...]`,
+		Short: "Start a profile from the config file, several, or a target given here",
 		Long: `Start a named profile from the config file. Flags override the profile's
 values; CIDRs and --exclude given here are added to the profile's.
 
@@ -249,12 +252,49 @@ names go to the profile whose route or domain matches most specifically.
 They are configured in the config file only: the command line then takes
 --dry-run, not settings or CIDRs.
 
-Without a profile name, lists the profiles.`,
+Or give the target here, without a profile:
+  --k8s     a Kubernetes pod, through the API server's exec, with your
+            kubeconfig (--context, else its current context; -n, else its
+            namespace). Name the pod, or follow a Deployment (deploy/NAME) or
+            labels (-l): a running, ready pod is picked at each connect, so a
+            reconnect finds the one that replaced a pod that went.
+  --docker  a Docker container, through the daemon's exec (-H, $DOCKER_HOST,
+            then the docker context). Name it, or follow labels (-l, such as
+            a Compose service's).
+
+CIDRs (or single IPs) are captured transparently through a utun interface:
+any program on this machine reaches them directly. Setting up the interface
+and routes needs root once, so sudo asks for your password; everything else
+runs as you. --socks adds a SOCKS5 proxy, for example for a browser.
+
+Without a profile name or a target, lists the profiles.`,
 		Example: `  subtun up dev-cluster
   subtun up dev-cluster --dry-run
   subtun up dev-cluster 10.50.0.0/16 -x 10.50.1.0/24
-  subtun up --profile work,dev-cluster`,
+  subtun up --profile work,dev-cluster
+  subtun up --k8s -n team-a debug-pod 10.96.0.0/12 10.244.0.0/16
+  subtun up --k8s -n team-a deploy/toolbox 10.0.0.0/8 -x 10.1.0.0/16
+  subtun up --k8s -n team-a -l app=toolbox --socks 127.0.0.1:1080
+  subtun up --docker my-app 172.20.0.0/16
+  subtun up --docker -l com.docker.compose.service=web --socks 127.0.0.1:1080
+  curl --socks5-hostname 127.0.0.1:1080 http://my-svc.team-a.svc.cluster.local`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if tf.given() {
+				if len(profiles) > 0 {
+					return errors.New("--profile and --k8s/--docker don't go together: a profile has its own target")
+				}
+				sp, err := tf.spec(args, s, g)
+				if err != nil {
+					return err
+				}
+				if err := globalsFromConfig(cmd, g, &sp.s); err != nil {
+					return err
+				}
+				return run(cmd.Context(), cmd.OutOrStdout(), g, sp)
+			}
+			if err := tf.unused(cmd.Flags()); err != nil {
+				return err
+			}
 			path := g.config
 			if path == "" {
 				path = config.DefaultPath()
@@ -297,6 +337,7 @@ Without a profile name, lists the profiles.`,
 		},
 	}
 	s.register(cmd)
+	tf.register(cmd)
 	cmd.Flags().StringSliceVar(&profiles, "profile", nil, "start this profile; repeatable or comma-separated, several run at once")
 	return cmd
 }
@@ -419,162 +460,9 @@ func profileTarget(p config.Profile, s *settings, g *globalOpts) (connectFunc, f
 	}
 }
 
-// checkSelector refuses a target's label selector that can't be parsed,
-// before anything starts.
-func checkSelector(t config.Target) error {
-	switch {
-	case t.K8s != nil && t.K8s.Selector != "":
-		return k8s.ParseSelector(t.K8s.Selector)
-	case t.Docker != nil && t.Docker.Selector != "":
-		_, err := docker.ParseSelector(t.Docker.Selector)
-		return err
-	}
-	return nil
-}
-
-// targetArgs splits a command line's arguments into the target's name and
-// the CIDRs: with --selector there is no name.
-func targetArgs(args []string, selector, what string) (string, []string, error) {
-	if selector != "" {
-		if len(args) > 0 {
-			if _, err := netip.ParsePrefix(args[0]); err != nil {
-				if _, err := netip.ParseAddr(args[0]); err != nil {
-					return "", nil, fmt.Errorf("%q: with --selector, the arguments are CIDRs (no %s name)", args[0], what)
-				}
-			}
-		}
-		return "", args, nil
-	}
-	if len(args) == 0 {
-		return "", nil, fmt.Errorf("name the %s, or pick one by its labels with --selector", what)
-	}
-	return args[0], args[1:], nil
-}
-
-// k8sTargetArg names the pod or the Deployment, kubectl style: NAME,
-// pod/NAME, deploy/NAME.
-func k8sTargetArg(t *k8s.Target, arg string) error {
-	kind, name, ok := strings.Cut(arg, "/")
-	if !ok {
-		t.Pod = arg
-		return nil
-	}
-	switch kind {
-	case "pod", "pods", "po":
-		t.Pod = name
-	case "deploy", "deployment", "deployments", "deployment.apps":
-		t.Deployment = name
-	default:
-		return fmt.Errorf("%q: name a pod (NAME, pod/NAME) or a Deployment (deploy/NAME)", arg)
-	}
-	if name == "" {
-		return fmt.Errorf("%q: the name is missing", arg)
-	}
-	return nil
-}
-
-func newK8sCmd(g *globalOpts) *cobra.Command {
-	t := k8s.Target{Picked: &transport.Picked{}}
-	var s settings
-	cmd := &cobra.Command{
-		Use:   "k8s POD|deploy/NAME [CIDR...]",
-		Short: "Tunnel through a Kubernetes pod, using the exec API",
-		Long: `Tunnel through a Kubernetes pod. subtun talks to the API server with your
-kubeconfig, starts its agent in the pod over exec and opens connections from
-there.
-
-Name the pod, or follow a Deployment (deploy/NAME) or labels (--selector):
-subtun then picks a running, ready pod at each connect, so a reconnect finds
-the pod that replaced one that went (a rollout, an eviction, a drain).
-
-CIDRs (or single IPs) are captured transparently through a utun interface:
-any program on this machine reaches them directly. Setting up the interface
-and routes needs root once, so sudo asks for your password; everything else
-runs as you. --socks adds a SOCKS5 proxy, for example for a browser.`,
-		Example: `  subtun k8s -n team-a debug-pod 10.96.0.0/12 10.244.0.0/16
-  subtun k8s -n team-a debug-pod 10.0.0.0/8 -x 10.1.0.0/16 --dry-run
-  subtun k8s -n team-a debug-pod --socks 127.0.0.1:1080
-  subtun k8s -n team-a deploy/toolbox 10.0.0.0/8
-  subtun k8s -n team-a -l app=toolbox 10.0.0.0/8
-  curl --socks5-hostname 127.0.0.1:1080 http://my-svc.team-a.svc.cluster.local`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			name, routes, err := targetArgs(args, t.Selector, "pod")
-			if err != nil {
-				return err
-			}
-			if t.Selector != "" {
-				if err := k8s.ParseSelector(t.Selector); err != nil {
-					return err
-				}
-			} else if err := k8sTargetArg(&t, name); err != nil {
-				return err
-			}
-			s.routes = routes
-			if err := globalsFromConfig(cmd, g, &s); err != nil {
-				return err
-			}
-			return run(cmd.Context(), cmd.OutOrStdout(), g, &tunnelSpec{s: s, connect: func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
-				return k8s.Connect(ctx, t, agents, s.transport(g), log)
-			}})
-		},
-	}
-	cmd.Flags().StringVarP(&t.Namespace, "namespace", "n", "", "namespace (default: from kubeconfig)")
-	cmd.Flags().StringVarP(&t.Container, "container", "c", "", "container (default: kubectl's default container)")
-	cmd.Flags().StringVarP(&t.Selector, "selector", "l", "", "follow pods with these labels (kubectl's syntax, e.g. app=toolbox) instead of naming one")
-	cmd.Flags().StringVar(&t.Context, "context", "", "kubeconfig context (default: current)")
-	cmd.Flags().StringVar(&t.Kubeconfig, "kubeconfig", "", "kubeconfig file (default: $KUBECONFIG or ~/.kube/config)")
-	s.register(cmd)
-	return cmd
-}
-
-func newDockerCmd(g *globalOpts) *cobra.Command {
-	t := docker.Target{Picked: &transport.Picked{}}
-	var s settings
-	cmd := &cobra.Command{
-		Use:   "docker CONTAINER [CIDR...]",
-		Short: "Tunnel through a Docker container, using the exec API",
-		Long: `Tunnel through a Docker container. subtun talks to the Docker daemon (found
-like the docker CLI does: --host, $DOCKER_HOST, then the current docker
-context), starts its agent over exec and opens connections from there, so
-container IPs and names on its networks become reachable from this machine.
-
-Name the container, or follow labels (--selector, e.g. a Compose service's):
-subtun then picks a running container at each connect.
-
-CIDRs are captured transparently through a utun interface (sudo asks once);
---socks adds a SOCKS5 proxy.`,
-		Example: `  subtun docker my-app 172.20.0.0/16
-  subtun docker my-app --socks 127.0.0.1:1080
-  subtun docker -l com.docker.compose.service=web --socks 127.0.0.1:1080
-  curl --socks5-hostname 127.0.0.1:1080 http://db:5432`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			name, routes, err := targetArgs(args, t.Selector, "container")
-			if err != nil {
-				return err
-			}
-			if t.Selector != "" {
-				if _, err := docker.ParseSelector(t.Selector); err != nil {
-					return err
-				}
-			}
-			t.Container, s.routes = name, routes
-			if err := globalsFromConfig(cmd, g, &s); err != nil {
-				return err
-			}
-			return run(cmd.Context(), cmd.OutOrStdout(), g, &tunnelSpec{s: s, connect: func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
-				return docker.Connect(ctx, t, agents, s.transport(g), log)
-			}})
-		},
-	}
-	cmd.Flags().StringVarP(&t.Host, "host", "H", "", "Docker daemon address (default: $DOCKER_HOST, then the docker context)")
-	cmd.Flags().StringVar(&t.Context, "context", "", "docker context (default: $DOCKER_CONTEXT, then the current context)")
-	cmd.Flags().StringVarP(&t.Selector, "selector", "l", "", "follow a running container with these labels (key=value, comma-separated) instead of naming one")
-	s.register(cmd)
-	return cmd
-}
 
 // globalsFromConfig applies the config file's top-level control: and log:
-// to a run without a profile (subtun k8s, subtun docker), under the flags
+// to a run without a profile (subtun up --k8s, --docker), under the flags
 // given: they are global for every run. No config file is fine; a broken
 // one only loses those settings.
 func globalsFromConfig(cmd *cobra.Command, g *globalOpts, s *settings) error {
@@ -684,7 +572,7 @@ func printPlan(w io.Writer, rp *routePlan, warns []string) {
 		rp.opts.TunAddr, rp.opts.MTU)
 }
 
-// run runs one profile (subtun up NAME, subtun k8s, subtun docker): it plans
+// run runs one profile (subtun up NAME, or a target given with --k8s or --docker): it plans
 // and checks everything before connecting, prints the plan with --dry-run,
 // and otherwise runs it on the same engine as several profiles.
 func run(ctx context.Context, out io.Writer, g *globalOpts, sp *tunnelSpec) error {

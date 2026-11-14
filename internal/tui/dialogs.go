@@ -405,7 +405,7 @@ func enterSubmits(f *tview.Form, submit func()) {
 // checked by a dry run, and adds the one chosen.
 func (a *app) addProfileDialog() {
 	if slices.ContainsFunc(a.st.Tunnels, func(t control.Tunnel) bool { return t.Name == "" }) {
-		a.flash("yellow", "this run's tunnel comes from the command line (subtun k8s or docker): profiles can't be added to it")
+		a.flash("yellow", "this run's tunnel comes from the command line (subtun up --k8s or --docker): profiles can't be added to it")
 		return
 	}
 	table := tview.NewTable().SetSelectable(true, false).SetFixed(1, 0).SetSelectedStyle(tcell.StyleDefault.Reverse(true))
