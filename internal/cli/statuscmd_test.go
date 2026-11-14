@@ -122,7 +122,7 @@ func TestEngineStatus(t *testing.T) {
 	if cp := es.configProfiles("testdata/no-such-config.yaml"); cp.Error == "" || len(cp.Profiles) != 0 {
 		t.Errorf("missing file: %+v", cp)
 	}
-	if got := configTarget(config.Target{K8s: &config.K8sTarget{Namespace: "ops", Pod: "pod/toolbox"}}); got != "pod ops/toolbox" {
+	if got := configTarget(config.Target{K8s: &config.K8sTarget{Namespace: "ops", Create: new(false), Name: "toolbox"}}); got != "pod ops/toolbox" {
 		t.Errorf("k8s target: %q", got)
 	}
 	// DNS while the kill switch holds: blocked by default; nothing to hold
@@ -136,10 +136,10 @@ func TestEngineStatus(t *testing.T) {
 	}
 }
 
-// subtun k8s and subtun docker take the config file's control: and log:
+// A target given on the command line (up --k8s, --docker) takes the config file's control: and log:
 // too, under the flags given.
 func TestGlobalsFromConfig(t *testing.T) {
-	cmd := newK8sCmd(&globalOpts{})
+	cmd := newUpCmd(&globalOpts{})
 	var s settings
 	s.control = controlStatus
 	if err := globalsFromConfig(cmd, &globalOpts{config: "testdata/control-off.yaml"}, &s); err != nil {

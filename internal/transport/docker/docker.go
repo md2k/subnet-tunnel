@@ -5,6 +5,7 @@ package docker
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,11 +17,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/moby/moby/api/pkg/stdcopy"
+	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 
 	"github.com/md2k/subnet-tunnel/internal/agentbin"
@@ -29,9 +32,22 @@ import (
 
 // Target selects the daemon and container that runs the agent.
 type Target struct {
-	Host      string // empty: $DOCKER_HOST, then the docker context
-	Context   string // empty: $DOCKER_CONTEXT, then the current context
-	Container string // name or ID
+	Host    string // empty: $DOCKER_HOST, then the docker context
+	Context string // empty: $DOCKER_CONTEXT, then the current context
+	// Create: subtun creates the container and removes it on stop; else
+	// it is an existing one, by Name or Selector (a running container with
+	// these labels, "key=value,key2", all must match, picked at each
+	// connect: see pickContainer).
+	Create   bool
+	Name     string // the container (name or ID): to create, or the existing one
+	Selector string
+	Image    string // a created container's; empty: transport.DefaultImage
+	Network  string // the network a created container joins; empty: the default bridge
+	LimitCPU string // a created container's limits (Kubernetes quantities)
+	LimitMem string
+	Profile  string // names and labels the containers subtun creates
+	// Picked remembers the container picked last.
+	Picked *transport.Picked
 }
 
 // Connect starts the agent in the container and returns its stdio.
@@ -41,9 +57,27 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	if err != nil {
 		return nil, err
 	}
-	res, err := cli.ContainerInspect(ctx, t.Container, client.ContainerInspectOptions{})
+	target := t.Name
+	switch {
+	case t.Create:
+		if target, err = ensureContainer(ctx, cli, t, log); err != nil {
+			return nil, err
+		}
+	case t.Selector != "":
+		if target, err = pickContainer(ctx, cli, t); err != nil {
+			return nil, err
+		}
+		if prev := t.Picked.Get(); prev != target {
+			msg := "container picked"
+			if prev != "" {
+				msg = "container picked: the one before is gone or not running"
+			}
+			log.Info(msg, "follows", "containers with "+t.Selector, "container", target)
+		}
+	}
+	res, err := cli.ContainerInspect(ctx, target, client.ContainerInspectOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("container %s: %w", t.Container, err)
+		return nil, fmt.Errorf("container %s: %w", target, err)
 	}
 	c := res.Container
 	name := strings.TrimPrefix(c.Name, "/")
@@ -51,6 +85,12 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 		return nil, fmt.Errorf("container %s is not running", name)
 	}
 	d := &dockerExec{cli: cli, id: c.ID, name: name}
+	switch {
+	case t.Create:
+		d.follows = "created by subtun"
+	case t.Selector != "":
+		d.follows = "containers with " + t.Selector
+	}
 	carrier, err := transport.Bootstrap(ctx, d, agents, opts, log.With("container", name))
 	if err != nil {
 		return nil, err
@@ -58,12 +98,83 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	carrier.Host = cli.DaemonHost()
 	carrier.Endpoints = transport.ResolveEndpoint(ctx, cli.DaemonHost())
 	carrier.Local = transport.IsLocal(cli.DaemonHost(), carrier.Endpoints)
+	if !t.Create { // a created container is remembered with its ID
+		t.Picked.Set(target)
+	}
 	return carrier, nil
+}
+
+// ParseSelector checks a container label selector: "key=value" or "key"
+// parts, comma-separated, all of which must match.
+func ParseSelector(sel string) ([]string, error) {
+	var parts []string
+	for _, p := range strings.Split(sel, ",") {
+		p = strings.TrimSpace(p)
+		key, _, _ := strings.Cut(p, "=")
+		if key == "" || strings.ContainsAny(p, "!") {
+			return nil, fmt.Errorf("selector %q: use key=value or key, comma-separated", sel)
+		}
+		parts = append(parts, p)
+	}
+	return parts, nil
+}
+
+// pickContainer picks the container a followed target connects to:
+// running, and healthy if it has a health check; the one picked last time
+// while it still is, else the newest.
+func pickContainer(ctx context.Context, cli *client.Client, t Target) (string, error) {
+	parts, err := ParseSelector(t.Selector)
+	if err != nil {
+		return "", err
+	}
+	f := client.Filters{}
+	f.Add("label", parts...)
+	res, err := cli.ContainerList(ctx, client.ContainerListOptions{Filters: f})
+	if err != nil {
+		return "", fmt.Errorf("containers with %s: %w", t.Selector, err)
+	}
+	return choose(res.Items, t.Selector, t.Picked.Get())
+}
+
+// choose is pickContainer's choice among the containers listed.
+func choose(items []container.Summary, sel, prev string) (string, error) {
+	var usable []container.Summary
+	for _, c := range items {
+		if c.State != container.StateRunning || len(c.Names) == 0 {
+			continue
+		}
+		if c.Health != nil && (c.Health.Status == container.Unhealthy || c.Health.Status == container.Starting) {
+			continue
+		}
+		usable = append(usable, c)
+	}
+	if len(usable) == 0 {
+		if len(items) == 0 {
+			return "", fmt.Errorf("containers with %s: none running", sel)
+		}
+		return "", fmt.Errorf("containers with %s: none running and healthy (%d found)", sel, len(items))
+	}
+	name := func(c container.Summary) string { return strings.TrimPrefix(c.Names[0], "/") }
+	for _, c := range usable {
+		if name(c) == prev {
+			return prev, nil
+		}
+	}
+	newest := slices.MaxFunc(usable, func(a, b container.Summary) int {
+		if a.Created != b.Created {
+			return cmp.Compare(a.Created, b.Created)
+		}
+		return strings.Compare(name(a), name(b))
+	})
+	return name(newest), nil
 }
 
 // Endpoint returns the Docker daemon's address, without connecting
 // (several tunnels exclude every endpoint from every route).
 func Endpoint(t Target) (string, error) {
+	if _, _, pinned := t.Picked.Pinned(); !pinned {
+		t.Picked = nil // planning before the first connect: don't pin yet
+	}
 	cli, err := newClient(t)
 	if err != nil {
 		return "", err
@@ -72,12 +183,19 @@ func Endpoint(t Target) (string, error) {
 	return cli.DaemonHost(), nil
 }
 
+// newClient talks to t's daemon: the one of its first connect (Picked), so
+// switching docker contexts meanwhile doesn't move the run, or what subtun
+// removes. ($DOCKER_HOST can't change meanwhile: nothing to pin.)
 func newClient(t Target) (*client.Client, error) {
 	opts := []client.Opt{client.WithAPIVersionNegotiation()}
-	if t.Host == "" && t.Context == "" && os.Getenv("DOCKER_HOST") != "" {
+	fromEnv := t.Host == "" && t.Context == "" && os.Getenv("DOCKER_HOST") != ""
+	if fromEnv {
 		// Same as the docker CLI: DOCKER_HOST plus DOCKER_TLS_VERIFY / DOCKER_CERT_PATH.
 		opts = append(opts, client.FromEnv)
 	} else {
+		if pinned, _, ok := t.Picked.Pinned(); ok && pinned != "" && t.Host == "" {
+			t.Host, t.Context = pinned, ""
+		}
 		host, err := ResolveHost(t.Host, t.Context, configDir())
 		if err != nil {
 			return nil, err
@@ -92,6 +210,9 @@ func newClient(t Target) (*client.Client, error) {
 	}
 	if strings.HasPrefix(cli.DaemonHost(), "ssh://") {
 		return nil, fmt.Errorf("docker host %s: ssh:// hosts are not supported yet", cli.DaemonHost())
+	}
+	if !fromEnv {
+		t.Picked.Pin(cli.DaemonHost(), "")
 	}
 	return cli, nil
 }
@@ -161,9 +282,15 @@ func ResolveHost(host, contextName, dir string) (string, error) {
 type dockerExec struct {
 	cli      *client.Client
 	id, name string
+	follows  string // followed: what ("containers with ...")
 }
 
-func (d *dockerExec) Describe() string { return "container " + d.name }
+func (d *dockerExec) Describe() string {
+	if d.follows != "" {
+		return "container " + d.name + " (" + d.follows + ")"
+	}
+	return "container " + d.name
+}
 
 func (d *dockerExec) start(ctx context.Context, cmd []string, stdin bool) (string, client.HijackedResponse, error) {
 	cr, err := d.cli.ExecCreate(ctx, d.id, client.ExecCreateOptions{

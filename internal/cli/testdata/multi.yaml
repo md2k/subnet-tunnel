@@ -9,7 +9,8 @@ profiles:
     target:
       docker:
         host: tcp://203.0.113.200:2376
-        container: work
+        create: false
+        name: work
     routes: [10.0.0.0/8, 203.0.113.0/24]
     dns:
       domains: [., corp.example]
@@ -19,7 +20,8 @@ profiles:
     target:
       docker:
         host: tcp://198.51.100.200:2376
-        container: dev
+        create: false
+        name: dev
     routes: [10.50.0.0/16]
     socks: 127.0.0.1:1081
     dns:
@@ -28,7 +30,8 @@ profiles:
     target:
       docker:
         host: tcp://198.51.100.201:2376
-        container: vault
+        create: false
+        name: vault
     routes: [10.60.0.0/16]
     killSwitch:
       mode: lockdown
@@ -36,13 +39,15 @@ profiles:
     target:
       docker:
         host: tcp://198.51.100.202:2376
-        container: dup
+        create: false
+        name: dup
     routes: [10.50.0.0/16]
   all-names:
     target:
       docker:
         host: tcp://198.51.100.203:2376
-        container: all
+        create: false
+        name: all
     routes: [172.16.0.0/12]
     dns:
       domains: [.]
@@ -50,7 +55,8 @@ profiles:
     target:
       docker:
         host: tcp://198.51.100.204:2376
-        container: other
+        create: false
+        name: other
     routes: [172.20.0.0/16]
     tun:
       address: 198.18.250.1
@@ -58,13 +64,15 @@ profiles:
     target:
       docker:
         host: tcp://198.51.100.205:2376
-        container: socks
+        create: false
+        name: socks
     socks: 127.0.0.1:1081
   other-tun2:
     target:
       docker:
         host: tcp://198.51.100.206:2376
-        container: other2
+        create: false
+        name: other2
     routes: [172.21.0.0/16]
     tun:
       address: 198.18.251.1
@@ -72,7 +80,8 @@ profiles:
     target:
       docker:
         host: tcp://198.51.100.207:2376
-        container: full
+        create: false
+        name: full
     routes: [0.0.0.0/1, 128.0.0.0/1]
     killSwitch:
       mode: "on"
@@ -80,13 +89,15 @@ profiles:
     target:
       docker:
         host: tcp://198.51.100.208:2376
-        container: calico
+        create: false
+        name: calico
     routes: [192.168.0.0/16]
   work-x:
     target:
       docker:
         host: tcp://198.51.100.209:2376
-        container: workx
+        create: false
+        name: workx
     routes: [10.0.0.0/8]
     exclude: [10.50.1.0/24]
   named:
@@ -94,7 +105,8 @@ profiles:
       k8s:
         kubeconfig: testdata/kubeconfig
         context: named
-        pod: debug
+        create: false
+        name: debug
     routes: [172.24.0.0/16]
     dns:
       domains: [.]

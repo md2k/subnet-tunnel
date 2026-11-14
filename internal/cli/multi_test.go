@@ -34,7 +34,7 @@ func multiPlanFor(t *testing.T, names ...string) *multiPlan {
 		}
 		sp := &tunnelSpec{name: n, s: s, cfg: p}
 		sp.s.applyProfile(p, cmd.Flags())
-		sp.connect, sp.endpoint = profileTarget(p, &sp.s, &globalOpts{})
+		sp.connect, sp.endpoint, sp.release = profileTarget(n, p.Target, &sp.s, &globalOpts{})
 		specs = append(specs, sp)
 	}
 	mp, err := planMulti(specs)

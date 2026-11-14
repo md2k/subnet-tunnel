@@ -29,7 +29,7 @@ func TestTUICmd(t *testing.T) {
 // loses them, with a warning), else from what was remembered.
 func TestTUISettings(t *testing.T) {
 	dir := t.TempDir()
-	profiles := "profiles:\n  p:\n    target: {docker: {container: c}}\n    socks: 127.0.0.1:1080\n"
+	profiles := "profiles:\n  p:\n    target: {docker: {create: false, name: c}}\n    socks: 127.0.0.1:1080\n"
 	write := func(name, content string) string {
 		path := filepath.Join(dir, name)
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {

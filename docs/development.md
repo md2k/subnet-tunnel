@@ -39,8 +39,8 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/proto` | hello line, per-stream request/response, smux settings |
 | `internal/agent` | agent side: serve smux on stdio, dial on request |
 | `internal/tunnel` | laptop side: check the hello, open streams through the agent |
-| `internal/transport` | get an agent running in a target (probe, choose binary or Python, start) |
-| `internal/transport/k8s`, `.../docker` | exec into a pod / container |
+| `internal/transport` | get an agent running in a target (probe, choose binary or Python, start); the labels and idle script of what subtun creates (`owned.go`), a selector's last pick (`picked.go`) |
+| `internal/transport/k8s`, `.../docker` | exec into a pod / container; create, reuse and delete subtun's own (`pod.go`, `container.go`); pick an existing one by labels |
 | `internal/socks` | SOCKS5 frontend |
 | `internal/control` | the control socket (per process, user-only), its HTTP+JSON API (status, samples, the config's profiles, logs, changes), the client the commands use |
 | `internal/tui` | the terminal UI (`subtun tui`, `--tui`; tview): dashboard in two layouts, profile screen, logs, dialogs with dry runs; on a `Source` (the control socket, subtun's API in memory, or a fake); inside subtun, the stop question and the terminal lent to sudo (`Terminal`) |
@@ -48,7 +48,7 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/logring` | the recent log lines in memory (capped by lines and bytes) |
 | `internal/logx` | levels per component (the `component` attribute), masking of DNS names and destinations, log files rotated by size and pruned by age and total size |
 | `internal/xdg` | subtun's directories, nix style: state (`~/.local/state/subtun`: logs) and run (`$XDG_RUNTIME_DIR/subtun` or `<state>/run`: sockets) |
-| `internal/cli` | the commands; planning of routes (automatic excludes), DNS and the kill switch; dry-run output; the engine every run uses, one profile or several (`multi.go`: planning, each profile's tunnel, `runEngine`; `router.go`: a connection's tunnel; `change.go`: changes while running, planned and checked; `status.go`, `statuscmd.go`, `changecmd.go`, `tuicmd.go`, `uptui.go`: status, the control commands and the terminal UI, attached or inside subtun) |
+| `internal/cli` | the commands; planning of routes (automatic excludes), DNS and the kill switch; dry-run output; the engine every run uses, one profile or several (`multi.go`: planning, each profile's tunnel, `runEngine`; `router.go`: a connection's tunnel; `change.go`: changes while running, planned and checked; `status.go`, `statuscmd.go`, `changecmd.go`, `tuicmd.go`, `uptui.go`: status, the control commands and the terminal UI, attached or inside subtun; `target.go`: a target given with `up --k8s` / `--docker`) |
 | `internal/capture` | utun capture setup: helper → utun + routes → netstack; the DNS runtime; the kill switch guard following the local networks; routes and guard changing while running |
 | `internal/dns` | DNS engine: match names (`.` leaves local names alone) and pick a tunnel among several, tunnel or fallback, answers outside the routes, UDP/TCP listener, loop-free forwarder |
 | `internal/routes` | route planning: excludes by subtraction, cleanup, safety checks |
@@ -88,7 +88,7 @@ Kubernetes (Docker Desktop, kind, ...):
 ```sh
 kubectl apply -k test/dev
 kubectl -n subtun-dev wait --for=condition=Ready pod --all
-build/subtun k8s -n subtun-dev target --socks 127.0.0.1:1080
+build/subtun up --k8s -n subtun-dev --create=false --name target --socks 127.0.0.1:1080
 curl --socks5-hostname 127.0.0.1:1080 http://web.subtun-dev.svc.cluster.local:8080/
 kubectl delete namespace subtun-dev
 ```
@@ -97,7 +97,7 @@ Docker:
 
 ```sh
 docker compose -f test/dev/compose.yaml up -d
-build/subtun docker subtun-dev-target-1 --socks 127.0.0.1:1080
+build/subtun up --docker --create=false --name subtun-dev-target-1 --socks 127.0.0.1:1080
 curl --socks5-hostname 127.0.0.1:1080 http://web:8080/
 docker compose -f test/dev/compose.yaml down
 ```
@@ -107,9 +107,9 @@ agent in `/dev/shm/subtun-65534`. The compose `python` profile adds Python targe
 
 ```sh
 docker compose -f test/dev/compose.yaml --profile python up -d
-build/subtun docker subtun-dev-hardened-1 --socks 127.0.0.1:1080      # auto -> Python (no exec-able dir)
-build/subtun docker subtun-dev-distroless-1 --socks 127.0.0.1:1080    # auto -> Python (no shell)
-build/subtun docker subtun-dev-py36-1 --agent python --socks 127.0.0.1:1080
+build/subtun up --docker --create=false --name subtun-dev-hardened-1 --socks 127.0.0.1:1080      # auto -> Python (no exec-able dir)
+build/subtun up --docker --create=false --name subtun-dev-distroless-1 --socks 127.0.0.1:1080    # auto -> Python (no shell)
+build/subtun up --docker --create=false --name subtun-dev-py36-1 --agent python --socks 127.0.0.1:1080
 docker compose -f test/dev/compose.yaml --profile python down
 ```
 
@@ -133,7 +133,7 @@ Use single IPs or narrow ranges: wide 10.x ranges can overlap corporate networks
 ```sh
 WEB_POD=$(kubectl -n subtun-dev get pod -l app=web -o jsonpath='{.items[0].status.podIP}')
 WEB_SVC=$(kubectl -n subtun-dev get svc web -o jsonpath='{.spec.clusterIP}')
-build/subtun k8s -n subtun-dev target $WEB_POD $WEB_SVC        # sudo asks once
+build/subtun up --k8s -n subtun-dev --create=false --name target $WEB_POD $WEB_SVC   # sudo asks once
 curl http://$WEB_SVC:8080/                                     # in another terminal
 netstat -rn -f inet | grep utun                                # routes on the utun
 ```
@@ -215,13 +215,13 @@ Without root, through SOCKS: one profile per target, plus one that can't connect
 cat > build/multi.yaml <<'EOF'
 profiles:
   kube:
-    target: {k8s: {context: docker-desktop, namespace: subtun-dev, pod: target}}
+    target: {k8s: {context: docker-desktop, namespace: subtun-dev, create: false, name: target}}
     socks: 127.0.0.1:17080
   dock:
-    target: {docker: {container: subtun-dev-target-1}}
+    target: {docker: {create: false, name: subtun-dev-target-1}}
     socks: 127.0.0.1:17081
   ghost:
-    target: {k8s: {context: docker-desktop, namespace: subtun-dev, pod: no-such-pod}}
+    target: {k8s: {context: docker-desktop, namespace: subtun-dev, create: false, name: no-such-pod}}
     socks: 127.0.0.1:17082
     reconnect: {attempts: 1}
 EOF
@@ -234,6 +234,25 @@ Log lines carry `tunnel=<profile>`. `ghost` logs `gave up` and the others carry 
 profiles that can't connect, subtun exits with `every profile gave up`. With routes (sudo),
 `netstat -rn -f inet | grep utun` shows a profile's routes appear when its tunnel is up and go
 when it gives up (unless it has a kill switch); `--dry-run` shows which tunnel each route goes to.
+
+### Pods and containers subtun creates
+
+Without root, through SOCKS, against the local cluster and Docker. The node of Docker Desktop's
+cluster may not pull from Docker Hub by itself behind a proxy: `docker pull busybox:1.37` on the
+host first, or give an image it has (`--image alpine:3.20`).
+
+```sh
+build/subtun up --k8s --context docker-desktop -n subtun-dev --socks 127.0.0.1:18086
+kubectl --context docker-desktop -n subtun-dev get pods -l app.kubernetes.io/managed-by=subtun
+curl --socks5-hostname 127.0.0.1:18086 http://web.subtun-dev.svc.cluster.local:8080/
+build/subtun up --docker --network subtun-dev_default --socks 127.0.0.1:18087
+curl --socks5-hostname 127.0.0.1:18087 http://web:8080/
+```
+
+`kubectl exec <pod> -- pkill -f subtun-agent` reconnects to the same pod; deleting the pod makes
+subtun create another; Ctrl-C deletes it; after `kill -9` the pod stays (it exits after 5 idle
+minutes) and the next start deletes it. `-l app=web` picks the `web` Deployment's pod, and
+`kubectl delete pod -l app=web` makes the reconnect pick its replacement.
 
 ### The terminal UI inside subtun
 

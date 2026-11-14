@@ -9,13 +9,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/yaml"
 
 	"github.com/md2k/subnet-tunnel/internal/dns"
@@ -258,20 +261,64 @@ type Target struct {
 	Docker *DockerTarget `json:"docker,omitempty"`
 }
 
-// K8sTarget selects a pod.
+// K8sTarget is the pod the agent runs in. By default subtun creates it
+// (Name, Image, Resources) and deletes it on stop; with Create false (or a
+// Selector) it is an existing pod, by Name or Selector, that subtun only
+// execs into.
 type K8sTarget struct {
-	Kubeconfig string `json:"kubeconfig,omitempty"`
-	Context    string `json:"context,omitempty"`
-	Namespace  string `json:"namespace,omitempty"`
-	Pod        string `json:"pod"`
-	Container  string `json:"container,omitempty"`
+	Kubeconfig string     `json:"kubeconfig,omitempty"`
+	Context    string     `json:"context,omitempty"`
+	Namespace  string     `json:"namespace,omitempty"`
+	Create     *bool      `json:"create,omitempty"`
+	Name       string     `json:"name,omitempty"`
+	Selector   string     `json:"selector,omitempty"`
+	Container  string     `json:"container,omitempty"` // an existing pod's
+	Image      string     `json:"image,omitempty"`
+	Resources  *Resources `json:"resources,omitempty"`
+
+	OldPod string `json:"pod,omitempty"` // renamed: name, with create: false
 }
 
-// DockerTarget selects a container.
+// DockerTarget is the container the agent runs in, the same way: created
+// by default (Name, Image, Network, Resources), or an existing one.
 type DockerTarget struct {
-	Host      string `json:"host,omitempty"`
-	Context   string `json:"context,omitempty"`
-	Container string `json:"container"`
+	Host      string     `json:"host,omitempty"`
+	Context   string     `json:"context,omitempty"`
+	Create    *bool      `json:"create,omitempty"`
+	Name      string     `json:"name,omitempty"`
+	Selector  string     `json:"selector,omitempty"`
+	Image     string     `json:"image,omitempty"`
+	Network   string     `json:"network,omitempty"`
+	Resources *Resources `json:"resources,omitempty"`
+
+	OldContainer string `json:"container,omitempty"` // renamed: name, with create: false
+}
+
+// Resources are a created pod's or container's (a container takes limits
+// only), as Kubernetes quantities: cpu "100m" or "1", memory "64Mi".
+type Resources struct {
+	Requests ResourceList `json:"requests,omitempty"`
+	Limits   ResourceList `json:"limits,omitempty"`
+}
+
+// ResourceList is CPU and memory.
+type ResourceList struct {
+	CPU    string `json:"cpu,omitempty"`
+	Memory string `json:"memory,omitempty"`
+}
+
+// Creates reports whether subtun creates the pod: the default, unless
+// create: false or a selector (which picks an existing one).
+func (t K8sTarget) Creates() bool { return creates(t.Create, t.Selector) }
+
+// Creates reports whether subtun creates the container.
+func (t DockerTarget) Creates() bool { return creates(t.Create, t.Selector) }
+
+func creates(create *bool, selector string) bool {
+	if create != nil {
+		return *create
+	}
+	return selector == ""
 }
 
 // Tun configures subtun's own interface.
@@ -440,24 +487,126 @@ func (f *File) Names() []string {
 	return names
 }
 
+// Validate checks a target as a profile's would be (a target given on the
+// command line goes through it too).
+func (t Target) Validate() error {
+	switch {
+	case t.K8s != nil && t.Docker != nil:
+		return errors.New("target: set either k8s or docker, not both")
+	case t.K8s != nil:
+		return t.K8s.validate()
+	case t.Docker != nil:
+		return t.Docker.validate()
+	}
+	return errors.New("target: set k8s or docker")
+}
+
+func (t K8sTarget) validate() error {
+	if t.OldPod != "" {
+		return fmt.Errorf("target.k8s.pod is now name, with create: false for an existing pod (name: %s, create: false)", strings.TrimPrefix(t.OldPod, "pod/"))
+	}
+	if t.Creates() {
+		if err := unset("target.k8s", "with create: false (an existing pod)", map[string]string{"selector": t.Selector, "container": t.Container}); err != nil {
+			return err
+		}
+		if t.Name != "" && !podName.MatchString(t.Name) {
+			return fmt.Errorf("target.k8s.name %q: lowercase letters, digits and '-', at most 63", t.Name)
+		}
+		return t.Resources.validate("target.k8s", true)
+	}
+	if err := unset("target.k8s", "with create (the default)", map[string]string{"image": t.Image, "resources": resourcesSet(t.Resources)}); err != nil {
+		return err
+	}
+	return oneOf("target.k8s (an existing pod)", map[string]string{"name": t.Name, "selector": t.Selector})
+}
+
+func (t DockerTarget) validate() error {
+	if t.OldContainer != "" {
+		return fmt.Errorf("target.docker.container is now name, with create: false for an existing container (name: %s, create: false)", t.OldContainer)
+	}
+	if t.Creates() {
+		if t.Selector != "" {
+			return errors.New("target.docker.selector: with create: false (an existing container)")
+		}
+		if t.Resources != nil && (t.Resources.Requests != ResourceList{}) {
+			return errors.New("target.docker.resources.requests: a container takes limits only")
+		}
+		return t.Resources.validate("target.docker", false)
+	}
+	if err := unset("target.docker", "with create (the default)", map[string]string{"image": t.Image, "network": t.Network, "resources": resourcesSet(t.Resources)}); err != nil {
+		return err
+	}
+	return oneOf("target.docker (an existing container)", map[string]string{"name": t.Name, "selector": t.Selector})
+}
+
+// podName is what a pod subtun creates may be called (a DNS label; the
+// generated suffix needs room only without one).
+var podName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+
+func (r *Resources) validate(what string, requests bool) error {
+	if r == nil {
+		return nil
+	}
+	lists := map[string]ResourceList{"limits": r.Limits}
+	if requests {
+		lists["requests"] = r.Requests
+	}
+	for _, kind := range slices.Sorted(maps.Keys(lists)) {
+		l := lists[kind]
+		for key, v := range map[string]string{"cpu": l.CPU, "memory": l.Memory} {
+			if v == "" {
+				continue
+			}
+			if q, err := resource.ParseQuantity(v); err != nil || q.Sign() <= 0 {
+				return fmt.Errorf("%s.resources.%s.%s %q: a quantity more than 0, such as 100m, 1, 64Mi", what, kind, key, v)
+			}
+		}
+	}
+	return nil
+}
+
+func resourcesSet(r *Resources) string {
+	if r == nil {
+		return ""
+	}
+	return "set"
+}
+
+// unset refuses the keys under what that are set: they go only when.
+func unset(what, when string, vals map[string]string) error {
+	for _, k := range slices.Sorted(maps.Keys(vals)) {
+		if vals[k] != "" {
+			return fmt.Errorf("%s.%s: only %s", what, k, when)
+		}
+	}
+	return nil
+}
+
+// oneOf checks that exactly one of the keys under what is set.
+func oneOf(what string, vals map[string]string) error {
+	keys := slices.Sorted(maps.Keys(vals))
+	var set []string
+	for _, k := range keys {
+		if vals[k] != "" {
+			set = append(set, k)
+		}
+	}
+	switch len(set) {
+	case 1:
+		return nil
+	case 0:
+		return fmt.Errorf("%s needs one of %s", what, strings.Join(keys, ", "))
+	}
+	return fmt.Errorf("%s: %s don't go together (one of %s)", what, strings.Join(set, " and "), strings.Join(keys, ", "))
+}
+
 func (p Profile) validate(name string) error {
 	if !profileName.MatchString(name) {
 		return fmt.Errorf("profile %q: names are lowercase letters, digits, '.', '_' and '-'", name)
 	}
 	fail := func(err error) error { return fmt.Errorf("profile %s: %w", name, err) }
-	switch {
-	case p.Target.K8s != nil && p.Target.Docker != nil:
-		return fail(errors.New("target: set either k8s or docker, not both"))
-	case p.Target.K8s != nil:
-		if p.Target.K8s.Pod == "" {
-			return fail(errors.New("target.k8s.pod is required"))
-		}
-	case p.Target.Docker != nil:
-		if p.Target.Docker.Container == "" {
-			return fail(errors.New("target.docker.container is required"))
-		}
-	default:
-		return fail(errors.New("target: set k8s or docker"))
+	if err := p.Target.Validate(); err != nil {
+		return fail(err)
 	}
 	if err := p.validateSettings(); err != nil {
 		return fail(err)

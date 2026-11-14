@@ -381,18 +381,35 @@ func (es *engineStatus) configProfiles(path string) control.ConfigProfiles {
 	return cp
 }
 
-// configTarget is a configured target for people: "pod ns/name",
-// "container name".
+// configTarget is a configured target for people: "pod ops/toolbox",
+// "pods in ops with app=x", "a pod subtun creates in ops", "container web",
+// "containers with key=value", "a container subtun creates".
 func configTarget(t config.Target) string {
 	switch {
 	case t.K8s != nil:
-		pod := strings.TrimPrefix(t.K8s.Pod, "pod/")
-		if t.K8s.Namespace != "" {
-			pod = t.K8s.Namespace + "/" + pod
+		k := t.K8s
+		switch {
+		case k.Creates() && k.Namespace != "":
+			return "a pod subtun creates in " + k.Namespace
+		case k.Creates():
+			return "a pod subtun creates"
+		case k.Selector != "" && k.Namespace != "":
+			return "pods in " + k.Namespace + " with " + k.Selector
+		case k.Selector != "":
+			return "pods with " + k.Selector
+		case k.Namespace != "":
+			return "pod " + k.Namespace + "/" + k.Name
 		}
-		return "pod " + pod
+		return "pod " + k.Name
 	case t.Docker != nil:
-		return "container " + t.Docker.Container
+		d := t.Docker
+		switch {
+		case d.Creates():
+			return "a container subtun creates"
+		case d.Selector != "":
+			return "containers with " + d.Selector
+		}
+		return "container " + d.Name
 	}
 	return ""
 }

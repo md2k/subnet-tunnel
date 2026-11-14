@@ -98,15 +98,15 @@ func TestLiveTunnelWithoutClient(t *testing.T) {
 }
 
 func TestReconnectSettings(t *testing.T) {
-	out, err := runCLI(t, "k8s", "debug", "--socks", "127.0.0.1:1080", "--dry-run")
+	out, err := runCLI(t, "up", "--k8s", "--socks", "127.0.0.1:1080", "--dry-run")
 	if err != nil || !strings.Contains(out, "reconnect: up to 10 attempts, waiting 1s, then twice as long each time, at most 1m0s") {
 		t.Fatalf("default: %v\n%s", err, out)
 	}
-	out, err = runCLI(t, "k8s", "debug", "--socks", "127.0.0.1:1080", "--reconnect-attempts", "0", "--dry-run")
+	out, err = runCLI(t, "up", "--k8s", "--socks", "127.0.0.1:1080", "--reconnect-attempts", "0", "--dry-run")
 	if err != nil || !strings.Contains(out, "reconnect: off") {
 		t.Fatalf("off: %v\n%s", err, out)
 	}
-	if _, err := runCLI(t, "k8s", "debug", "--socks", "127.0.0.1:1080", "--reconnect-delay", "2m", "--reconnect-max-delay", "1m", "--dry-run"); err == nil {
+	if _, err := runCLI(t, "up", "--k8s", "--socks", "127.0.0.1:1080", "--reconnect-delay", "2m", "--reconnect-max-delay", "1m", "--dry-run"); err == nil {
 		t.Fatal("max delay below delay accepted")
 	}
 }

@@ -65,7 +65,7 @@ with --k8s/--docker (required with --write), or fill in the placeholder.`,
 			target := ""
 			switch {
 			case pod != "":
-				parts := []string{"pod: " + quote(pod)}
+				parts := []string{"create: false", "name: " + quote(strings.TrimPrefix(pod, "pod/"))}
 				if namespace != "" {
 					parts = append([]string{"namespace: " + quote(namespace)}, parts...)
 				}
@@ -74,7 +74,7 @@ with --k8s/--docker (required with --write), or fill in the placeholder.`,
 				}
 				target = "{k8s: {" + strings.Join(parts, ", ") + "}}"
 			case container != "":
-				target = "{docker: {container: " + quote(container) + "}}"
+				target = "{docker: {create: false, name: " + quote(container) + "}}"
 			}
 			errOut := cmd.ErrOrStderr()
 			if write {
@@ -104,10 +104,10 @@ with --k8s/--docker (required with --write), or fill in the placeholder.`,
 	}
 	f := cmd.Flags()
 	f.StringVar(&name, "name", "imported", "profile name")
-	f.StringVar(&pod, "k8s", "", "target: this Kubernetes pod")
+	f.StringVar(&pod, "k8s", "", "target: this existing Kubernetes pod")
 	f.StringVarP(&namespace, "namespace", "n", "", "the pod's namespace")
 	f.StringVar(&kubeContext, "context", "", "kubeconfig context")
-	f.StringVar(&container, "docker", "", "target: this Docker container")
+	f.StringVar(&container, "docker", "", "target: this existing Docker container")
 	f.BoolVar(&write, "write", false, "add the profile to your config file instead of printing it")
 	return cmd
 }

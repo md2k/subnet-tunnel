@@ -73,7 +73,7 @@ func TestSSHuttleFile(t *testing.T) {
 // The generated YAML is a valid config file once a target is set.
 func TestSSHuttleYAMLLoads(t *testing.T) {
 	p := importFile(t, "testdata/sshuttle.conf")
-	out := p.YAML("from-sshuttle", "{docker: {container: 'app'}}", "testdata/sshuttle.conf")
+	out := p.YAML("from-sshuttle", "{docker: {create: false, name: 'app'}}", "testdata/sshuttle.conf")
 	f, err := config.Parse(out, "generated")
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
@@ -83,7 +83,7 @@ func TestSSHuttleYAMLLoads(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Equal(got.Routes, p.Routes) || !slices.Equal(got.DNS.Patterns, p.Patterns) || got.DNS.Fallback != "192.0.2.53" ||
-		got.Target.Docker == nil || got.Target.Docker.Container != "app" {
+		got.Target.Docker == nil || got.Target.Docker.Name != "app" {
 		t.Fatalf("loaded %+v", got)
 	}
 	// Without a target the file says so and subtun refuses it until filled in.
@@ -148,11 +148,13 @@ func TestSSHuttleSubnetFiles(t *testing.T) {
 
 func TestAddProfile(t *testing.T) {
 	p := &Profile{Routes: []string{"10.0.0.0/8"}, Domains: []string{"example.com"}}
-	entry := func(indent string) string { return p.Entry("work", "{docker: {container: 'app'}}", "x", indent) }
+	entry := func(indent string) string {
+		return p.Entry("work", "{docker: {create: false, name: 'app'}}", "x", indent)
+	}
 	cases := map[string]string{
-		"two-space, defaults after": "# my config\nprofiles:\n  dev:\n    target: {k8s: {pod: p}}\n    socks: 127.0.0.1:1080\ndefaults:\n  exclude: [192.168.1.0/24]\n",
-		"four-space":                "profiles:\n    dev:\n        target: {k8s: {pod: p}}\n        socks: 127.0.0.1:1080\n",
-		"comment after profiles":    "profiles:  # mine\n  # first one\n  dev:\n    target: {k8s: {pod: p}}\n    socks: x\n",
+		"two-space, defaults after": "# my config\nprofiles:\n  dev:\n    target: {k8s: {create: false, name: p}}\n    socks: 127.0.0.1:1080\ndefaults:\n  exclude: [192.168.1.0/24]\n",
+		"four-space":                "profiles:\n    dev:\n        target: {k8s: {create: false, name: p}}\n        socks: 127.0.0.1:1080\n",
+		"comment after profiles":    "profiles:  # mine\n  # first one\n  dev:\n    target: {k8s: {create: false, name: p}}\n    socks: x\n",
 		"no profiles key":           "defaults:\n  agent: python\n",
 		"empty file":                "",
 	}
@@ -180,7 +182,7 @@ func TestAddProfile(t *testing.T) {
 			t.Errorf("%s: comments lost", name)
 		}
 	}
-	if _, err := AddProfile([]byte("profiles: {dev: {target: {k8s: {pod: p}}, socks: x}}\n"), entry); err == nil {
+	if _, err := AddProfile([]byte("profiles: {dev: {target: {k8s: {create: false, name: p}}, socks: x}}\n"), entry); err == nil {
 		t.Error("inline profiles accepted")
 	}
 }

@@ -18,13 +18,16 @@ defaults:                          # optional: any profile key except target, fo
 
 profiles:
   dev-cluster:                     # a lowercase letter or digit, then also '.', '_', '-'
-    target:                        # exactly one of k8s / docker
-      k8s:
+    target:                        # exactly one of k8s / docker: see Targets below
+      k8s:                         # a pod subtun creates, and deletes on stop
         kubeconfig: ~/.kube/dev    # default: $KUBECONFIG or ~/.kube/config
-        context: dev               # default: current context
+        context: dev               # default: the kubeconfig's current context
         namespace: tools           # default: the context's namespace
-        pod: debug                 # required
-        container: shell           # default: kubectl's default container
+        name: subtun-dev           # default: subtun-<profile>-<random>
+        image: busybox:1.37        # default; it needs a shell
+        resources:                 # optional
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {memory: 512Mi}
     routes:                        # captured through the utun (CIDRs or single IPs)
       - 10.0.0.0/8
       - 172.16.0.0/12
@@ -52,16 +55,59 @@ profiles:
       delay: 1s                    # default: the first wait, doubling after each attempt
       maxDelay: 1m                 # default: the longest wait
 
+  toolbox:
+    target:
+      k8s:                         # an existing pod: subtun only starts its agent in it
+        context: dev
+        namespace: tools
+        create: false
+        name: toolbox-0            # or selector: app=toolbox (picked at each connect)
+        container: shell           # default: kubectl's default container
+    socks: 127.0.0.1:1082
+
   local-app:
     target:
-      docker:
+      docker:                      # a container subtun creates, and removes on stop
         host: unix:///var/run/docker.sock   # default: $DOCKER_HOST, then the docker context
         context: desktop-linux               # default: $DOCKER_CONTEXT, then the current context
-        container: app                       # required
+        network: app_default                 # default: the default bridge
+        image: busybox:1.37                  # default
+        name: subtun-local-app               # default: subtun-<profile>-<random>
+        resources: {limits: {cpu: "1", memory: 512Mi}}   # limits only
     socks: 127.0.0.1:1081
+
+  web:
+    target:
+      docker: {create: false, selector: com.docker.compose.service=web}   # or name: app-web-1
+    socks: 127.0.0.1:1083
 ```
 
 A profile needs `routes`, `socks` or both (its own or from `defaults`).
+
+### Targets
+
+A target is where the agent runs: a Kubernetes pod or a Docker container (SSH is planned).
+
+- **Created** (the default): subtun creates the pod or container, starts its agent in it, creates
+  it again if it goes (deleted, evicted, its node gone), and deletes it when the profile stops.
+  Its image (`image`, default `busybox:1.37`; it needs a shell for the agent's upload) has to be
+  one the cluster or daemon can pull: a cluster that only takes images from its own registry needs
+  its mirror here. The pod runs as an unprivileged user with nothing mounted but a scratch
+  directory, so it fits a namespace's restricted pod security level. Creating pods needs the
+  permission to create, get, list and delete pods in the namespace, besides exec. A container runs
+  the same way on `network` (default: the default bridge), with `resources.limits` only. A pod or
+  container left behind (subtun killed) exits after 5 minutes without an agent, and the next start
+  removes it; subtun only touches what it created for you on this machine (their labels say so).
+  Unset requests are small (10m CPU, 32Mi), capped at the limits given. The kube context and
+  namespace, or the Docker daemon, are those of the first connect: switching contexts while subtun
+  runs doesn't move it.
+- **Existing** (`create: false`): subtun only starts its agent in it, by exact `name`, or by
+  `selector`: labels (kubectl's syntax for Kubernetes; `key=value`, comma-separated, for Docker),
+  where a running, ready one is picked at each connect: the one used before while it still is,
+  else the newest. So a reconnect finds a pod that replaced one that went, and several pods with
+  the same labels act as spares. `selector` alone means an existing one (`create: false` can be
+  left out).
+- A target can't go in `defaults`: each profile names its own, even when two repeat it.
 
 **Defaults.** Settings under `defaults` apply to every profile. A profile's own value wins; lists
 (`routes`, `exclude`, `dns.domains`, `dns.patterns`) add up, so a home-LAN exclude in `defaults`
@@ -74,13 +120,13 @@ the words you meant (`mode: off`, `capture: off` work).
 
 | Command | What it does |
 |---|---|
-| `subtun k8s POD [CIDR...]` | tunnel through a pod (`-n`, `-c`, `--context`, `--kubeconfig`) |
-| `subtun docker CONTAINER [CIDR...]` | tunnel through a container (`-H`, `--context`) |
 | `subtun up [PROFILE] [CIDR...]` | run a profile from the config file; without a name, list them |
+| `subtun up --k8s [CIDR...]` | tunnel through a pod given here: one subtun creates (`--image`, `--name`, `--requests`, `--limits`), or an existing one (`--create=false` with `--name` or `-l`); `-n`, `-c`, `--context`, `--kubeconfig` |
+| `subtun up --docker [CIDR...]` | the same through a Docker container (`--network`, `-H`, `--context`) |
 | `subtun up --profile A,B` | run several profiles at once ([below](#several-profiles-at-once)) |
 | `subtun status` | what every running subtun is doing ([below](#status-and-logs)) |
 | `subtun logs [-f]` | a running subtun's recent log lines |
-| `subtun tui` | watch and change a running subtun in a terminal UI ([below](#terminal-ui)); `--tui` on `up`, `k8s` and `docker` runs subtun with it in the same terminal |
+| `subtun tui` | watch and change a running subtun in a terminal UI ([below](#terminal-ui)); `--tui` on `up` runs subtun with it in the same terminal |
 | `subtun route add\|del CIDR...` | change a running subtun's routes ([below](#changes-while-running)) |
 | `subtun dns add\|del DOMAIN...` | change a running subtun's DNS names |
 | `subtun profile stop\|start\|reconnect [NAME]` | stop, start or reconnect one of its profiles |
@@ -107,7 +153,7 @@ Flags given on the command line override the profile's (and defaults') values (`
 `--dns-unrouted`, `--kill-switch`, `--kill-switch-dns`, `--block-ipv6`, `--reconnect-attempts`,
 `--reconnect-delay`, `--reconnect-max-delay`). CIDRs, `-x/--exclude`,
 `--dns-domain` and `--dns-pattern` given on the command line are **added** to the profile's. Without
-a config file, the same flags work on `subtun k8s` and `subtun docker`.
+a profile, the same flags work with a target given on the command line (`--k8s`, `--docker`).
 
 ## Several profiles at once
 
@@ -128,12 +174,12 @@ defaults:
   exclude: [192.168.1.0/24]
 profiles:
   work:
-    target: {k8s: {context: prod-eu, namespace: ops, pod: toolbox}}
+    target: {k8s: {context: prod-eu, namespace: ops}}
     routes: [0.0.0.0/1, 128.0.0.0/1]
     dns: {domains: ["."]}
     killSwitch: {mode: on}
   dev:
-    target: {k8s: {context: dev, namespace: tools, pod: debug}}
+    target: {k8s: {context: dev, namespace: tools}}
     routes: [10.50.0.0/16]
     dns: {domains: [cluster.local]}
     socks: 127.0.0.1:1081
@@ -173,7 +219,7 @@ A development cluster: its pod and service ranges, and its names, from the lapto
 ```yaml
 profiles:
   dev:
-    target: {k8s: {context: dev, namespace: tools, pod: debug}}
+    target: {k8s: {context: dev, namespace: tools}}
     routes: [10.96.0.0/12, 10.244.0.0/16]
     dns: {domains: [cluster.local]}
 ```
@@ -184,7 +230,7 @@ by pattern. Everything else resolves and travels as usual.
 ```yaml
 profiles:
   work:
-    target: {k8s: {context: prod-eu, namespace: ops, pod: toolbox}}
+    target: {k8s: {context: prod-eu, namespace: ops}}
     routes: [10.20.0.0/16, 10.30.0.0/16]
     exclude: [10.20.5.0/24]
     dns:
@@ -200,7 +246,7 @@ network, and nothing leaks if the tunnel goes away. The pod must run outside thi
 ```yaml
 profiles:
   everything:
-    target: {k8s: {context: remote, namespace: tools, pod: egress}}
+    target: {k8s: {context: remote, namespace: tools}}
     routes: [0.0.0.0/1, 128.0.0.0/1]
     dns: {domains: [".", cluster.local]}
     killSwitch: {mode: on}
@@ -211,16 +257,16 @@ Only a SOCKS proxy, no root needed: point a browser or `curl --socks5-hostname` 
 ```yaml
 profiles:
   browse:
-    target: {docker: {container: app}}
+    target: {docker: {network: app_default}}
     socks: 127.0.0.1:1080
 ```
 
 The same from the command line:
 
 ```sh
-subtun k8s -n tools debug 10.96.0.0/12 10.244.0.0/16 --dns-domain cluster.local
-subtun k8s --context remote -n tools egress 0.0.0.0/1 128.0.0.0/1 --dns-domain . --dns-domain cluster.local --kill-switch on
-subtun docker app --socks 127.0.0.1:1080
+subtun up --k8s -n tools 10.96.0.0/12 10.244.0.0/16 --dns-domain cluster.local
+subtun up --k8s --context remote -n tools 0.0.0.0/1 128.0.0.0/1 --dns-domain . --dns-domain cluster.local --kill-switch on
+subtun up --docker --network app_default --socks 127.0.0.1:1080
 ```
 
 ## Routes and excludes
@@ -251,7 +297,7 @@ under [Safety checks](#safety-checks)), and subtun's own connection to the API s
 daemon is excluded automatically.
 
 ```sh
-subtun k8s --context remote -n tools egress 0.0.0.0/1 128.0.0.0/1 --dns-domain . --dns-domain cluster.local
+subtun up --k8s --context remote -n tools 0.0.0.0/1 128.0.0.0/1 --dns-domain . --dns-domain cluster.local
 ```
 
 - **The target must run outside this machine.** A pod in Docker Desktop, kind or minikube reaches the
@@ -317,7 +363,7 @@ name goes to a fallback resolver, as before. This is sshuttle's `--dns` with the
 (`--dns-domains`, `--dns-to`), and any number of domains costs one setting, not one file each.
 
 ```sh
-build/subtun k8s -n team-a debug-pod 10.96.0.0/12 10.244.0.0/16 --dns-domain cluster.local
+build/subtun up --k8s -n team-a 10.96.0.0/12 10.244.0.0/16 --dns-domain cluster.local
 curl http://web.team-a.svc.cluster.local:8080/      # any program, no proxy settings
 ```
 
@@ -512,8 +558,8 @@ the terminal does.
 |---|---|---|
 | `control` (top level of the config file, next to `defaults:`) | `--control` | `status` (default), `full` (also [changes](#changes-while-running)), `off` (no socket) |
 
-`control` is set once for the whole run, never per profile; `subtun k8s` and `subtun docker` take
-the config file's key too (`--control` wins).
+`control` is set once for the whole run, never per profile; a target given on the command line
+(`--k8s`, `--docker`) takes the config file's key too (`--control` wins).
 
 ## Log files
 
@@ -623,7 +669,7 @@ subtun route add --profile dev 10.80.0.0/16 --dry-run   # only show what would c
   `killSwitch.dns` other than the run's, or a full tunnel's IPv6 block, only bring a warning (the
   capture set them up at start). An added profile stays part of the run until it ends (`profile
   stop` stops it); a run of one profile becomes a run of several (it ends when every profile has
-  given up). Runs of `subtun k8s` and `subtun docker` (a tunnel without a profile name) take no
+  given up). Runs of a target given on the command line (a tunnel without a profile name) take no
   added profiles.
 - **`profile reconnect`** drops the profile's connection and connects again at once, then by its
   reconnect settings; its routes stay meanwhile, as when a connection is lost.

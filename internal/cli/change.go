@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/md2k/subnet-tunnel/internal/config"
@@ -41,6 +43,10 @@ type runner struct {
 	gen    int                // events of other generations are ignored
 	cancel context.CancelFunc // nil: stopped
 	done   chan struct{}      // closed once it has finished
+	// keep, set before the runner is replaced by a reconnect of the same
+	// profile, keeps what it created (a pod) for the next one.
+	keep *atomic.Bool
+	spec *tunnelSpec
 }
 
 // socksListener is a profile's SOCKS proxy.
@@ -75,7 +81,7 @@ func (mp *multiPlan) profileIndex(name string) (int, error) {
 	case name == "":
 		return -1, fmt.Errorf("this run has %d profiles (%s): say which one", len(names), strings.Join(names, ", "))
 	case len(mp.specs) == 1 && mp.specs[0].name == "":
-		return -1, fmt.Errorf("no profile %q: this run's tunnel has no profile name (subtun k8s, subtun docker); leave the name out", name)
+		return -1, fmt.Errorf("no profile %q: this run's tunnel has no profile name (subtun up --k8s, --docker); leave the name out", name)
 	}
 	return -1, fmt.Errorf("no profile %q in this run (it has: %s)", name, strings.Join(names, ", "))
 }
@@ -604,13 +610,8 @@ func reloadSummary(old, ns *tunnelSpec, wasFinal, nowFinal []netip.Prefix, wasNa
 
 // targetKey is a target's settings, comparable.
 func targetKey(t config.Target) string {
-	switch {
-	case t.K8s != nil:
-		return fmt.Sprintf("k8s %+v", *t.K8s)
-	case t.Docker != nil:
-		return fmt.Sprintf("docker %+v", *t.Docker)
-	}
-	return ""
+	b, _ := json.Marshal(t) // values, not the pointers' addresses
+	return string(b)
 }
 
 // applyReload makes a reloaded profile part of the plan; the caller has
@@ -797,7 +798,7 @@ type addChange struct {
 func (mp *multiPlan) planAdd(ns *tunnelSpec, host string, addrs []netip.Addr, m *dns.Matcher, cs captureState) (*addChange, error) {
 	label := "profile " + ns.name
 	if mp.specs[0].name == "" {
-		return nil, errors.New("this run's tunnel has no profile name (subtun k8s, subtun docker), so it couldn't be told apart from added ones: add profiles to a run started with subtun up")
+		return nil, errors.New("this run's tunnel has no profile name (subtun up --k8s, --docker), so it couldn't be told apart from added ones: add profiles to a run started with subtun up")
 	}
 	for _, d := range inheritShared(ns, mp.specs[0].s) {
 		return nil, fmt.Errorf("%s: %s %s differs from the run's (%s): it is shared by every profile of a run", label, d.key, d.got, d.run)

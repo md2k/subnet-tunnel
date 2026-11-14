@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +20,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -35,9 +38,28 @@ type Target struct {
 	Kubeconfig string // empty: $KUBECONFIG or ~/.kube/config
 	Context    string // empty: current context
 	Namespace  string // empty: the context's namespace
-	Pod        string
-	Container  string // empty: kubectl's default container
+	// Create: subtun creates the pod (see pod.go) and deletes it on stop;
+	// else it is an existing pod, by Name or Selector (a running, ready pod
+	// with these labels, picked at each connect: see pickPod).
+	Create    bool
+	Name      string // the pod: to create (empty: generated), or the existing one
+	Selector  string
+	Container string // an existing pod's; empty: kubectl's default container
+	Image     string // a created pod's; empty: DefaultImage
+	Resources Resources
+	Profile   string // names and labels the pods subtun creates
+	// Picked remembers the pod picked last (a selector's choice, or the
+	// pod subtun created).
+	Picked *transport.Picked
 }
+
+// Resources are a created pod's requests and limits (Kubernetes
+// quantities; empty: none).
+type Resources struct {
+	RequestCPU, RequestMemory, LimitCPU, LimitMemory string
+}
+
+func (t Target) followed() bool { return t.Selector != "" }
 
 const defaultContainerAnnotation = "kubectl.kubernetes.io/default-container"
 
@@ -47,9 +69,18 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	// client-go reports stream teardown noise through klog; keep it in our
 	// log, at debug level.
 	klog.SetSlogLogger(slog.New(debugOnly{log.Handler()}).With("src", "client-go"))
-	k, err := newKube(ctx, t)
+	k, err := newKube(ctx, t, log)
 	if err != nil {
 		return nil, err
+	}
+	if t.followed() && !t.Create {
+		if prev := t.Picked.Get(); prev != k.pod {
+			msg := "pod picked"
+			if prev != "" {
+				msg = "pod picked: the one before is gone or not ready"
+			}
+			log.Info(msg, "follows", k.follows, "pod", k.ns+"/"+k.pod)
+		}
 	}
 	c, err := transport.Bootstrap(ctx, k, agents, opts, log.With("pod", k.ns+"/"+k.pod, "container", k.container))
 	if err != nil {
@@ -58,17 +89,23 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	c.Host = k.cfg.Host
 	c.Endpoints = transport.ResolveEndpoint(ctx, k.cfg.Host)
 	c.Local = transport.IsLocal(k.cfg.Host, c.Endpoints)
+	if !t.Create { // a created pod is remembered with its UID
+		t.Picked.Set(k.pod)
+	}
 	return c, nil
 }
 
 // Endpoint returns the API server's address from the kubeconfig, without
 // connecting (several tunnels exclude every endpoint from every route).
 func Endpoint(t Target) (string, error) {
-	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	if t.Kubeconfig != "" {
-		rules.ExplicitPath = t.Kubeconfig
+	if _, _, pinned := t.Picked.Pinned(); !pinned {
+		t.Picked = nil // planning before the first connect: don't pin yet
 	}
-	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{CurrentContext: t.Context}).ClientConfig()
+	cc, _, err := clientConfig(t)
+	if err != nil {
+		return "", err
+	}
+	cfg, err := cc.ClientConfig()
 	if err != nil {
 		return "", fmt.Errorf("kubeconfig: %w", err)
 	}
@@ -94,43 +131,162 @@ type kube struct {
 	cs        kubernetes.Interface
 	ns, pod   string
 	container string
+	follows   string // followed: what, as pickPod says it ("deployment ns/name")
 }
 
-func newKube(ctx context.Context, t Target) (*kube, error) {
-	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	if t.Kubeconfig != "" {
-		rules.ExplicitPath = t.Kubeconfig
+// clients reads the kubeconfig for t: the REST config, a clientset and
+// the namespace. The context and namespace are those of t's first connect
+// (Picked): switching kubectl's context meanwhile doesn't move the run, or
+// what subtun deletes.
+func clients(t Target) (*rest.Config, kubernetes.Interface, string, error) {
+	cc, ns, err := clientConfig(t)
+	if err != nil {
+		return nil, nil, "", err
 	}
-	cc := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{CurrentContext: t.Context})
 	cfg, err := cc.ClientConfig()
 	if err != nil {
-		return nil, fmt.Errorf("kubeconfig: %w", err)
+		return nil, nil, "", fmt.Errorf("kubeconfig: %w", err)
 	}
 	if why := stdinBusy.Load(); why != nil && cfg.ExecProvider != nil {
 		cfg.ExecProvider.StdinUnavailable, cfg.ExecProvider.StdinUnavailableMessage = true, *why
 	}
+	cs, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return cfg, cs, ns, nil
+}
+
+// clientConfig resolves t's context and namespace (pinned at the first
+// connect).
+func clientConfig(t Target) (clientcmd.ClientConfig, string, error) {
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if t.Kubeconfig != "" {
+		rules.ExplicitPath = t.Kubeconfig
+	}
+	pinCtx, pinNS, pinned := t.Picked.Pinned()
+	ctxName := t.Context
+	if ctxName == "" && pinned {
+		ctxName = pinCtx
+	}
+	if ctxName == "" {
+		raw, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).RawConfig()
+		if err != nil {
+			return nil, "", fmt.Errorf("kubeconfig: %w", err)
+		}
+		ctxName = raw.CurrentContext
+	}
+	cc := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{CurrentContext: ctxName})
 	ns := t.Namespace
+	if ns == "" && pinned {
+		ns = pinNS
+	}
 	if ns == "" {
+		var err error
 		if ns, _, err = cc.Namespace(); err != nil {
-			return nil, fmt.Errorf("kubeconfig namespace: %w", err)
+			return nil, "", fmt.Errorf("kubeconfig namespace: %w", err)
 		}
 	}
-	cs, err := kubernetes.NewForConfig(cfg)
+	t.Picked.Pin(ctxName, ns)
+	return cc, ns, nil
+}
+
+func newKube(ctx context.Context, t Target, log *slog.Logger) (*kube, error) {
+	cfg, cs, ns, err := clients(t)
 	if err != nil {
 		return nil, err
 	}
-	pod, err := cs.CoreV1().Pods(ns).Get(ctx, t.Pod, metav1.GetOptions{})
+	name, follows := t.Name, ""
+	switch {
+	case t.Create:
+		if name, err = ensurePod(ctx, cs, ns, t, log); err != nil {
+			return nil, err
+		}
+		follows = "created by subtun"
+	case t.followed():
+		if name, follows, err = pickPod(ctx, cs, ns, t); err != nil {
+			return nil, err
+		}
+	}
+	pod, err := cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("pod %s/%s: %w", ns, t.Pod, err)
+		return nil, fmt.Errorf("pod %s/%s: %w", ns, name, err)
 	}
 	if pod.Status.Phase != corev1.PodRunning {
-		return nil, fmt.Errorf("pod %s/%s is %s, not Running", ns, t.Pod, pod.Status.Phase)
+		return nil, fmt.Errorf("pod %s/%s is %s, not Running", ns, name, pod.Status.Phase)
 	}
 	container, err := pickContainer(pod, t.Container)
 	if err != nil {
 		return nil, err
 	}
-	return &kube{cfg: cfg, cs: cs, ns: ns, pod: t.Pod, container: container}, nil
+	return &kube{cfg: cfg, cs: cs, ns: ns, pod: name, container: container, follows: follows}, nil
+}
+
+// pickPod picks the existing pod a selector names: running, ready and
+// not being deleted; the one picked last time while it still is (its
+// agent is cached there), else the newest (during a rollout the older ones
+// are going). follows says what was followed, for people.
+func pickPod(ctx context.Context, cs kubernetes.Interface, ns string, t Target) (name, follows string, err error) {
+	sel := t.Selector
+	follows = "pods in " + ns + " with " + sel
+	if _, err := labels.Parse(sel); err != nil {
+		return "", follows, fmt.Errorf("selector %q: %w", sel, err)
+	}
+	list, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: sel})
+	if err != nil {
+		return "", follows, fmt.Errorf("%s: %w", follows, err)
+	}
+	var ready []corev1.Pod
+	other := map[string]int{}
+	for _, p := range list.Items {
+		switch {
+		case p.DeletionTimestamp != nil:
+			other["terminating"]++
+		case p.Status.Phase != corev1.PodRunning:
+			other[strings.ToLower(string(p.Status.Phase))]++
+		case !podReady(&p):
+			other["not ready"]++
+		default:
+			ready = append(ready, p)
+		}
+	}
+	if len(ready) == 0 {
+		if len(list.Items) == 0 {
+			return "", follows, fmt.Errorf("%s: no pods", follows)
+		}
+		var parts []string
+		for _, k := range slices.Sorted(maps.Keys(other)) {
+			parts = append(parts, fmt.Sprintf("%d %s", other[k], k))
+		}
+		return "", follows, fmt.Errorf("%s: no running, ready pod (%s)", follows, strings.Join(parts, ", "))
+	}
+	prev := t.Picked.Get()
+	if i := slices.IndexFunc(ready, func(p corev1.Pod) bool { return p.Name == prev }); i >= 0 {
+		return prev, follows, nil
+	}
+	newest := slices.MaxFunc(ready, func(a, b corev1.Pod) int {
+		if c := startTime(a).Compare(startTime(b)); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	return newest.Name, follows, nil
+}
+
+func podReady(p *corev1.Pod) bool {
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func startTime(p corev1.Pod) time.Time {
+	if p.Status.StartTime != nil {
+		return p.Status.StartTime.Time
+	}
+	return p.CreationTimestamp.Time
 }
 
 // pickContainer follows kubectl: the named container, else the
@@ -160,7 +316,18 @@ func pickContainer(pod *corev1.Pod, name string) (string, error) {
 }
 
 func (k *kube) Describe() string {
+	if k.follows != "" {
+		return fmt.Sprintf("pod %s/%s (%s), container %s", k.ns, k.pod, k.follows, k.container)
+	}
 	return fmt.Sprintf("pod %s/%s, container %s", k.ns, k.pod, k.container)
+}
+
+// ParseSelector checks a label selector (kubectl's syntax).
+func ParseSelector(sel string) error {
+	if _, err := labels.Parse(sel); err != nil {
+		return fmt.Errorf("selector %q: %w", sel, err)
+	}
+	return nil
 }
 
 func (k *kube) executor(cmd []string, stdin bool) (remotecommand.Executor, error) {

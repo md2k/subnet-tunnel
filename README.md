@@ -38,28 +38,30 @@ dry run.
 ## Use
 
 ```sh
-# Capture CIDRs (or single IPs): every program on this machine reaches them directly (macOS)
-build/subtun k8s -n team-a debug-pod 10.96.0.0/12 10.244.0.0/16
+# Capture CIDRs (or single IPs) through a pod subtun creates in team-a (and deletes on stop):
+# every program on this machine reaches them directly (macOS)
+build/subtun up --k8s -n team-a 10.96.0.0/12 10.244.0.0/16
 curl http://10.96.12.34:8080/
 
-# SOCKS5 proxy, for example for a browser; hostnames resolve inside the target
-build/subtun k8s -n team-a debug-pod --socks 127.0.0.1:1080
+# SOCKS5 proxy, for example for a browser; hostnames resolve inside the target. Here an
+# existing pod: subtun only starts its agent in it
+build/subtun up --k8s -n team-a --create=false --name debug-pod --socks 127.0.0.1:1080
 curl --socks5-hostname 127.0.0.1:1080 http://my-svc.team-a.svc.cluster.local
 
-# Both at once, and the same for a Docker container
-build/subtun docker my-app 172.20.0.0/16 --socks 127.0.0.1:1080
+# Both at once, and the same with a container subtun creates on a Docker network
+build/subtun up --docker --network my-app_default 172.20.0.0/16 --socks 127.0.0.1:1080
 
 # Split DNS: names under cluster.local resolve inside the pod, everything else as before
-build/subtun k8s -n team-a debug-pod 10.96.0.0/12 10.244.0.0/16 --dns-domain cluster.local
+build/subtun up --k8s -n team-a 10.96.0.0/12 10.244.0.0/16 --dns-domain cluster.local
 curl http://my-svc.team-a.svc.cluster.local:8080/
 
 # Everything through a pod in a remote cluster, every name resolved there, and nothing leaking
 # if the tunnel goes away
-build/subtun k8s --context remote -n tools egress 0.0.0.0/1 128.0.0.0/1 \
+build/subtun up --k8s --context remote -n tools 0.0.0.0/1 128.0.0.0/1 \
   --dns-domain . --dns-domain cluster.local --kill-switch on
 
-build/subtun k8s -n team-a debug-pod 10.0.0.0/8 --dry-run   # what would happen, without root
-build/subtun cleanup                                         # remove blocks a kill switch left
+build/subtun up --k8s -n team-a 10.0.0.0/8 --dry-run   # what would happen, without root
+build/subtun cleanup                                    # remove blocks a kill switch left
 ```
 
 subtun connects with your kubeconfig or Docker context, starts a small agent in the target over exec
@@ -111,7 +113,7 @@ profiles in `~/.config/subtun/config.yaml`:
 ```yaml
 profiles:
   dev-cluster:
-    target: {k8s: {context: dev, namespace: tools, pod: debug}}
+    target: {k8s: {context: dev, namespace: tools}}
     routes: [10.0.0.0/8, 172.16.0.0/12]
     exclude: [10.1.0.0/16]
     socks: 127.0.0.1:1080

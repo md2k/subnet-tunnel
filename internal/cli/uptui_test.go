@@ -217,7 +217,7 @@ func TestTUIFlagRefused(t *testing.T) {
 		"dry run":            {[]string{"--config", "testdata/multi.yaml", "up", "work", "--tui", "--dry-run"}, "--tui and --dry-run don't go together"},
 		"dry run, several":   {[]string{"--config", "testdata/multi.yaml", "up", "--profile", "work,dev", "--tui", "--dry-run"}, "--tui and --dry-run don't go together"},
 		"no terminal":        {[]string{"--config", "testdata/multi.yaml", "up", "work", "--tui"}, "--tui needs a terminal"},
-		"no terminal, k8s":   {[]string{"k8s", "toolbox", "--socks", "127.0.0.1:0", "--tui"}, "--tui needs a terminal"},
+		"no terminal, k8s":   {[]string{"up", "--k8s", "--socks", "127.0.0.1:0", "--tui"}, "--tui needs a terminal"},
 		"no terminal, multi": {[]string{"--config", "testdata/multi.yaml", "up", "--profile", "work,dev", "--tui"}, "--tui needs a terminal"},
 	} {
 		t.Run(name, func(t *testing.T) {

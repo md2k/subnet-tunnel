@@ -513,8 +513,8 @@ app ──► SOCKS (one per profile) ───── its own tunnel only
 - Several profiles are configured in the config file only: the command line then takes run
   options (`--dry-run`, `-v`, `--config`) and nothing else. CIDRs and setting flags work when one
   profile starts, as today.
-- `subtun k8s`, `subtun docker` and a single profile keep their sequence: connect, then sudo, and
-  a one-shot helper unless firewall rules need a session.
+- A target given on the command line and a single profile keep their sequence: connect, then
+  sudo, and a one-shot helper unless firewall rules need a session.
 - No new config keys. A name for a combination of profiles in the config can come later if typing
   the list turns out to be tedious.
 
@@ -674,9 +674,9 @@ the config file (next to `defaults:` and `profiles:`).
 without a sudo prompt. The routes can only point into subtun's utun, and the helper validates each
 one, but the user should choose that.
 
-**One engine** (done first). Single-profile runs (`subtun up NAME`, `subtun k8s`, `subtun
-docker`) run on the several-profile engine with one profile, so status, counters and control are
-built once. They keep their behaviour:
+**One engine** (done first). Single-profile runs (`subtun up NAME`, or a target given with `--k8s`
+or `--docker`) run on the several-profile engine with one profile, so status, counters and control
+are built once. They keep their behaviour:
 - connect, then sudo;
 - a first connection that fails exits at once;
 - a one-shot helper unless firewall rules or `control: full` need a session;
@@ -700,7 +700,8 @@ built once. They keep their behaviour:
    only, against the run (`planAdd`). A profile with routes needs a run with a capture, one with a
    kill switch a capture with a guard; DNS names are ignored without the run's DNS capture and
    refused for servers it doesn't capture; `killSwitch.dns` and a full tunnel's IPv6 block only warn
-   once the capture runs. Not for runs whose tunnel has no profile name (`subtun k8s`, `docker`).
+   once the capture runs. Not for runs whose tunnel has no profile name (a target given with `--k8s`
+   or `--docker`).
 
 ## Terminal UI
 
@@ -759,91 +760,88 @@ second and follows `/v1/logs`.
 A daemon (subtun in the background, its log in the log file, attached to with `subtun tui`) is
 deferred: started in the foreground for sudo, then detached.
 
-## Targets subtun follows or runs (proposed)
+## Targets
 
-Today a target names one pod or container, and a reconnect looks for it by that name. A
-Deployment's pod comes back under a new name after a rollout, an eviction or a node drain, and
-many people would rather not keep a pod around for subtun at all: sshuttle setups often run a pod
-for the session from a script and delete it afterwards. Proposed: a target (still per profile:
-the profile is what connects, whatever the transport) is one of three kinds.
+A profile's target is where its agent runs: a pod or a container that subtun creates and deletes
+(the default), or an existing one it only starts its agent in. It stays per profile (`defaults:`
+can't hold one), even when two profiles repeat it: the profile is what connects, whatever the
+transport (SSH next).
 
 ```yaml
 profiles:
-  work:
-    target:
-      k8s:
-        context: dev
-        namespace: ops
-        # one of:
-        pod: toolbox-0              # a pod that exists (as today)
-        deployment: toolbox         # follow: a running pod of it, picked again when it goes
-        selector: app=toolbox       # follow: a running pod with these labels
-        run: {image: busybox:1.37}  # subtun creates, follows and deletes its own pod
-  local:
-    target:
-      docker:
-        # one of:
-        container: web                                 # as today
-        selector: com.docker.compose.service=web       # follow
-        run: {image: busybox:1.37, network: dev_default}  # docker run -d --rm
+  work:                          # subtun's own pod
+    target: {k8s: {context: dev, namespace: ops, image: busybox:1.37, name: subtun-work,
+                   resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 512Mi}}}}
+  shared:                        # an existing pod, by name or by labels
+    target: {k8s: {context: dev, namespace: ops, create: false, selector: app=subtun-gw}}
+  local:                         # subtun's own container, on a Compose network
+    target: {docker: {network: dev_default, resources: {limits: {cpu: "1"}}}}
 ```
 
-On the command line, kubectl style: `subtun k8s deploy/toolbox CIDR...`, `subtun k8s --selector
-app=toolbox`, `subtun k8s --run [--image IMAGE]`; `subtun docker --selector ...`, `subtun docker
---run [--image IMAGE] [--network NET]`. `container:` (k8s) still picks the container in a pod that
-has several.
+The same keys are flags of `subtun up --k8s` / `--docker` for a target given on the command line
+(`--create`, `--name`, `-l/--selector`, `--image`, `--network`, `--requests`, `--limits`, `-n`, `-c`,
+`--context`, `--kubeconfig`, `-H`), checked by the same validation (`config.Target.Validate`).
 
-**Follow** (`deployment`, `selector`):
-- At each connect, subtun lists the pods (the Deployment's own selector, or the labels given) and
-  picks a running, ready one that isn't being deleted: the one it used before if it still is
-  (its agent is cached there), else the newest (during a rollout, the old ones are going).
-- A reconnect whose pod is gone or not ready picks again at once, without waiting out the
-  reconnect delays meant for a target that is down.
-- Status and the TUI show what was picked: `deployment ops/toolbox: pod toolbox-7d9f8-xk2pq`.
-- Permissions: list pods (and get the Deployment), besides exec. Docker: running containers with
-  the labels (a Compose service's, say), picked the same way.
+**Created** (`create`, the default):
+- **Start:** pull the image if Docker doesn't have it, create the pod or container, wait until it
+  runs (2 minutes for a pod; a reason that waiting won't fix ends it at once: the image pull
+  backing off, an invalid image name, the container can't be created; a first failed pull, such as
+  a registry's rate limit, is waited out), then connect as to any target: the agent is uploaded
+  through exec and started.
+- **Where:** the kube context and namespace (or the Docker host from a context) are fixed at the
+  first connect (`transport.Picked`): switching kubectl's or docker's context while subtun runs
+  moves neither the reconnects nor what subtun deletes.
+- **Only its own:** subtun remembers the pod's UID (the container's ID) and deletes by it (a UID
+  precondition), so a pod that took the name meanwhile is never touched; a create whose answer was
+  lost (a stop meanwhile) is found again by a per-request label and deleted.
+- **Reconnect:** the same pod again while it runs (the agent's cache too); gone or ended, a new
+  one. A `profile reconnect` hands the pod to the next runner (`runner.keep`).
+- **Stop:** deleted when the profile's tunnel ends for good: the profile stopped, given up, or
+  subtun stopping (`tunnelSpec.release`, from the runner goroutine, after the routes are gone).
+- **The pod:** a name from `name`, else `subtun-<profile>-<random>` (`generateName`, the profile
+  made fit for a pod name: `_` and `.` become `-`, at most 40 characters); no service
+  account token or service links; user and group 65534, non-root, all capabilities dropped, no
+  privilege escalation, the default seccomp profile, a read-only root with an emptyDir on `/tmp`
+  (`HOME=/tmp`, so the agent goes to `/tmp/.cache/subtun`): the restricted pod security level.
+  Requests 10m CPU and 32Mi for what `resources` leaves unset, capped at its limits (with a limit
+  alone, Kubernetes would request all of it); no limits by default (a namespace that requires them
+  needs `resources`). `restartPolicy: Never`, a 1 s grace period.
+- **The container:** the same user, no capabilities, `no-new-privileges`, a read-only root with a
+  tmpfs `/tmp` mounted `exec` (Docker's default is `noexec`), `--rm`, on `network`; limits only
+  (`resources.requests` is refused). The idle script is its entrypoint, so the image's own doesn't
+  run (a pod's `command` does the same).
+- **Labels:** `app.kubernetes.io/managed-by: subtun`, `subtun.dev/owner` (this user on this
+  machine: a hash of the user and the machine's ID, the hardware UUID on macOS, `/etc/machine-id`
+  on Linux, so it survives hostname changes), `subtun.dev/pid`; the profile as an annotation on a
+  pod (a profile name isn't always a label value), a label on a container. A fixed `name` that
+  exists and isn't this user's is refused, one another running subtun uses too; one of theirs left
+  over is replaced. A reconnect reuses a pod only if this process created it (pid and UID).
+- **Leftovers** (subtun killed, the laptop asleep): the main process is a shell loop that exits
+  after 5 minutes without an agent process (`/proc/*/cmdline`, the bracketed pattern so grep
+  doesn't find itself), so a pod left behind stops using anything; an image without `cat`, `tr`
+  or `grep` can't tell, so its pod never exits by itself. The next start of a target in
+  that namespace (or on that daemon) deletes this owner's pods that ended or whose subtun no longer
+  runs on this machine (the pid label, `kill -0`). A Job with `ttlSecondsAfterFinished` would delete
+  itself, but needs permissions on Jobs too: later, if leftovers bother anyone.
+- **Permissions:** create, get, list and delete pods in the namespace, and exec.
+- **Images:** the default is a pinned busybox (it needs a shell for the upload); a cluster that
+  only takes images from its own registry needs its mirror in `image`.
 
-**Run** (subtun's own pod):
-- **Start:** create the pod, wait until it runs (a deadline; a failure says why: the image can't
-  be pulled, the pod can't be scheduled, admission refused it), then connect as today: the agent
-  is uploaded through exec and started.
-- **Reconnect:** exec again if the pod still runs; if it is gone or failed, delete what's left and
-  create a new one.
-- **Stop:** delete it. Several profiles that run pods each get their own.
-- **The pod:** `generateName: subtun-<profile>-`; no service account token, no service links;
-  non-root (65534), all capabilities dropped, no privilege escalation, the default seccomp
-  profile, a read-only root with an emptyDir on `/tmp` for the agent: it fits the restricted pod
-  security level. Small requests (and a memory limit with room for the tunnel's buffers);
-  `restartPolicy: Never`.
-- **Labels:** `app.kubernetes.io/managed-by: subtun`, the profile, and an owner (this user and
-  machine, hashed) with subtun's process id, so leftovers can be told apart from another running
-  subtun's pods.
-- **Leftovers** (subtun killed, the laptop asleep): the pod's main process is a small shell loop
-  that exits when no agent process has run for a few minutes, so a pod left behind stops using
-  anything; the next start and `subtun cleanup` delete this owner's pods that have finished, or
-  whose subtun isn't running on this machine. A Job with `ttlSecondsAfterFinished` would delete
-  itself, but needs permissions on Jobs too: later, if leftover pods bother anyone.
-- **Settings** (`run:`): `image` (default a pinned busybox; a cluster that only takes images from
-  its own registry needs its mirror here; the image needs `sh`, as the agent's upload does today),
-  `labels`, `annotations` (`sidecar.istio.io/inject: "false"` in a mesh, whose sidecar would
-  otherwise take the pod's traffic), `nodeSelector`, `tolerations`. More (resources, a service
-  account, pull secrets beyond the namespace's default) when real clusters need them.
-- **Permissions:** create, get, list, watch and delete pods, and exec.
-- **Docker:** `docker run -d --rm` with the same labels, `--read-only --tmpfs /tmp:exec`, no
-  capabilities, `no-new-privileges`, user 65534, on `network`; `--rm` removes it when the idle
-  loop exits.
-- Where the traffic leaves: from the pod's node, under the namespace's network policies, as from
-  a pod the script ran.
+**Existing** (`create: false`, or a `selector`, which only picks): by exact `name`, or by `selector`
+(kubectl's label syntax; Docker: `key=value` pairs, all matching). A selector picks a running, ready
+pod that isn't being deleted (a running, healthy container): the one used before while it still is
+(its agent is cached there), else the newest; a reconnect whose pod went picks again. So pods that
+come back under new names (a Deployment's) and several spares with the same labels both work.
 
-**Not decided:**
-- The default image, and whether a mesh opt-out annotation is on by default.
-- The idle time before a left-behind pod exits (a few minutes: long enough for a laptop's short
-  sleep and a reconnect).
-- An image with the agent inside (`subtun-agent`), so a run pod needs no upload, no shell and no
-  writable directory: needs images published with each release.
+**Why this shape** (decided while designing it): subtun manages what it needs instead of relying
+on a pod kept for it, as sshuttle setups do with a script that runs a pod for the session; the
+"existing" mode stays for clusters that allow exec but not creating pods. Following a Deployment by
+name was dropped: its pods carry labels, which `selector` covers. `subtun k8s` and `subtun docker`
+became `subtun up --k8s` / `--docker`: one entry point, with the target's keys as flags.
 
-**Order:** follow first (small; it fixes the recreated pod), then run for Kubernetes, then for
-Docker.
+**Not done yet:** `subtun cleanup` for leftover pods (the next start covers it); an image with the
+agent inside, so a created pod needs no upload, shell or writable directory (images published with
+each release); spreading profiles that share a selector over its pods.
 
 ## Decisions
 
@@ -874,9 +872,8 @@ Docker.
   exclude that splits the routes inside the new LAN would put parts of it into the tunnel. The
   session helper can change routes while running (several profiles, `control: full`); what's
   missing is recomputing the automatic excludes when the networks change.
-- **Reconnecting to a recreated pod:** subtun reconnects to the same pod name. A Deployment's new pod
-  has another name: [following a Deployment or labels](#targets-subtun-follows-or-runs-proposed), or
-  a pod subtun runs itself, is proposed. Also, if the API
+- **Reconnecting to a recreated pod:** a pod named exactly is looked for by that name; one picked by
+  [labels](#targets), or created by subtun, is found again. Also, if the API
   server's address moves inside the routes after a reconnect, a one-shot helper (one profile,
   routes only, without `control: full`) can't change the routes: subtun only warns (restart to
   exclude it). With a session it is carved out.
