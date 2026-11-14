@@ -17,10 +17,11 @@ import (
 )
 
 const (
-	listWidth  = 34 // layout detail's profile list
-	detailRows = 11 // layout detail's profile part: the detail's lines and borders
-	maxTopRows = 15 // the profiles part at most; more profiles scroll
-	sparkCells = 10 // the table's sparkline
+	listWidth   = 34  // layout detail's profile list
+	detailRows  = 11  // layout detail's profile part: the detail's lines and borders
+	maxTopRows  = 15  // the profiles part at most; more profiles scroll
+	sparkCells  = 10  // the table's sparkline, at least
+	keepSamples = 300 // the samples a run keeps: 5 minutes
 )
 
 func (a *app) buildDash() {
@@ -99,7 +100,7 @@ func (a *app) renderDash(now time.Time) {
 var (
 	tableHeads = []string{"", "NAME", "STATE", "TARGET", "ROUTES", "DNS", "KS", "↑/s", "↓/s", "5 MIN"}
 	flexCols   = []string{"TARGET", "ROUTES", "DNS"}
-	flexCap    = map[string]int{"TARGET": 24, "ROUTES": 22, "DNS": 22}
+	flexCap    = map[string]int{"TARGET": 40, "ROUTES": 32, "DNS": 32}
 	dropOrder  = []string{"TARGET", "DNS", "5 MIN", "KS"}
 )
 
@@ -185,6 +186,13 @@ func (a *app) renderTable(now time.Time) {
 		width = a.scrW - 2 // the table spans the screen, less its borders
 	}
 	widths := fitColumns(width, want)
+	if w, ok := widths["5 MIN"]; ok { // the sparkline takes the rest: up to a cell a second
+		used := -1
+		for _, v := range widths {
+			used += v + 1
+		}
+		widths["5 MIN"] = min(w+max(width-used, 0), keepSamples)
+	}
 	col := 0
 	for _, h := range tableHeads {
 		cw, ok := widths[h]
@@ -210,13 +218,16 @@ func (a *app) renderTable(now time.Time) {
 			case "KS":
 				text = ksText(tn.KillSwitch)
 			case "5 MIN":
-				text = a.sparkFor(tn, totalOf, sparkCells)
+				text = a.sparkFor(tn, totalOf, cw)
 			default:
 				text = tview.Escape(cut(rows[i][h], cw))
 			}
 			cell := tview.NewTableCell(text).SetMaxWidth(cw)
 			if right {
 				cell.SetAlign(tview.AlignRight)
+			}
+			if h == "5 MIN" { // selected, keep its colour: a reversed sparkline is a solid block
+				cell.SetSelectedStyle(tcell.StyleDefault.Foreground(tcell.GetColor(sparkColor(tn.State))))
 			}
 			t.SetCell(i+1, col, cell)
 		}
@@ -236,16 +247,46 @@ func ksText(mode string) string {
 	return "-"
 }
 
-// sparkFor is a tunnel's traffic sparkline, coloured by its state.
+// sparkFor is a tunnel's traffic as a one-row chart, coloured by its state.
 func (a *app) sparkFor(t control.Tunnel, f func(meter.Sample) uint64, width int) string {
+	return a.chartFor(t, f, width, 1)[0]
+}
+
+// chartFor is a tunnel's traffic as a chart height rows high; a stopped
+// one's is dots.
+func (a *app) chartFor(t control.Tunnel, f func(meter.Sample) uint64, width, height int) []string {
 	if t.State == "stopped" {
-		return "[gray]" + strings.Repeat("·", width) + "[-]"
+		rows := make([]string, height)
+		rows[height-1] = "[gray]" + strings.Repeat("·", width) + "[-]"
+		return rows
 	}
-	color := "green"
-	if t.State != "up" {
-		color = "gray"
+	vals := sampleValues(a.samples[t.Name], f)
+	top := niceTop(slices.Max(append(vals, 0)))
+	return chart(vals, width, height, top, sparkColor(t.State))
+}
+
+const graphLabel = 14 // the graphs' label column
+
+// graphText is a traffic graph two rows high, labelled with the rate now
+// and the scale.
+func (a *app) graphText(t control.Tunnel, arrow string, now uint64, f func(meter.Sample) uint64, width int) string {
+	rows := a.chartFor(t, f, width, 2)
+	top := niceTop(slices.Max(append(sampleValues(a.samples[t.Name], f), 0)))
+	first := arrow + " " + rate(now)
+	second := ""
+	if top > 0 && t.State != "stopped" {
+		second = "  of " + rate(top)
 	}
-	return "[" + color + "]" + spark(sampleValues(a.samples[t.Name], f), width) + "[-]"
+	pad := func(s string) string { return s + strings.Repeat(" ", max(graphLabel-utf8.RuneCountInString(s), 1)) }
+	return "[gray]" + tview.Escape(pad(first)) + "[-]" + rows[0] + "\n[gray]" + tview.Escape(pad(second)) + "[-]" + rows[1]
+}
+
+// sparkColor is a sparkline's colour by its tunnel's state.
+func sparkColor(state string) string {
+	if state == "up" {
+		return "green"
+	}
+	return "gray"
 }
 
 func (a *app) renderList(now time.Time) {
@@ -275,7 +316,7 @@ func (a *app) renderDetail(now time.Time) {
 	if a.scrW > 0 {
 		w = a.scrW - listWidth - 2 // next to the list, less its borders
 	}
-	a.detail.SetText(a.detailText(t, now, max(w-12, 10)))
+	a.detail.SetText(a.detailText(t, now, max(w-graphLabel, 10)))
 }
 
 // detailText is the selected profile's detail in layout detail.
@@ -310,8 +351,8 @@ func (a *app) detailText(t control.Tunnel, now time.Time, sparkW int) string {
 		line("%s", strings.Join(extra, " · "))
 	}
 	c := t.Counts
-	line("[gray]↑[-] %-10s %s", rate(c.UpRate), a.sparkFor(t, upOf, sparkW))
-	line("[gray]↓[-] %-10s %s", rate(c.DownRate), a.sparkFor(t, downOf, sparkW))
+	line("%s", a.graphText(t, "↑", c.UpRate, upOf, sparkW))
+	line("%s", a.graphText(t, "↓", c.DownRate, downOf, sparkW))
 	line("conns %d open · %d total · %d failed · DNS %d ok / %d failed", c.Open, c.Total, c.Failed, t.DNSCounts.Answered, t.DNSCounts.Failed)
 	if t.LastError != "" && t.State != "up" {
 		line("[red]last error:[-] %s", tview.Escape(t.LastError))

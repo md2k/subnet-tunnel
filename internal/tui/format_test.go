@@ -10,24 +10,45 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/logring"
 )
 
-func TestSpark(t *testing.T) {
-	for _, c := range []struct {
-		vals  []uint64
-		width int
-		want  string
-	}{
-		{nil, 4, "    "},
-		{[]uint64{0, 0}, 3, " ▁▁"},
-		{[]uint64{1, 8}, 2, "▂█"},
-		{[]uint64{0, 4, 8}, 3, "▁▅█"},
-		// Grouped from the newest end, the largest of each group.
-		{[]uint64{8, 0, 0, 1, 2, 4}, 3, "█▂▅"},
-		{[]uint64{1, 2, 3, 4, 5}, 2, "▄█"},
-		{[]uint64{5}, 0, ""},
-	} {
-		if got := spark(c.vals, c.width); got != c.want {
-			t.Errorf("spark(%v, %d) = %q, want %q", c.vals, c.width, got, c.want)
+func TestNiceTop(t *testing.T) {
+	for v, want := range map[uint64]uint64{0: 0, 1: 2, 92: 200, 2_000_000: 5_000_000, 4_000_000: 5_000_000, 5_000_000: 10_000_000, 900: 1000} {
+		if got := niceTop(v); got != want {
+			t.Errorf("niceTop(%d) = %d, want %d", v, got, want)
 		}
+	}
+}
+
+func TestChart(t *testing.T) {
+	plain := func(rows []string) string { return strings.Join(rows, "|") }
+	strip := func(rows []string) []string {
+		out := make([]string, len(rows))
+		for i, r := range rows {
+			for _, tag := range []string{"[green]", "[gray]", "[-]"} {
+				r = strings.ReplaceAll(r, tag, "")
+			}
+			out[i] = r
+		}
+		return out
+	}
+	for _, c := range []struct {
+		vals          []uint64
+		width, height int
+		top           uint64
+		want          string
+	}{
+		{nil, 4, 1, 0, "▁▁▁▁"},                       // nothing yet: the baseline
+		{[]uint64{0, 8}, 3, 1, 8, "▁▁█"},             // a zero is the baseline too
+		{[]uint64{1, 4, 8}, 3, 1, 16, "▁▂▄"},         // against the scale, not the largest
+		{[]uint64{8, 0, 0, 1, 2, 4}, 3, 1, 8, "█▁▄"}, // grouped evenly, the largest of each
+		{[]uint64{2, 8, 16}, 3, 2, 16, "  █|▂██"},    // two rows: 16 eighths
+		{[]uint64{5}, 0, 1, 5, ""},
+	} {
+		if got := plain(strip(chart(c.vals, c.width, c.height, c.top, "green"))); got != c.want {
+			t.Errorf("chart(%v, %d, %d, %d) = %q, want %q", c.vals, c.width, c.height, c.top, got, c.want)
+		}
+	}
+	if got := chart([]uint64{0, 8}, 2, 1, 8, "green")[0]; got != "[gray]▁[green]█[-]" {
+		t.Errorf("colours: %q", got)
 	}
 }
 

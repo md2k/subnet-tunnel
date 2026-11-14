@@ -12,7 +12,7 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/meter"
 )
 
-const profInfoRows = 9
+const profInfoRows = 11
 
 func (a *app) buildProfile() {
 	a.profInfo = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
@@ -51,7 +51,7 @@ func (a *app) renderProfile(now time.Time) {
 	if a.scrW > 0 {
 		w = a.scrW - 2
 	}
-	a.profInfo.SetText(a.profileText(t, now, max(w-18, 10)))
+	a.profInfo.SetText(a.profileText(t, now, max(w-graphLabel, 10)))
 
 	// What it asks for, as rows to act on.
 	row, col := a.profItems.GetSelection()
@@ -126,8 +126,8 @@ func (a *app) profileText(t control.Tunnel, now time.Time, sparkW int) string {
 	line("[gray]traffic[-]   conns %d open / %d total / %d failed%s · loop guard refused %d", c.Open, c.Total, c.Failed, via, c.Refused)
 	line("          ↑ %s (%s)  ↓ %s (%s) · DNS %d answered, %d failed", meter.Bytes(c.Up), rate(c.UpRate), meter.Bytes(c.Down), rate(c.DownRate),
 		t.DNSCounts.Answered, t.DNSCounts.Failed)
-	line("          [gray]↑[-] %s", a.sparkFor(t, upOf, sparkW))
-	line("          [gray]↓[-] %s [gray]5 min[-]", a.sparkFor(t, downOf, sparkW))
+	line("%s", a.graphText(t, "↑", c.UpRate, upOf, sparkW))
+	line("%s", a.graphText(t, "↓", c.DownRate, downOf, sparkW))
 	if t.LastError != "" && t.State != "up" {
 		line("[red]last error:[-] %s", tview.Escape(t.LastError))
 	}

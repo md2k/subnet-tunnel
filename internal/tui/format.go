@@ -15,38 +15,77 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/routes"
 )
 
-var blocks = []rune("▁▂▃▄▅▆▇█")
+var blocks = []rune("▁▂▃▄▅▆▇█") // 1 to 8 eighths of a cell
 
-// spark draws values as a sparkline width cells wide, the newest on the
-// right. More values than cells are grouped (the largest of each group);
-// fewer leave the left blank. The scale is the largest value shown.
-func spark(vals []uint64, width int) string {
-	if width <= 0 {
-		return ""
+// niceTop is a chart's scale for its largest value v: the next 1, 2 or 5
+// times a power of ten at or above v plus a tenth, so steady traffic
+// doesn't fill the chart; 0 for 0.
+func niceTop(v uint64) uint64 {
+	if v == 0 {
+		return 0
+	}
+	x := float64(v) * 1.1
+	p := math.Pow(10, math.Floor(math.Log10(x)))
+	for _, m := range []float64{1, 2, 5} {
+		if m*p >= x {
+			return uint64(math.Ceil(m * p))
+		}
+	}
+	return uint64(math.Ceil(10 * p))
+}
+
+// chart draws values as bars height rows high and width cells wide, the
+// newest on the right, the top row first, against the scale top. More
+// values than cells are grouped evenly (the largest of each group). Zeros,
+// and the cells no value has reached yet, show a grey baseline (▁) on the
+// bottom row; bars are color (a tview colour name).
+func chart(vals []uint64, width, height int, top uint64, color string) []string {
+	if width <= 0 || height <= 0 {
+		return make([]string, max(height, 0))
 	}
 	groups := vals
-	if len(vals) > width {
-		size := (len(vals) + width - 1) / width
-		groups = nil
-		for end := len(vals); end > 0; end -= size {
-			groups = append(groups, slices.Max(vals[max(0, end-size):end]))
+	if n := len(vals); n > width {
+		groups = make([]uint64, width)
+		for i := range groups {
+			groups[i] = slices.Max(vals[i*n/width : (i+1)*n/width])
 		}
-		slices.Reverse(groups)
 	}
-	var top uint64
-	for _, v := range groups {
-		top = max(top, v)
-	}
-	var b strings.Builder
-	b.WriteString(strings.Repeat(" ", width-len(groups)))
-	for _, v := range groups {
-		i := 0
-		if top > 0 && v > 0 {
-			i = int(math.Ceil(float64(v) / float64(top) * float64(len(blocks)-1)))
+	levels := make([]int, width) // eighths; 0: the baseline
+	for i, v := range groups {
+		if v > 0 && top > 0 {
+			l := int(math.Ceil(float64(v) / float64(top) * float64(height*8)))
+			levels[width-len(groups)+i] = min(max(l, 1), height*8)
 		}
-		b.WriteRune(blocks[i])
 	}
-	return b.String()
+	rows := make([]string, height)
+	for r := range height { // r: from the top
+		var b strings.Builder
+		cur := ""
+		set := func(tag string) {
+			if tag != cur {
+				b.WriteString(tag)
+				cur = tag
+			}
+		}
+		floor := (height - 1 - r) * 8 // eighths below this row
+		for _, l := range levels {
+			switch fill := min(l-floor, 8); {
+			case fill > 0:
+				set("[" + color + "]")
+				b.WriteRune(blocks[fill-1])
+			case l == 0 && r == height-1:
+				set("[gray]")
+				b.WriteRune('▁')
+			default:
+				b.WriteRune(' ')
+			}
+		}
+		if cur != "" {
+			b.WriteString("[-]")
+		}
+		rows[r] = b.String()
+	}
+	return rows
 }
 
 // sampleValues picks one value from each sample.

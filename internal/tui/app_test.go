@@ -267,6 +267,15 @@ func TestDashboard(t *testing.T) {
 	u := start(t, f, Options{OnLayout: func(l string) { layouts <- l }})
 	u.wait("Profiles (3)", "up 1h12m", "reconnecting 2/10", "pod ops/toolbox", "10.0.0.0/8 +1", "lockdown",
 		"120.0 kB/s", "3.1 MB/s", "reconnected", "connection to the agent lost; reconnecting", "control full")
+	// The sparkline takes the table's spare width (more than its 10 cells here).
+	for _, l := range strings.Split(u.text(), "\n") {
+		if strings.Contains(l, "● work") {
+			if n := strings.Count(l, "▁") + strings.Count(l, "▂") + strings.Count(l, "▃") + strings.Count(l, "▄") +
+				strings.Count(l, "▅") + strings.Count(l, "▆") + strings.Count(l, "▇") + strings.Count(l, "█"); n <= sparkCells {
+				t.Errorf("sparkline of %d cells: %q", n, l)
+			}
+		}
+	}
 	next := func() string {
 		select {
 		case l := <-layouts:
