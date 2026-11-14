@@ -138,13 +138,18 @@ optional masking of names and addresses. See [Status and logs](docs/config.md#st
 `subtun dns add|del` and `subtun profile stop|start|reconnect` without a restart. See
 [Changes while running](docs/config.md#changes-while-running).
 
+**Terminal UI.** `subtun tui` attaches to a running subtun: its profiles, traffic and log lines, in
+two layouts. With `--control full` it also stops, starts and reconnects profiles, edits their routes
+and DNS names and adds profiles from the config file, each change after its dry run. See
+[Terminal UI](docs/config.md#terminal-ui).
+
 See [Configuration](docs/config.md). Coming from sshuttle? `subtun import sshuttle FILE --name NAME`
 turns an sshuttle options file into a profile ([details](docs/config.md#importing-from-sshuttle)).
 
 ## Planned
 
-- Routes that follow network changes, and DNS answers outside the routes routed into the tunnel; a
-  terminal and a web UI.
+- Routes that follow network changes, and DNS answers outside the routes routed into the tunnel;
+  subtun running inside the terminal UI (`subtun up --tui`); a web UI.
 - SSH transport to any host.
 - DNS without firewall rules: subtun as the system resolver, or only for the listed domains.
 - UDP and IPv6 through the tunnel; capture on Linux (TUN) and Windows (wintun).
@@ -153,7 +158,7 @@ turns an sshuttle options file into a profile ([details](docs/config.md#importin
 
 - [Configuration](docs/config.md): commands, profiles and defaults, several profiles at once,
   examples, routes and excludes, full tunnel, split DNS, kill switch, reconnect, IPv6, status and
-  logs, log files, changes while running, safety checks, importing from sshuttle.
+  logs, log files, changes while running, the terminal UI, safety checks, importing from sshuttle.
 - [Design](docs/design.md): measurements, architecture and open questions.
 - [Development](docs/development.md): tests, code layout, the local test setup, and trying a full
   tunnel or the kill switch safely.

@@ -42,12 +42,13 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/transport` | get an agent running in a target (probe, choose binary or Python, start) |
 | `internal/transport/k8s`, `.../docker` | exec into a pod / container |
 | `internal/socks` | SOCKS5 frontend |
-| `internal/control` | the control socket (per process, user-only), its HTTP+JSON API (status, logs, changes), the client the commands use |
+| `internal/control` | the control socket (per process, user-only), its HTTP+JSON API (status, samples, the config's profiles, logs, changes), the client the commands use |
+| `internal/tui` | the terminal UI (`subtun tui`, tview): dashboard in two layouts, profile screen, logs, dialogs with dry runs; on a `Source` (the control socket, or a fake) |
 | `internal/meter` | a tunnel's counters: connections, bytes, 1 s rates, open connections |
 | `internal/logring` | the recent log lines in memory (capped by lines and bytes) |
 | `internal/logx` | levels per component (the `component` attribute), masking of DNS names and destinations, log files rotated by size and pruned by age and total size |
 | `internal/xdg` | subtun's directories, nix style: state (`~/.local/state/subtun`: logs) and run (`$XDG_RUNTIME_DIR/subtun` or `<state>/run`: sockets) |
-| `internal/cli` | the commands; planning of routes (automatic excludes), DNS and the kill switch; dry-run output; the engine every run uses, one profile or several (`multi.go`: planning, each profile's tunnel, `runEngine`; `router.go`: a connection's tunnel; `change.go`: changes while running, planned and checked; `status.go`, `statuscmd.go`, `changecmd.go`: status and the control commands) |
+| `internal/cli` | the commands; planning of routes (automatic excludes), DNS and the kill switch; dry-run output; the engine every run uses, one profile or several (`multi.go`: planning, each profile's tunnel, `runEngine`; `router.go`: a connection's tunnel; `change.go`: changes while running, planned and checked; `status.go`, `statuscmd.go`, `changecmd.go`, `tuicmd.go`: status, the control commands and the terminal UI) |
 | `internal/capture` | utun capture setup: helper → utun + routes → netstack; the DNS runtime; the kill switch guard following the local networks; routes and guard changing while running |
 | `internal/dns` | DNS engine: match names (`.` leaves local names alone) and pick a tunnel among several, tunnel or fallback, answers outside the routes, UDP/TCP listener, loop-free forwarder |
 | `internal/routes` | route planning: excludes by subtraction, cleanup, safety checks |
@@ -72,7 +73,8 @@ helper tests cover validation, descriptor passing and the helper's command loop 
 drivers) over an in-process socket pair. The pf driver is tested against a fake `pfctl` that answers
 like a stock macOS. The DNS engine is tested with in-memory packet connections and upstreams; DNS
 through both agents runs over in-memory pipes, with the Python agent's sockets swapped for socket
-pairs. The macOS drivers themselves need root (creating the utun, routes, pf rules) and are tested by
+pairs. The terminal UI runs on tcell's simulation screen against a fake control socket: the tests
+send keys and read the screen, and check the changes the dialogs make. The macOS drivers themselves need root (creating the utun, routes, pf rules) and are tested by
 hand, below.
 
 ## Local test setup
