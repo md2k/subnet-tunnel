@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,6 +19,9 @@ var (
 	stopGrace = 20 * time.Second
 	// hardExit ends the process when stopping hangs; replaced in tests.
 	hardExit = os.Exit
+	// beforeHardExit, when set, runs before hardExit: the terminal UI gives
+	// the terminal back (raw mode, the alternate screen) and prints why.
+	beforeHardExit atomic.Pointer[func()]
 )
 
 // withMaxDuration ends ctx after d, which stops subtun the way Ctrl-C does:
@@ -34,6 +38,9 @@ func withMaxDuration(ctx context.Context, d time.Duration, log *slog.Logger) (co
 	ctx, cancel := context.WithTimeoutCause(ctx, d, errMaxDuration)
 	watchdog := time.AfterFunc(d+stopGrace, func() {
 		log.Error("still stopping after --max-duration; exiting now", "grace", stopGrace)
+		if f := beforeHardExit.Load(); f != nil {
+			(*f)()
+		}
 		hardExit(3)
 	})
 	log.Info("subtun stops by itself after --max-duration", "max_duration", d)

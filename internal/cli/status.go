@@ -397,6 +397,20 @@ func configTarget(t config.Target) string {
 	return ""
 }
 
+// server is this run's control API; it takes changes only when writable
+// (control: full on the socket; the TUI in subtun's own terminal).
+func (es *engineStatus) server(ring *logring.Ring, log *slog.Logger, writable bool) *control.Server {
+	srv := &control.Server{Status: es.status, Conns: es.conns, Samples: es.samples, Logs: ring, Log: log}
+	if writable {
+		srv.Change = es.change
+	}
+	if es.configPath != "" {
+		path := es.configPath
+		srv.Config = func() control.ConfigProfiles { return es.configProfiles(path) }
+	}
+	return srv
+}
+
 // startControl opens this run's control socket; a failure only costs
 // status, so it's a warning. Replaced in tests.
 var startControl = func(ctx context.Context, es *engineStatus, ring *logring.Ring, log *slog.Logger) {
@@ -410,11 +424,7 @@ var startControl = func(ctx context.Context, es *engineStatus, ring *logring.Rin
 		log.Warn("no control socket, so subtun status can't see this run", "err", err)
 		return
 	}
-	srv := &control.Server{Status: es.status, Conns: es.conns, Samples: es.samples, Logs: ring, Change: es.change, Log: log}
-	if es.configPath != "" {
-		path := es.configPath
-		srv.Config = func() control.ConfigProfiles { return es.configProfiles(path) }
-	}
+	srv := es.server(ring, log, es.control == controlFull)
 	go func() {
 		if err := srv.Serve(ctx, ln, path); err != nil {
 			log.Debug("control socket stopped", "err", err)

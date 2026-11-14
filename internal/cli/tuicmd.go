@@ -50,21 +50,9 @@ else as used last.`,
 			if err != nil {
 				return err
 			}
-			fromFile := tuiFromConfig(configPath(g), cmd.ErrOrStderr())
-			last := loadTUIState()
-			return tui.Run(cmd.Context(), tui.Options{
-				Source: tui.Socket(in.Path),
-				Layout: firstSet(layout, fromFile.Layout, last.Layout), OnLayout: func(l string) { saveTUIState(func(s *tuiState) { s.Layout = l }) },
-				Units: firstSet(units, fromFile.Units, last.Units), OnUnits: func(u string) { saveTUIState(func(s *tuiState) { s.Units = u }) },
-				Mouse:       firstSet(mouse, string(fromFile.Mouse), last.Mouse) != "off",
-				HiddenPanes: last.Hidden, ConfigTab: last.Tab, HiddenLevels: last.Levels,
-				OnView: func(v tui.View) {
-					saveTUIState(func(s *tuiState) { s.Hidden, s.Tab, s.Levels = v.HiddenPanes, v.ConfigTab, v.HiddenLevels })
-				},
-				OnMouse: func(on bool) {
-					saveTUIState(func(s *tuiState) { s.Mouse = map[bool]string{true: "on", false: "off"}[on] })
-				},
-			})
+			o := tuiOptions(tuiFromConfig(configPath(g), cmd.ErrOrStderr()), layout, units, mouse)
+			o.Source = tui.Socket(in.Path)
+			return tui.Run(cmd.Context(), o)
 		},
 	}
 	cmd.Flags().IntVar(&pid, "pid", 0, "the subtun with this process id (needed when several run)")
@@ -81,6 +69,25 @@ func firstSet(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// tuiOptions are the TUI's options but its source: each of layout, units
+// and mouse from the flag, else the config file's tui settings, else as
+// remembered; the rest as remembered, and remembered again when changed.
+func tuiOptions(fromFile config.TUI, layout, units, mouse string) tui.Options {
+	last := loadTUIState()
+	return tui.Options{
+		Layout: firstSet(layout, fromFile.Layout, last.Layout), OnLayout: func(l string) { saveTUIState(func(s *tuiState) { s.Layout = l }) },
+		Units: firstSet(units, fromFile.Units, last.Units), OnUnits: func(u string) { saveTUIState(func(s *tuiState) { s.Units = u }) },
+		Mouse:       firstSet(mouse, string(fromFile.Mouse), last.Mouse) != "off",
+		HiddenPanes: last.Hidden, ConfigTab: last.Tab, HiddenLevels: last.Levels,
+		OnView: func(v tui.View) {
+			saveTUIState(func(s *tuiState) { s.Hidden, s.Tab, s.Levels = v.HiddenPanes, v.ConfigTab, v.HiddenLevels })
+		},
+		OnMouse: func(on bool) {
+			saveTUIState(func(s *tuiState) { s.Mouse = map[bool]string{true: "on", false: "off"}[on] })
+		},
+	}
 }
 
 // tuiFromConfig is the config file's tui settings; a file that can't be

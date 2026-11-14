@@ -126,7 +126,7 @@ without starting one.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			log := newLogger(g.verbose)
-			h, err := privhelper.Start(cmd.Context(), &transport.LineLog{Log: log, Prefix: "helper: "}, log)
+			h, err := privhelper.Start(cmd.Context(), &transport.LineLog{Log: log, Prefix: "helper: "}, log, nil)
 			if err != nil {
 				return err
 			}

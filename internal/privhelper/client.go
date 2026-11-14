@@ -39,8 +39,10 @@ type Client struct {
 
 // Start runs the helper through sudo (sudo asks for the password on the
 // terminal) and waits for it to connect back and prove it's ours.
-// helperLog receives the helper's log lines.
-func Start(ctx context.Context, helperLog io.Writer, log *slog.Logger) (*Client, error) {
+// helperLog receives the helper's log lines. lend, when set, has the
+// terminal while sudo may ask (a terminal UI steps aside); not called when
+// sudo needs no password now.
+func Start(ctx context.Context, helperLog io.Writer, log *slog.Logger, lend Lend) (*Client, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -77,7 +79,38 @@ func Start(ctx context.Context, helperLog io.Writer, log *slog.Logger) (*Client,
 	if err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil { // stopping: no sudo, no TUI stepping aside
+		return nil, err
+	}
 	log.Info("asking sudo for the root helper")
+	var c *Client
+	connect := func() { c, err = connectHelper(ctx, cmd, stdin, ln, token, log) }
+	if lend == nil || sudoReady(ctx) {
+		connect()
+	} else {
+		lend(connect)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var hello struct {
+		Token string `json:"token"`
+	}
+	if _, err := readMsg(c.conn, &hello, time.Now().Add(ioTimeout)); err != nil {
+		c.Close()
+		return nil, fmt.Errorf("helper hello: %w", err)
+	}
+	if subtle.ConstantTimeCompare([]byte(hello.Token), []byte(token)) != 1 {
+		c.Close()
+		return nil, errors.New("helper presented the wrong token")
+	}
+	return c, nil
+}
+
+// connectHelper starts sudo and waits for the helper to connect back: the
+// part where sudo may ask for the password.
+func connectHelper(ctx context.Context, cmd *exec.Cmd, stdin io.WriteCloser, ln *net.UnixListener, token string, log *slog.Logger) (*Client, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting sudo: %w", err)
 	}
@@ -108,25 +141,21 @@ func Start(ctx context.Context, helperLog io.Writer, log *slog.Logger) (*Client,
 			return nil, fmt.Errorf("waiting for the helper: %w", a.err)
 		}
 		c.conn = a.conn
+		return c, nil
 	case <-c.exited:
 		return nil, fmt.Errorf("sudo helper exited before connecting (wrong password, or not allowed to sudo?): %v", c.exitErr)
 	case <-ctx.Done():
 		c.kill()
 		return nil, ctx.Err()
 	}
+}
 
-	var hello struct {
-		Token string `json:"token"`
-	}
-	if _, err := readMsg(c.conn, &hello, time.Now().Add(ioTimeout)); err != nil {
-		c.Close()
-		return nil, fmt.Errorf("helper hello: %w", err)
-	}
-	if subtle.ConstantTimeCompare([]byte(hello.Token), []byte(token)) != 1 {
-		c.Close()
-		return nil, errors.New("helper presented the wrong token")
-	}
-	return c, nil
+// sudoReady reports whether sudo would run without asking for a password
+// now (a cached ticket, or no password needed).
+func sudoReady(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, "/usr/bin/sudo", "-n", "-v").Run() == nil
 }
 
 func (c *Client) call(req Request) (Response, []*os.File, error) {

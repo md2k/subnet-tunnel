@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -74,6 +75,20 @@ func Endpoint(t Target) (string, error) {
 	return cfg.Host, nil
 }
 
+// stdinBusy, when set, says why kubeconfig exec plugins (login helpers)
+// can't read the terminal: a terminal UI has it.
+var stdinBusy atomic.Pointer[string]
+
+// StdinBusy keeps login plugins off the terminal, why being what they say
+// when they'd need it; "" gives it back.
+func StdinBusy(why string) {
+	if why == "" {
+		stdinBusy.Store(nil)
+		return
+	}
+	stdinBusy.Store(&why)
+}
+
 type kube struct {
 	cfg       *rest.Config
 	cs        kubernetes.Interface
@@ -90,6 +105,9 @@ func newKube(ctx context.Context, t Target) (*kube, error) {
 	cfg, err := cc.ClientConfig()
 	if err != nil {
 		return nil, fmt.Errorf("kubeconfig: %w", err)
+	}
+	if why := stdinBusy.Load(); why != nil && cfg.ExecProvider != nil {
+		cfg.ExecProvider.StdinUnavailable, cfg.ExecProvider.StdinUnavailableMessage = true, *why
 	}
 	ns := t.Namespace
 	if ns == "" {

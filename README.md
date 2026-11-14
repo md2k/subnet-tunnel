@@ -140,7 +140,8 @@ optional masking of names and addresses. See [Status and logs](docs/config.md#st
 
 **Terminal UI.** `subtun tui` attaches to a running subtun: its profiles, traffic and log lines, in
 two layouts. With `--control full` it also stops, starts and reconnects profiles, edits their routes
-and DNS names and adds profiles from the config file, each change after its dry run. See
+and DNS names and adds profiles from the config file, each change after its dry run. Or run subtun
+with it in the same terminal: `subtun up work --tui` (`q` stops subtun, after asking). See
 [Terminal UI](docs/config.md#terminal-ui).
 
 See [Configuration](docs/config.md). Coming from sshuttle? `subtun import sshuttle FILE --name NAME`
@@ -149,7 +150,7 @@ turns an sshuttle options file into a profile ([details](docs/config.md#importin
 ## Planned
 
 - Routes that follow network changes, and DNS answers outside the routes routed into the tunnel;
-  subtun running inside the terminal UI (`subtun up --tui`); a web UI.
+  subtun in the background (a daemon); a web UI.
 - SSH transport to any host.
 - DNS without firewall rules: subtun as the system resolver, or only for the listed domains.
 - UDP and IPv6 through the tunnel; capture on Linux (TUN) and Windows (wintun).

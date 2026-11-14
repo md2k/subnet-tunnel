@@ -19,7 +19,9 @@ var errUnsupported = errors.New("utun capture is only implemented on macOS so fa
 type Client struct{}
 
 // Start is not implemented on this platform yet.
-func Start(context.Context, io.Writer, *slog.Logger) (*Client, error) { return nil, errUnsupported }
+func Start(context.Context, io.Writer, *slog.Logger, Lend) (*Client, error) {
+	return nil, errUnsupported
+}
 
 // CreateTun is not implemented on this platform yet.
 func (*Client) CreateTun(int, netip.Addr) (string, *os.File, error) { return "", nil, errUnsupported }

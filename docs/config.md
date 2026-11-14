@@ -80,7 +80,7 @@ the words you meant (`mode: off`, `capture: off` work).
 | `subtun up --profile A,B` | run several profiles at once ([below](#several-profiles-at-once)) |
 | `subtun status` | what every running subtun is doing ([below](#status-and-logs)) |
 | `subtun logs [-f]` | a running subtun's recent log lines |
-| `subtun tui` | watch and change a running subtun in a terminal UI ([below](#terminal-ui)) |
+| `subtun tui` | watch and change a running subtun in a terminal UI ([below](#terminal-ui)); `--tui` on `up`, `k8s` and `docker` runs subtun with it in the same terminal |
 | `subtun route add\|del CIDR...` | change a running subtun's routes ([below](#changes-while-running)) |
 | `subtun dns add\|del DOMAIN...` | change a running subtun's DNS names |
 | `subtun profile stop\|start\|reconnect [NAME]` | stop, start or reconnect one of its profiles |
@@ -651,6 +651,33 @@ subtun tui                                     # in another
 subtun tui --layout detail
 ```
 
+Or run subtun with the TUI in the same terminal: `--tui` on `subtun up`, `k8s` and `docker`.
+
+```sh
+subtun up work --tui
+subtun up --profile work,dev --tui
+```
+
+- It is the same TUI, with what subtun logs in its log views instead of on the terminal (the log
+  file is written as always). What else would write to the terminal meanwhile, such as a kubeconfig
+  login plugin's messages, shows in the log views too (`stderr: …`).
+- A kubeconfig login plugin can't ask you anything meanwhile (the TUI has the keyboard): one that
+  needs to (a password, say) fails, saying so. Log in first (`kubectl get pods`, say), then start
+  subtun. A browser login still works.
+- It makes changes whatever `control` says: it is your own terminal. `control` still decides what
+  other terminals can do through the socket.
+- When sudo needs the password for the root helper (at the start, or when a profile with routes is
+  added), the TUI steps aside: the terminal shows sudo's prompt (or Touch ID asks), and the TUI
+  comes back once the helper runs. It doesn't when sudo needs no password then (checked with `sudo
+  -n -v`, which may leave a "password required" line in the system log, and which with a sudoers
+  rule for subtun alone still says a password is needed: the TUI then steps aside for nothing).
+- `q` (or Ctrl-C) asks before stopping subtun, saying what each profile's kill switch then does; a
+  second Ctrl-C stops at once. The TUI shows the stop until the routes and firewall rules are off.
+  A signal (`kill`) stops subtun as without the TUI.
+- When it closes, the log lines of the stop are printed (or the last 20 when subtun stopped by
+  itself, such as when every profile gave up).
+- It needs a terminal, and doesn't go with `--dry-run`.
+
 - **Dashboard:** every profile with its state, target, routes, DNS names, kill switch, the rate each
   way and a gauge of its traffic now (against the scale of its last 5 minutes); below, the log lines
   of every profile (a line no profile logged names its source, such as `helper`). Two layouts,
@@ -695,7 +722,7 @@ subtun tui --layout detail
 | `tui.units` | `--units` | `bytes` or `bits`; unset: the units used last, else `bytes` |
 | `tui.mouse` | `--mouse` | `on` or `off`; unset: as used last, else `on` |
 
-`tui` is read by `subtun tui` only, never per profile. `tui.json` also keeps how the TUI was left:
+`tui` is read by `subtun tui` and `--tui` only, never per profile. `tui.json` also keeps how the TUI was left:
 the profile screen's hidden panes and config tab, and the log levels the views hide.
 
 ## Importing from sshuttle
