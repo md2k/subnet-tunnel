@@ -730,10 +730,26 @@ second and follows `/v1/logs`.
 - **Tests:** tcell's simulation screen and a fake control socket: the screens are drawn and keys
   sent as a terminal would, and the changes made are checked.
 
-**Next:** `subtun up ... --tui` runs subtun with the TUI in the same terminal (the same TUI over an
-in-process socket; it steps aside while sudo asks for the root helper; quitting stops subtun after
-a confirm). A daemon (subtun in the background, its log in the log file, attached to with `subtun
-tui`) is deferred: started in the foreground for sudo, then detached.
+**Inside subtun** (`--tui` on `up`, `k8s`, `docker`): the same TUI in subtun's own terminal.
+- **Connection:** the same API and client, served in memory (`control.Server.InMemory`: HTTP over
+  `net.Pipe` connections), so the TUI code is the same in both modes, and it works with `control:
+  off`. Its server takes changes whatever `control` says (the person at subtun's terminal owns the
+  run); the socket keeps following `control`. A one-profile run then keeps the root helper as a
+  session, as with `control: full`, so routes can change.
+- **The terminal:** subtun's own log output to the terminal is off while the TUI runs (the ring and
+  the log file get everything). sudo asks on the terminal (or through Touch ID), so starting the
+  root helper lends the terminal (`privhelper.Lend`): the TUI suspends (tview `Suspend`, tcell
+  leaves raw mode and the alternate screen) while sudo may ask, and comes back once the helper has
+  connected. `sudo -n -v` first: with a cached ticket (or no password needed) it doesn't step aside.
+  The suspend runs on the UI goroutine; the log stream keeps buffering meanwhile.
+- **Stopping:** `q` and Ctrl-C ask; confirmed, the TUI cancels the engine's context, which the
+  engine takes as a deliberate stop, like a signal. The TUI shows the stop and is closed by the
+  engine after the capture and tunnels are down; the log lines from the stop (or the last 20, when
+  the engine ended by itself) are then printed to the terminal. A TUI that fails to start stops the
+  run: nothing would show it or stop it.
+
+A daemon (subtun in the background, its log in the log file, attached to with `subtun tui`) is
+deferred: started in the foreground for sudo, then detached.
 
 ## Decisions
 
