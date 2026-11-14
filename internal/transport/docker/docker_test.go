@@ -97,8 +97,10 @@ func TestHostConfig(t *testing.T) {
 	if hc.NetworkMode != "dev_default" || hc.NanoCPUs != 500_000_000 || hc.Memory != 256<<20 {
 		t.Errorf("network, limits: %q %d %d", hc.NetworkMode, hc.NanoCPUs, hc.Memory)
 	}
-	if _, err := hostConfig(Target{LimitMem: "lots"}); err == nil {
-		t.Error("a bad quantity")
+	for _, bad := range []Target{{LimitMem: "lots"}, {LimitCPU: "0"}, {LimitMem: "-1"}} {
+		if _, err := hostConfig(bad); err == nil {
+			t.Errorf("accepted %+v", bad)
+		}
 	}
 	if n := generatedName("work"); !strings.HasPrefix(n, "subtun-work-") || len(n) != len("subtun-work-")+6 {
 		t.Errorf("name: %q", n)

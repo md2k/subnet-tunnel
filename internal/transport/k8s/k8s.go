@@ -89,18 +89,23 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	c.Host = k.cfg.Host
 	c.Endpoints = transport.ResolveEndpoint(ctx, k.cfg.Host)
 	c.Local = transport.IsLocal(k.cfg.Host, c.Endpoints)
-	t.Picked.Set(k.pod)
+	if !t.Create { // a created pod is remembered with its UID
+		t.Picked.Set(k.pod)
+	}
 	return c, nil
 }
 
 // Endpoint returns the API server's address from the kubeconfig, without
 // connecting (several tunnels exclude every endpoint from every route).
 func Endpoint(t Target) (string, error) {
-	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	if t.Kubeconfig != "" {
-		rules.ExplicitPath = t.Kubeconfig
+	if _, _, pinned := t.Picked.Pinned(); !pinned {
+		t.Picked = nil // planning before the first connect: don't pin yet
 	}
-	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{CurrentContext: t.Context}).ClientConfig()
+	cc, _, err := clientConfig(t)
+	if err != nil {
+		return "", err
+	}
+	cfg, err := cc.ClientConfig()
 	if err != nil {
 		return "", fmt.Errorf("kubeconfig: %w", err)
 	}
@@ -130,13 +135,14 @@ type kube struct {
 }
 
 // clients reads the kubeconfig for t: the REST config, a clientset and
-// the namespace.
+// the namespace. The context and namespace are those of t's first connect
+// (Picked): switching kubectl's context meanwhile doesn't move the run, or
+// what subtun deletes.
 func clients(t Target) (*rest.Config, kubernetes.Interface, string, error) {
-	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	if t.Kubeconfig != "" {
-		rules.ExplicitPath = t.Kubeconfig
+	cc, ns, err := clientConfig(t)
+	if err != nil {
+		return nil, nil, "", err
 	}
-	cc := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{CurrentContext: t.Context})
 	cfg, err := cc.ClientConfig()
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("kubeconfig: %w", err)
@@ -144,17 +150,45 @@ func clients(t Target) (*rest.Config, kubernetes.Interface, string, error) {
 	if why := stdinBusy.Load(); why != nil && cfg.ExecProvider != nil {
 		cfg.ExecProvider.StdinUnavailable, cfg.ExecProvider.StdinUnavailableMessage = true, *why
 	}
-	ns := t.Namespace
-	if ns == "" {
-		if ns, _, err = cc.Namespace(); err != nil {
-			return nil, nil, "", fmt.Errorf("kubeconfig namespace: %w", err)
-		}
-	}
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, nil, "", err
 	}
 	return cfg, cs, ns, nil
+}
+
+// clientConfig resolves t's context and namespace (pinned at the first
+// connect).
+func clientConfig(t Target) (clientcmd.ClientConfig, string, error) {
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if t.Kubeconfig != "" {
+		rules.ExplicitPath = t.Kubeconfig
+	}
+	pinCtx, pinNS, pinned := t.Picked.Pinned()
+	ctxName := t.Context
+	if ctxName == "" && pinned {
+		ctxName = pinCtx
+	}
+	if ctxName == "" {
+		raw, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).RawConfig()
+		if err != nil {
+			return nil, "", fmt.Errorf("kubeconfig: %w", err)
+		}
+		ctxName = raw.CurrentContext
+	}
+	cc := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{CurrentContext: ctxName})
+	ns := t.Namespace
+	if ns == "" && pinned {
+		ns = pinNS
+	}
+	if ns == "" {
+		var err error
+		if ns, _, err = cc.Namespace(); err != nil {
+			return nil, "", fmt.Errorf("kubeconfig namespace: %w", err)
+		}
+	}
+	t.Picked.Pin(ctxName, ns)
+	return cc, ns, nil
 }
 
 func newKube(ctx context.Context, t Target, log *slog.Logger) (*kube, error) {

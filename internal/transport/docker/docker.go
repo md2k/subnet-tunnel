@@ -98,7 +98,9 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 	carrier.Host = cli.DaemonHost()
 	carrier.Endpoints = transport.ResolveEndpoint(ctx, cli.DaemonHost())
 	carrier.Local = transport.IsLocal(cli.DaemonHost(), carrier.Endpoints)
-	t.Picked.Set(target)
+	if !t.Create { // a created container is remembered with its ID
+		t.Picked.Set(target)
+	}
 	return carrier, nil
 }
 
@@ -170,6 +172,9 @@ func choose(items []container.Summary, sel, prev string) (string, error) {
 // Endpoint returns the Docker daemon's address, without connecting
 // (several tunnels exclude every endpoint from every route).
 func Endpoint(t Target) (string, error) {
+	if _, _, pinned := t.Picked.Pinned(); !pinned {
+		t.Picked = nil // planning before the first connect: don't pin yet
+	}
 	cli, err := newClient(t)
 	if err != nil {
 		return "", err
@@ -178,12 +183,19 @@ func Endpoint(t Target) (string, error) {
 	return cli.DaemonHost(), nil
 }
 
+// newClient talks to t's daemon: the one of its first connect (Picked), so
+// switching docker contexts meanwhile doesn't move the run, or what subtun
+// removes. ($DOCKER_HOST can't change meanwhile: nothing to pin.)
 func newClient(t Target) (*client.Client, error) {
 	opts := []client.Opt{client.WithAPIVersionNegotiation()}
-	if t.Host == "" && t.Context == "" && os.Getenv("DOCKER_HOST") != "" {
+	fromEnv := t.Host == "" && t.Context == "" && os.Getenv("DOCKER_HOST") != ""
+	if fromEnv {
 		// Same as the docker CLI: DOCKER_HOST plus DOCKER_TLS_VERIFY / DOCKER_CERT_PATH.
 		opts = append(opts, client.FromEnv)
 	} else {
+		if pinned, _, ok := t.Picked.Pinned(); ok && pinned != "" && t.Host == "" {
+			t.Host, t.Context = pinned, ""
+		}
 		host, err := ResolveHost(t.Host, t.Context, configDir())
 		if err != nil {
 			return nil, err
@@ -198,6 +210,9 @@ func newClient(t Target) (*client.Client, error) {
 	}
 	if strings.HasPrefix(cli.DaemonHost(), "ssh://") {
 		return nil, fmt.Errorf("docker host %s: ssh:// hosts are not supported yet", cli.DaemonHost())
+	}
+	if !fromEnv {
+		t.Picked.Pin(cli.DaemonHost(), "")
 	}
 	return cli, nil
 }

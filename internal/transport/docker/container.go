@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,29 +18,42 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/transport"
 )
 
+const removeTimeout = 10 * time.Second
+
+func mine(labels map[string]string) bool {
+	return transport.Ours(labels) && labels[transport.LabelPID] == strconv.Itoa(os.Getpid())
+}
+
 // ensureContainer returns the container subtun created for t, running:
 // the one from before while it still runs (a reconnect), else a new one.
 // This user's leftovers on the daemon are removed first.
 func ensureContainer(ctx context.Context, cli *client.Client, t Target, log *slog.Logger) (string, error) {
-	if prev := t.Picked.Get(); prev != "" {
-		res, err := cli.ContainerInspect(ctx, prev, client.ContainerInspectOptions{})
+	if prev, id := t.Picked.Created(); id != "" {
+		res, err := cli.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
 		switch {
-		case err == nil && transport.Ours(labels(res.Container.Config)) && res.Container.State != nil && res.Container.State.Running:
+		case err == nil && mine(labels(res.Container.Config)) && res.Container.State != nil && res.Container.State.Running:
 			return prev, nil
-		case err == nil && transport.Ours(labels(res.Container.Config)):
+		case err == nil:
 			log.Info("the container subtun created is gone or not running: creating another", "container", prev)
-			removeContainer(ctx, cli, prev, log)
+			removeContainer(ctx, cli, id, log)
 		}
+		t.Picked.SetCreated("", "")
 	}
-	cleanupLeftovers(ctx, cli, t.Picked.Get(), log)
+	cleanupLeftovers(ctx, cli, log)
 	name := t.Name
 	if name != "" {
 		res, err := cli.ContainerInspect(ctx, name, client.ContainerInspectOptions{})
 		if err == nil {
-			if !transport.Ours(labels(res.Container.Config)) {
+			c := res.Container
+			l := labels(c.Config)
+			running := c.State != nil && (c.State.Running || c.State.Status == container.StateCreated)
+			switch {
+			case !transport.Ours(l):
 				return "", fmt.Errorf("container %s exists and isn't one subtun created for you: choose another name, or use it with create: false", name)
+			case !mine(l) && running && transport.Alive(l[transport.LabelPID]):
+				return "", fmt.Errorf("container %s is in use by another subtun (pid %s): choose another name", name, l[transport.LabelPID])
 			}
-			removeContainer(ctx, cli, name, log)
+			removeContainer(ctx, cli, c.ID, log)
 		}
 	} else {
 		name = generatedName(t.Profile)
@@ -63,42 +78,62 @@ func ensureContainer(ctx context.Context, cli *client.Client, t Target, log *slo
 	if err != nil {
 		return "", err
 	}
+	l := transport.OwnLabels()
+	if t.Profile != "" {
+		l[transport.LabelProfile] = t.Profile
+	}
 	created, err := cli.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: name,
 		Config: &container.Config{
-			Image:  image,
-			Cmd:    []string{"sh", "-c", transport.IdleScript},
-			Env:    []string{"HOME=/tmp"},
-			User:   "65534:65534",
-			Labels: transport.OwnLabels(t.Profile),
+			Image:      image,
+			Entrypoint: []string{"sh", "-c", transport.IdleScript}, // the image's own entrypoint doesn't run
+			Env:        []string{"HOME=/tmp"},
+			User:       "65534:65534",
+			Labels:     l,
 		},
 		HostConfig: hc,
 	})
 	if err != nil {
+		// The answer may have been lost (a stop meanwhile) after it was made.
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), removeTimeout)
+		defer cancel()
+		if res, ierr := cli.ContainerInspect(rctx, name, client.ContainerInspectOptions{}); ierr == nil && mine(labels(res.Container.Config)) {
+			removeContainer(rctx, cli, res.Container.ID, log)
+		}
 		return "", fmt.Errorf("creating a container: %w", err)
 	}
-	t.Picked.Set(name)
+	t.Picked.SetCreated(name, created.ID)
+	fail := func(err error) (string, error) {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), removeTimeout)
+		defer cancel()
+		removeContainer(rctx, cli, created.ID, log)
+		t.Picked.SetCreated("", "")
+		return "", err
+	}
 	if _, err := cli.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
-		removeContainer(context.WithoutCancel(ctx), cli, name, log)
-		t.Picked.Set("")
-		return "", fmt.Errorf("starting container %s: %w", name, err)
+		return fail(fmt.Errorf("starting container %s: %w", name, err))
 	}
 	log.Info("container created", "container", name, "image", image)
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		res, err := cli.ContainerInspect(ctx, created.ID, client.ContainerInspectOptions{})
-		if err == nil && res.Container.State != nil && res.Container.State.Running {
+		switch {
+		case err != nil && strings.Contains(err.Error(), "No such container"):
+			return fail(fmt.Errorf("container %s exited at start (and was removed)", name)) // --rm
+		case err == nil && res.Container.State != nil && res.Container.State.Running:
 			return name, nil
-		}
-		if err == nil && res.Container.State != nil && res.Container.State.Status == container.StateExited {
-			return "", fmt.Errorf("container %s exited at start (code %d)", name, res.Container.State.ExitCode)
+		case err == nil && res.Container.State != nil:
+			switch st := res.Container.State; st.Status {
+			case container.StateExited, container.StateDead, container.StateRemoving:
+				return fail(fmt.Errorf("container %s exited at start (code %d)", name, st.ExitCode))
+			}
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("container %s not running after 30s", name)
+			return fail(fmt.Errorf("container %s not running after 30s", name))
 		}
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return fail(ctx.Err())
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
@@ -120,15 +155,15 @@ func hostConfig(t Target) (*container.HostConfig, error) {
 	}
 	if t.LimitCPU != "" {
 		q, err := resource.ParseQuantity(t.LimitCPU)
-		if err != nil {
-			return nil, fmt.Errorf("cpu limit %q: %w", t.LimitCPU, err)
+		if err != nil || q.Sign() <= 0 {
+			return nil, fmt.Errorf("cpu limit %q: a quantity more than 0", t.LimitCPU)
 		}
 		hc.NanoCPUs = q.MilliValue() * 1_000_000
 	}
 	if t.LimitMem != "" {
 		q, err := resource.ParseQuantity(t.LimitMem)
-		if err != nil {
-			return nil, fmt.Errorf("memory limit %q: %w", t.LimitMem, err)
+		if err != nil || q.Sign() <= 0 {
+			return nil, fmt.Errorf("memory limit %q: a quantity more than 0", t.LimitMem)
 		}
 		hc.Memory = q.Value()
 	}
@@ -152,8 +187,9 @@ func generatedName(profile string) string {
 }
 
 // cleanupLeftovers removes this user's containers that have ended, or
-// whose subtun no longer runs on this machine (keep: the one in use).
-func cleanupLeftovers(ctx context.Context, cli *client.Client, keep string, log *slog.Logger) {
+// whose subtun no longer runs on this machine (a live one's, starting or
+// paused, are left alone).
+func cleanupLeftovers(ctx context.Context, cli *client.Client, log *slog.Logger) {
 	f := client.Filters{}
 	f.Add("label", transport.LabelManagedBy+"="+transport.ManagedBy, transport.LabelOwner+"="+transport.Owner())
 	res, err := cli.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: f})
@@ -162,34 +198,39 @@ func cleanupLeftovers(ctx context.Context, cli *client.Client, keep string, log 
 		return
 	}
 	for _, c := range res.Items {
-		if len(c.Names) == 0 {
+		ended := c.State == container.StateExited || c.State == container.StateDead
+		if mine(c.Labels) && !ended {
 			continue
 		}
-		name := strings.TrimPrefix(c.Names[0], "/")
-		if name == keep {
-			continue
-		}
-		if c.State != container.StateRunning || !transport.Alive(c.Labels[transport.LabelPID]) {
+		if ended || !transport.Alive(c.Labels[transport.LabelPID]) {
+			name := c.ID
+			if len(c.Names) > 0 {
+				name = strings.TrimPrefix(c.Names[0], "/")
+			}
 			log.Info("removing a container an earlier subtun left", "container", name)
-			removeContainer(ctx, cli, name, log)
+			removeContainer(ctx, cli, c.ID, log)
 		}
 	}
 }
 
-func removeContainer(ctx context.Context, cli *client.Client, name string, log *slog.Logger) {
-	if _, err := cli.ContainerRemove(ctx, name, client.ContainerRemoveOptions{Force: true}); err != nil && !strings.Contains(err.Error(), "No such container") {
-		log.Warn("removing the container subtun created", "container", name, "err", err)
+// removeContainer removes a container by its ID: never another that took
+// its name meanwhile.
+func removeContainer(ctx context.Context, cli *client.Client, id string, log *slog.Logger) {
+	if _, err := cli.ContainerRemove(ctx, id, client.ContainerRemoveOptions{Force: true}); err != nil &&
+		!strings.Contains(err.Error(), "No such container") && !strings.Contains(err.Error(), "already in progress") {
+		log.Warn("removing the container subtun created", "container", id, "err", err)
 	}
 }
 
 // Release removes the container subtun created for t, when the profile
-// stops for good (not on a reconnect, which uses it again).
+// stops for good (not on a reconnect, which uses it again): by its ID, on
+// the daemon it was created on.
 func Release(ctx context.Context, t Target, log *slog.Logger) {
-	name := t.Picked.Get()
-	if !t.Create || name == "" {
+	name, id := t.Picked.Created()
+	if !t.Create || id == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), removeTimeout)
 	defer cancel()
 	cli, err := newClient(t)
 	if err != nil {
@@ -197,7 +238,7 @@ func Release(ctx context.Context, t Target, log *slog.Logger) {
 		return
 	}
 	defer cli.Close()
-	removeContainer(ctx, cli, name, log)
-	t.Picked.Set("")
+	removeContainer(ctx, cli, id, log)
+	t.Picked.SetCreated("", "")
 	log.Info("container removed", "container", name)
 }
