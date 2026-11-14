@@ -695,7 +695,8 @@ subtun tui --layout detail
 | `tui.units` | `--units` | `bytes` or `bits`; unset: the units used last, else `bytes` |
 | `tui.mouse` | `--mouse` | `on` or `off`; unset: as used last, else `on` |
 
-`tui` is read by `subtun tui` only, never per profile.
+`tui` is read by `subtun tui` only, never per profile. `tui.json` also keeps how the TUI was left:
+the profile screen's hidden panes and config tab, and the log levels the views hide.
 
 ## Importing from sshuttle
 

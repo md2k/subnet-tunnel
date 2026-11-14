@@ -191,18 +191,24 @@ func (a *app) switchTab(tab string) {
 	a.refresh()
 }
 
-// saveView hands the panes hidden and the config tab to be remembered.
+// saveView hands the panes hidden, the config tab and the log levels
+// hidden to be remembered.
 func (a *app) saveView() {
 	if a.o.OnView == nil {
 		return
 	}
-	var hidden []string
+	v := View{ConfigTab: a.cfgTab}
 	for i, on := range a.panes {
 		if !on {
-			hidden = append(hidden, paneKeys[i])
+			v.HiddenPanes = append(v.HiddenPanes, paneKeys[i])
 		}
 	}
-	a.o.OnView(hidden, a.cfgTab)
+	for i, hide := range a.filter.hide {
+		if hide {
+			v.HiddenLevels = append(v.HiddenLevels, levelNames[i])
+		}
+	}
+	a.o.OnView(v)
 }
 
 func (a *app) openProfile(i int) {

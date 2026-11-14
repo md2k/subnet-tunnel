@@ -707,3 +707,26 @@ func TestLogLevelDialog(t *testing.T) {
 	}
 	u.gone("Log levels of subtun")
 }
+
+// The log levels hidden are remembered, and come back hidden.
+func TestViewRemembered(t *testing.T) {
+	f := newFake("full")
+	views := make(chan View, 8)
+	u := start(t, f, Options{OnView: func(v View) { views <- v }, HiddenLevels: []string{"debug"}})
+	u.wait("reconnected")
+	u.press("l")
+	u.wait("levels: info warn error")
+	if strings.Contains(u.text(), "dns query") {
+		t.Fatal("a hidden level shown")
+	}
+	u.press("d")
+	u.wait("levels: all", "dns query")
+	select {
+	case v := <-views:
+		if len(v.HiddenLevels) != 0 {
+			t.Errorf("remembered: %+v", v)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("not handed over to be remembered")
+	}
+}

@@ -94,6 +94,7 @@ func toEnd(ev *tcell.EventKey) bool { return ev.Key() == tcell.KeyEnd || ev.Rune
 func (a *app) logScrollKey(ev *tcell.EventKey) bool {
 	if i := strings.IndexRune("diwe", ev.Rune()); i >= 0 && ev.Modifiers()&tcell.ModAlt == 0 {
 		a.filter.hide[i] = !a.filter.hide[i]
+		a.saveView()
 		a.rebuildLogs()
 		a.flash("green", "levels shown: "+a.filter.levels())
 		a.refresh()

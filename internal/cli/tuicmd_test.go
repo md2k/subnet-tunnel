@@ -58,8 +58,8 @@ func TestTUISettings(t *testing.T) {
 	saveTUIState(func(s *tuiState) { s.Layout = "detail" })
 	saveTUIState(func(s *tuiState) { s.Units = "bits" })
 	saveTUIState(func(s *tuiState) { s.Mouse = "off" })
-	saveTUIState(func(s *tuiState) { s.Hidden, s.Tab = []string{"logs"}, "dns" })
-	if s := loadTUIState(); s.Layout != "detail" || s.Units != "bits" || s.Mouse != "off" || len(s.Hidden) != 1 || s.Tab != "dns" {
+	saveTUIState(func(s *tuiState) { s.Hidden, s.Tab, s.Levels = []string{"logs"}, "dns", []string{"debug"} })
+	if s := loadTUIState(); s.Layout != "detail" || s.Units != "bits" || s.Mouse != "off" || len(s.Hidden) != 1 || s.Tab != "dns" || len(s.Levels) != 1 {
 		t.Errorf("remembered: %+v", s)
 	}
 	if fi, err := os.Stat(filepath.Join(dir, "subtun", "tui.json")); err != nil || fi.Mode().Perm() != 0o600 {

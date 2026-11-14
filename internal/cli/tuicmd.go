@@ -57,9 +57,9 @@ else as used last.`,
 				Layout: firstSet(layout, fromFile.Layout, last.Layout), OnLayout: func(l string) { saveTUIState(func(s *tuiState) { s.Layout = l }) },
 				Units: firstSet(units, fromFile.Units, last.Units), OnUnits: func(u string) { saveTUIState(func(s *tuiState) { s.Units = u }) },
 				Mouse:       firstSet(mouse, string(fromFile.Mouse), last.Mouse) != "off",
-				HiddenPanes: last.Hidden, ConfigTab: last.Tab,
-				OnView: func(hidden []string, tab string) {
-					saveTUIState(func(s *tuiState) { s.Hidden, s.Tab = hidden, tab })
+				HiddenPanes: last.Hidden, ConfigTab: last.Tab, HiddenLevels: last.Levels,
+				OnView: func(v tui.View) {
+					saveTUIState(func(s *tuiState) { s.Hidden, s.Tab, s.Levels = v.HiddenPanes, v.ConfigTab, v.HiddenLevels })
 				},
 				OnMouse: func(on bool) {
 					saveTUIState(func(s *tuiState) { s.Mouse = map[bool]string{true: "on", false: "off"}[on] })
@@ -105,6 +105,7 @@ type tuiState struct {
 	// The profile screen's view: the panes hidden, the config tab.
 	Hidden []string `json:"hiddenPanes,omitempty"`
 	Tab    string   `json:"configTab,omitempty"`
+	Levels []string `json:"hiddenLevels,omitempty"` // the log levels the views hide
 }
 
 func tuiStatePath() (string, error) {

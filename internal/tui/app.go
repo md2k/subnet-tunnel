@@ -22,6 +22,15 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/meter"
 )
 
+// View is what the TUI remembers of how it was left, besides the layout,
+// units and mouse: the profile screen's hidden panes and config tab, the
+// log levels hidden.
+type View struct {
+	HiddenPanes  []string
+	ConfigTab    string
+	HiddenLevels []string
+}
+
 // Options configure the TUI.
 type Options struct {
 	Source Source
@@ -42,7 +51,9 @@ type Options struct {
 	// time; OnView is called when they change (to remember them).
 	HiddenPanes []string
 	ConfigTab   string
-	OnView      func(hidden []string, tab string)
+	// HiddenLevels are the log levels the views hide (d, i, w, e).
+	HiddenLevels []string
+	OnView       func(View)
 	// Screen is the terminal; nil: this one. Tests pass a simulation.
 	Screen tcell.Screen
 	// Interval between status polls; 0: a second.
@@ -235,6 +246,11 @@ func newApp(ctx context.Context, quit context.CancelFunc, o Options) *app {
 		ui: make(chan func(), 64), started: make(chan struct{})}
 	a.bits = o.Units == config.UnitsBits
 	a.mouse = o.Mouse
+	for _, h := range o.HiddenLevels {
+		if i := slices.Index(levelNames, h); i >= 0 {
+			a.filter.hide[i] = true
+		}
+	}
 	a.tv.EnableMouse(a.mouse)
 
 	bar := func(bg tcell.Color) *tview.TextView {
