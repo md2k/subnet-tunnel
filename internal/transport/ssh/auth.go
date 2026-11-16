@@ -15,8 +15,6 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
-
-	"github.com/md2k/subnet-tunnel/internal/transport"
 )
 
 // auth is how subtun logs in: keys from the agent, then key files
@@ -197,7 +195,7 @@ func (l *lockedKey) unlock() (ssh.Signer, error) {
 		return s.(ssh.Signer), nil
 	}
 	for try := 0; try < 3; try++ {
-		pass, err := transport.Ask(l.ctx, fmt.Sprintf("Enter passphrase for key '%s': ", l.path), true)
+		pass, err := ask(l.ctx, fmt.Sprintf("Enter passphrase for key '%s': ", l.path), true)
 		if err != nil {
 			return nil, fmt.Errorf("the passphrase for %s: %w", l.path, err)
 		}

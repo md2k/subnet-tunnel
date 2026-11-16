@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/md2k/subnet-tunnel/internal/transport"
 )
 
 // hostConfig is how OpenSSH would connect to a host: ~/.ssh/config (with
@@ -38,8 +40,15 @@ type hostConfig struct {
 	aliveMax    int
 }
 
-// sshBinary is the OpenSSH client asked for the config (tests replace it).
+// sshBinary is the OpenSSH client asked for the config.
 var sshBinary = "ssh"
+
+// Replaced by tests: how a host's settings are found, and how questions are
+// asked.
+var (
+	resolveConfig = resolve
+	ask           = transport.Ask
+)
 
 // resolve asks ssh -G for host's settings, the target's own ones given as
 // ssh's flags so they win over ~/.ssh/config the same way.

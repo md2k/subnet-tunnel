@@ -72,7 +72,7 @@ func Connect(ctx context.Context, t Target, agents []agentbin.Binary, opts trans
 // connects to isn't known).
 func Endpoint(t Target) (string, error) {
 	ctx := context.Background()
-	c, err := resolve(ctx, t.Host, t.User, t.Port, t.Identity, t.Jump)
+	c, err := resolveConfig(ctx, t.Host, t.User, t.Port, t.Identity, t.Jump)
 	if err != nil {
 		return "", err
 	}
@@ -102,7 +102,7 @@ func resolveHop(ctx context.Context, hop string) (*hostConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ProxyJump %v", err)
 	}
-	return resolve(ctx, host, user, port, "", "")
+	return resolveConfig(ctx, host, user, port, "", "")
 }
 
 // conn is a logged-in SSH connection, through its jump hosts.
@@ -131,7 +131,7 @@ func (c *conn) close() {
 }
 
 func dial(ctx context.Context, t Target, log *slog.Logger) (*conn, error) {
-	dest, err := resolve(ctx, t.Host, t.User, t.Port, t.Identity, t.Jump)
+	dest, err := resolveConfig(ctx, t.Host, t.User, t.Port, t.Identity, t.Jump)
 	if err != nil {
 		return nil, err
 	}

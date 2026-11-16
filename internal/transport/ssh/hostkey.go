@@ -112,7 +112,7 @@ func (h *hostKeys) callback(addr string, remote net.Addr, key ssh.PublicKey) err
 		if ta, ok := remote.(*net.TCPAddr); ok && !ta.IP.IsUnspecified() && ta.IP.String() != h.c.hostname {
 			ip = " (" + ta.IP.String() + ")"
 		}
-		answer, aerr := transport.Ask(h.ctx, fmt.Sprintf("The authenticity of host '%s%s' can't be established.\n"+
+		answer, aerr := ask(h.ctx, fmt.Sprintf("The authenticity of host '%s%s' can't be established.\n"+
 			"%s key fingerprint is %s.\nAre you sure you want to continue connecting (yes/no)? ", host, ip, key.Type(), fp), false)
 		switch {
 		case errors.Is(aerr, transport.ErrNoTerminal):
