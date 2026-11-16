@@ -21,23 +21,24 @@ import (
 // Include, Match, Host patterns) applied by ssh -G, under what the target
 // sets. Without an ssh binary, OpenSSH's defaults.
 type hostConfig struct {
-	alias       string // the host as given
-	hostname    string
-	user        string
-	port        int
-	identities  []string // tried in order; missing files are skipped
-	certs       []string
-	jump        string // ProxyJump; "" or "none": none
-	proxyCmd    string // ProxyCommand; "" or "none": none
-	userKnown   []string
-	globalKnown []string
-	strict      string // StrictHostKeyChecking: ask, yes, no, accept-new
-	hashKnown   bool
-	idOnly      bool
-	agent       string // IdentityAgent; "": $SSH_AUTH_SOCK
-	timeout     time.Duration
-	alive       time.Duration // ServerAliveInterval; 0: off
-	aliveMax    int
+	alias        string // the host as given
+	hostname     string
+	user         string
+	port         int
+	identities   []string // tried in order; missing files are skipped
+	certs        []string
+	jump         string // ProxyJump; "" or "none": none
+	proxyCmd     string // ProxyCommand; "" or "none": none
+	userKnown    []string
+	globalKnown  []string
+	strict       string // StrictHostKeyChecking: ask, yes, no, accept-new
+	hashKnown    bool
+	idOnly       bool
+	agent        string   // IdentityAgent; "": $SSH_AUTH_SOCK
+	hostKeyAlgos []string // HostKeyAlgorithms, in order
+	timeout      time.Duration
+	alive        time.Duration // ServerAliveInterval; 0: off
+	aliveMax     int
 }
 
 // sshBinary is the OpenSSH client asked for the config.
@@ -54,6 +55,9 @@ var (
 // ssh's flags so they win over ~/.ssh/config the same way.
 func resolve(ctx context.Context, host, user string, port int, identity, jump string) (*hostConfig, error) {
 	args := []string{"-G"}
+	if f := os.Getenv("SUBTUN_SSH_CONFIG"); f != "" { // development: another config (ssh -F)
+		args = append(args, "-F", f)
+	}
 	if user != "" {
 		args = append(args, "-l", user)
 	}
@@ -121,6 +125,8 @@ func parseConfig(alias, out string) (*hostConfig, error) {
 			c.idOnly = val == "yes"
 		case "identityagent":
 			c.agent = val
+		case "hostkeyalgorithms":
+			c.hostKeyAlgos = strings.Split(val, ",")
 		case "connecttimeout":
 			if n, err := strconv.Atoi(val); err == nil {
 				c.timeout = time.Duration(n) * time.Second
@@ -207,6 +213,16 @@ func (c *hostConfig) expand() {
 			c.agent = a[0]
 		}
 	}
+}
+
+// sshCommand is the ssh command line that reaches the same host, for
+// hints.
+func (c *hostConfig) sshCommand() string {
+	cmd := "ssh "
+	if c.port != 22 {
+		cmd += "-p " + strconv.Itoa(c.port) + " "
+	}
+	return cmd + c.user + "@" + c.alias
 }
 
 // addr is host:port to dial.

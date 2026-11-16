@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -47,10 +48,43 @@ func newHostKeys(ctx context.Context, c *hostConfig, log *slog.Logger) (*hostKey
 	return h, nil
 }
 
-// algorithms are the host key types known_hosts has for addr, so the server
-// is asked for one of them (else it may offer another type of its keys,
-// which then looks like a changed key). None known: the defaults.
+// algorithms are the host key algorithms to ask the server for, in
+// OpenSSH's order (HostKeyAlgorithms): those known_hosts has keys of for
+// addr when it has any (else the server may offer another type of its
+// keys, which then looks like a changed key), all otherwise.
 func (h *hostKeys) algorithms(addr string) []string {
+	supported := map[string]bool{}
+	for _, a := range ssh.SupportedAlgorithms().HostKeys {
+		supported[a] = true
+	}
+	var base []string
+	for _, a := range h.c.hostKeyAlgos {
+		if supported[a] {
+			base = append(base, a)
+		}
+	}
+	known := h.knownAlgorithms(addr)
+	if len(known) == 0 {
+		return base // nil: x/crypto's own order
+	}
+	var both []string
+	for _, a := range base {
+		if known[a] {
+			both = append(both, a)
+		}
+	}
+	if len(both) > 0 {
+		return both
+	}
+	for a := range known {
+		both = append(both, a)
+	}
+	slices.Sort(both)
+	return both
+}
+
+// knownAlgorithms are the algorithms of the keys known_hosts has for addr.
+func (h *hostKeys) knownAlgorithms(addr string) map[string]bool {
 	if h.check == nil {
 		return nil
 	}
@@ -60,22 +94,16 @@ func (h *hostKeys) algorithms(addr string) []string {
 	if err := h.check(addr, &net.TCPAddr{IP: net.IPv4zero}, probe); !errors.As(err, &ke) || len(ke.Want) == 0 {
 		return nil
 	}
-	var algos []string
-	seen := map[string]bool{}
+	known := map[string]bool{}
 	for _, k := range ke.Want {
-		t := k.Key.Type()
-		names := []string{t}
-		if t == ssh.KeyAlgoRSA {
-			names = []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA}
-		}
-		for _, n := range names {
-			if !seen[n] {
-				seen[n] = true
-				algos = append(algos, n)
-			}
+		switch t := k.Key.Type(); t {
+		case ssh.KeyAlgoRSA:
+			known[ssh.KeyAlgoRSASHA512], known[ssh.KeyAlgoRSASHA256], known[ssh.KeyAlgoRSA] = true, true, true
+		default:
+			known[t] = true
 		}
 	}
-	return algos
+	return known
 }
 
 // callback checks the key a server at addr (host:port) sends.
@@ -106,7 +134,7 @@ func (h *hostKeys) callback(addr string, remote net.Addr, key ssh.PublicKey) err
 	switch h.c.strict {
 	case "yes":
 		return fmt.Errorf("the host key of %s (%s %s) isn't in known_hosts and StrictHostKeyChecking is yes: "+
-			"connect once with ssh %s to check and accept it", host, key.Type(), fp, h.c.alias)
+			"connect once with %s to check and accept it", host, key.Type(), fp, h.c.sshCommand())
 	case "ask":
 		ip := ""
 		if ta, ok := remote.(*net.TCPAddr); ok && !ta.IP.IsUnspecified() && ta.IP.String() != h.c.hostname {
@@ -117,7 +145,7 @@ func (h *hostKeys) callback(addr string, remote net.Addr, key ssh.PublicKey) err
 		switch {
 		case errors.Is(aerr, transport.ErrNoTerminal):
 			return fmt.Errorf("the host key of %s (%s %s) isn't in known_hosts and there's no terminal to ask on: "+
-				"connect once with ssh %s to check and accept it", host, key.Type(), fp, h.c.alias)
+				"connect once with %s to check and accept it", host, key.Type(), fp, h.c.sshCommand())
 		case aerr != nil:
 			return aerr
 		case !strings.EqualFold(answer, "yes"):

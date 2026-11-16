@@ -1,7 +1,7 @@
-# Local test setup for `subtun docker`.
+# Local test setup for `subtun up --docker` and `--ssh`.
 #
 #   docker compose -f test/dev/compose.yaml up -d
-#   build/subtun docker subtun-dev-target-1 --socks 127.0.0.1:1080
+#   build/subtun up --docker --create=false --name subtun-dev-target-1 --socks 127.0.0.1:1080
 #   curl --socks5-hostname 127.0.0.1:1080 http://web:8080/
 #   docker compose -f test/dev/compose.yaml down
 #
@@ -15,6 +15,13 @@
 #   hardened    read-only root, noexec /tmp and /dev/shm, non-root:
 #               the binary agent can't run, auto falls back to Python
 #   distroless  Python but no shell: auto goes straight to Python
+#
+# SSH targets, with `--profile ssh`, logging in with a throwaway key:
+#   ssh-keygen -t ed25519 -N "" -f build/ssh-test/id_ed25519
+#   sshd        published on 127.0.0.1:2222, user subtun; a jump host too
+#   sshd-inner  on the compose network only: reach it through sshd
+#   build/subtun up --ssh subtun@127.0.0.1:2222 -i build/ssh-test/id_ed25519 --socks 127.0.0.1:1080
+#   build/subtun up --ssh subtun@sshd-inner:2222 -J subtun@127.0.0.1:2222 -i build/ssh-test/id_ed25519 --socks 127.0.0.1:1080
 name: subtun-dev
 services:
   target:
@@ -53,3 +60,22 @@ services:
     profiles: [python]
     image: gcr.io/distroless/python3-debian12
     command: ["-c", "import time; time.sleep(10**9)"]
+
+  sshd:
+    profiles: [ssh]
+    image: lscr.io/linuxserver/openssh-server:latest
+    environment: &sshd-env
+      USER_NAME: subtun
+      PUBLIC_KEY_FILE: /keys/id_ed25519.pub
+      PASSWORD_ACCESS: "false"
+    volumes:
+      - ../../build/ssh-test:/keys:ro
+      - ./sshd-forwarding.sh:/custom-cont-init.d/forwarding.sh:ro
+    ports:
+      - "127.0.0.1:2222:2222"
+  sshd-inner:
+    profiles: [ssh]
+    image: lscr.io/linuxserver/openssh-server:latest
+    environment: *sshd-env
+    volumes:
+      - ../../build/ssh-test:/keys:ro

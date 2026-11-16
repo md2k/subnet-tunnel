@@ -114,9 +114,19 @@ func startUpTUI(srv *control.Server, ring *logring.Ring, configFile string, stop
 
 // lend has the terminal while sudo may ask for the password.
 func (u *upTUI) lend() privhelper.Lend {
+	return u.lendFor("for sudo; it comes back once the root helper runs")
+}
+
+// askLend has the terminal while a connect asks a question (an SSH host
+// key, a key's passphrase).
+func (u *upTUI) askLend() func(func()) {
+	return u.lendFor("for a question; it comes back once it's answered")
+}
+
+func (u *upTUI) lendFor(why string) func(func()) {
 	return func(f func()) {
 		u.term.Lend(func() {
-			fmt.Fprintln(u.out, "subtun: the terminal UI steps aside for sudo; it comes back once the root helper runs")
+			fmt.Fprintln(u.out, "subtun: the terminal UI steps aside "+why)
 			f()
 		})
 	}

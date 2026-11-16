@@ -60,19 +60,28 @@ func newAuth(ctx context.Context, c *hostConfig, log *slog.Logger) (*auth, error
 		}
 		fromFiles = append(fromFiles, s)
 	}
-	if c.idOnly { // the agent's keys only when a configured file is the same key
-		var kept []ssh.Signer
-		for _, s := range fromAgent {
-			if hasKey(fromFiles, s.PublicKey()) {
-				kept = append(kept, s)
+	// OpenSSH's order: the configured key files first (signed by the agent
+	// when it has the same key: no passphrase), then the agent's other keys
+	// (none with IdentitiesOnly). A server counts every key offered against
+	// its MaxAuthTries.
+	var all []ssh.Signer
+	for _, f := range fromFiles {
+		s := f
+		for _, a := range fromAgent {
+			if bytes.Equal(a.PublicKey().Marshal(), f.PublicKey().Marshal()) {
+				s = a
+				break
 			}
 		}
-		fromAgent = kept
-	}
-	var all []ssh.Signer
-	for _, s := range append(fromAgent, fromFiles...) {
 		if !hasKey(all, s.PublicKey()) {
 			all = append(all, s)
+		}
+	}
+	if !c.idOnly {
+		for _, s := range fromAgent {
+			if !hasKey(all, s.PublicKey()) {
+				all = append(all, s)
+			}
 		}
 	}
 	// Certificates first: a server trusting the CA takes them.
