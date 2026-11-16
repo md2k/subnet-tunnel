@@ -1023,6 +1023,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 			}
 		}()
 		mp.lend, markStop = ui.lend(), ui.stopping
+		ctx = transport.WithLend(ctx, mp.lend) // an SSH host key or passphrase question
 	}
 
 	// Rules an earlier session may have left (kill switch, a killed helper)

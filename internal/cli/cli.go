@@ -28,6 +28,7 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/transport"
 	"github.com/md2k/subnet-tunnel/internal/transport/docker"
 	"github.com/md2k/subnet-tunnel/internal/transport/k8s"
+	sshtr "github.com/md2k/subnet-tunnel/internal/transport/ssh"
 	"github.com/md2k/subnet-tunnel/internal/version"
 )
 
@@ -241,7 +242,8 @@ func newUpCmd(g *globalOpts) *cobra.Command {
 	cmd := &cobra.Command{
 		Use: `up [PROFILE [CIDR...]] [--profile NAME...]
   subtun up --k8s|--docker [--image IMAGE] [--name NAME] [CIDR...]
-  subtun up --k8s|--docker --create=false --name NAME|-l LABELS [CIDR...]`,
+  subtun up --k8s|--docker --create=false --name NAME|-l LABELS [CIDR...]
+  subtun up --ssh [USER@]HOST[:PORT] [-i KEY] [-J JUMP] [CIDR...]`,
 		Short: "Start a profile from the config file, several, or a target given here",
 		Long: `Start a named profile from the config file. Flags override the profile's
 values; CIDRs and --exclude given here are added to the profile's.
@@ -258,7 +260,10 @@ target, as flags):
             (--context, else its current context; -n, else its namespace).
   --docker  a Docker container, through the daemon (-H, $DOCKER_HOST, then
             the docker context).
-subtun creates the pod or container (--image, --name, --limits; --requests,
+  --ssh     a host, over SSH as ~/.ssh/config says (-i, -J on top): the
+            agent runs there as the login user. Keys and the SSH agent
+            only; a host key not yet in known_hosts is asked about.
+For --k8s and --docker, subtun creates the pod or container (--image, --name, --limits; --requests,
 and --network for Docker), starts its agent in it, creates it again if it
 goes, and deletes it on stop. With --create=false it uses an existing one
 instead, only starting its agent in it: --name, or -l (labels: a running,
@@ -281,11 +286,13 @@ Without a profile name or a target, lists the profiles.`,
   subtun up --k8s -n team-a -l app=subtun-gw 10.0.0.0/8 -x 10.1.0.0/16
   subtun up --docker --network dev_default 172.20.0.0/16
   subtun up --docker -l com.docker.compose.service=web --socks 127.0.0.1:1080
+  subtun up --ssh me@bastion.example.com 10.0.0.0/8
+  subtun up --ssh db-host -J me@bastion.example.com --socks 127.0.0.1:1080
   curl --socks5-hostname 127.0.0.1:1080 http://my-svc.team-a.svc.cluster.local`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if tf.given() {
 				if len(profiles) > 0 {
-					return errors.New("--profile and --k8s/--docker don't go together: a profile has its own target")
+					return errors.New("--profile and --k8s/--docker/--ssh don't go together: a profile has its own target")
 				}
 				sp, err := tf.spec(cmd.Flags(), args, s, g)
 				if err != nil {
@@ -465,6 +472,14 @@ func profileTarget(name string, tg config.Target, s *settings, g *globalOpts) (c
 			}, func() (string, error) {
 				return k8s.Endpoint(t)
 			}, release
+	case tg.SSH != nil:
+		user, host, port, _ := tg.SSH.Dest() // validated
+		t := sshtr.Target{Host: host, User: user, Port: port, Identity: config.ExpandHome(tg.SSH.Identity), Jump: tg.SSH.Jump}
+		return func(ctx context.Context, agents []agentbin.Binary, log *slog.Logger) (*transport.Carrier, error) {
+				return sshtr.Connect(ctx, t, agents, s.transport(g), log)
+			}, func() (string, error) {
+				return sshtr.Endpoint(t)
+			}, nil
 	default: // validated: there is one
 		d := tg.Docker
 		t := docker.Target{Host: d.Host, Context: d.Context, Create: d.Creates(), Name: d.Name, Selector: d.Selector,
@@ -591,7 +606,7 @@ func printPlan(w io.Writer, rp *routePlan, warns []string) {
 	for _, wn := range warns {
 		fmt.Fprintf(w, "warning: %s\n", wn)
 	}
-	fmt.Fprintf(w, "utun %s, MTU %d. The API server or Docker daemon address is excluded automatically when connecting.\n",
+	fmt.Fprintf(w, "utun %s, MTU %d. subtun's own connection (the API server, Docker daemon or SSH server) is excluded automatically when connecting.\n",
 		rp.opts.TunAddr, rp.opts.MTU)
 }
 

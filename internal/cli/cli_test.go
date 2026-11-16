@@ -97,14 +97,23 @@ func TestUpTarget(t *testing.T) {
 		{"up", "--k8s", "-l", "app=toolbox", "203.0.113.0/24", "--dry-run"},
 		{"up", "--docker", "--network", "dev_default", "--limits", "cpu=1", "203.0.113.0/24", "--dry-run"},
 		{"up", "--docker", "-l", "com.docker.compose.service=web", "203.0.113.0/24", "--dry-run"},
+		{"up", "--ssh", "me@192.0.2.10:2222", "203.0.113.0/24", "--dry-run"},
+		{"up", "--ssh", "192.0.2.10", "-J", "me@192.0.2.20", "-i", "~/.ssh/id_test", "203.0.113.0/24", "--dry-run"},
 	} {
 		if out, err := runCLI(t, args...); err != nil || !strings.Contains(out, "routes on the utun") {
 			t.Errorf("%v: %v\n%s", args, err, out)
 		}
 	}
 	for want, args := range map[string][]string{
-		"--k8s and --docker don't go together":                          {"up", "--k8s", "--docker", "--dry-run"},
-		"--profile and --k8s/--docker don't go together":                {"up", "--k8s", "--profile", "work", "--dry-run"},
+		"--k8s, --docker and --ssh don't go together":                   {"up", "--k8s", "--docker", "--dry-run"},
+		"--k8s, --docker and --ssh don't go together: one target":       {"up", "--docker", "--ssh", "h", "--dry-run"},
+		"--profile and --k8s/--docker/--ssh don't go together":          {"up", "--k8s", "--profile", "work", "--dry-run"},
+		"--name is for --k8s or --docker":                               {"up", "--ssh", "h", "--name", "x", "--dry-run"},
+		"--identity is for --ssh":                                       {"up", "--k8s", "-i", "k", "--dry-run"},
+		"--jump is for --ssh":                                           {"up", "--docker", "-J", "j", "--dry-run"},
+		`--ssh "me@": not [user@]host[:port]`:                           {"up", "--ssh", "me@", "--dry-run"},
+		`--ssh "h:99999": port 99999 isn't 1-65535`:                     {"up", "--ssh", "h:99999", "--dry-run"},
+		`--jump "a b": not [user@]host[:port]`:                          {"up", "--ssh", "h", "-J", "a b", "--dry-run"},
 		"--network is for --docker":                                     {"up", "--k8s", "--network", "n", "--dry-run"},
 		"--host is for --docker":                                        {"up", "--k8s", "-H", "tcp://h:2375", "--dry-run"},
 		"--namespace is for --k8s":                                      {"up", "--docker", "-n", "ops", "--dry-run"},
@@ -127,6 +136,8 @@ func TestUpTarget(t *testing.T) {
 		}
 	}
 	for want, tg := range map[string]config.Target{
+		"ssh me@db:2222":              {SSH: &config.SSHTarget{Host: "me@db", Port: 2222}},
+		"ssh bastion":                 {SSH: &config.SSHTarget{Host: "bastion"}},
 		"a pod subtun creates in ops": {K8s: &config.K8sTarget{Namespace: "ops"}},
 		"a pod subtun creates":        {K8s: &config.K8sTarget{}},
 		"pods in ops with app=x":      {K8s: &config.K8sTarget{Namespace: "ops", Selector: "app=x"}},
