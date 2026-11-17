@@ -19,8 +19,8 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/relay"
 )
 
-// Dialer opens outbound connections ("tcp", and "udp" for DNS). *net.Dialer
-// satisfies it.
+// Dialer opens outbound connections ("tcp", and "udp" for DNS and UDP
+// flows). *net.Dialer satisfies it.
 type Dialer interface {
 	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
 }
@@ -94,6 +94,9 @@ func handle(ctx context.Context, st *smux.Stream, cfg Config) {
 	case proto.CmdConnectTCP:
 	case proto.CmdDNS:
 		handleDNS(ctx, st, req, cfg)
+		return
+	case proto.CmdUDP:
+		handleUDP(ctx, st, req, cfg)
 		return
 	default:
 		_ = proto.WriteResponse(st, proto.Response{Status: proto.StatusBadRequest, Msg: "unsupported command"})

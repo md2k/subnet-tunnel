@@ -391,6 +391,14 @@ subtun cleans up the list and reports what it dropped: duplicates, routes alread
 broader route, and excludes that match nothing. Adjacent prefixes are merged. `--dry-run` prints
 the result.
 
+**What goes through.** TCP connections and UDP (QUIC, DNS to a server inside your routes, NTP,
+games and calls) to routed addresses go through the tunnel and leave from the target. A UDP flow
+(your program's address and port to one destination) is one stream to the agent, which sends from
+a socket of its own; a flow with no datagram either way for 2 minutes (15 s for DNS, port 53) is
+closed, and the next datagram opens a new one. `subtun status --connections` lists flows as `udp
+ADDR:PORT`. ICMP isn't carried (`ping` to a routed address gets no answer), nor is anything else
+over IP. The SOCKS proxy carries TCP only.
+
 ## Full tunnel
 
 Route `0.0.0.0/1` and `128.0.0.0/1` to send everything through the tunnel. The two halves are more
@@ -406,10 +414,10 @@ subtun up --k8s --context remote -n tools 0.0.0.0/1 128.0.0.0/1 --dns-domain . -
 - **The target must run outside this machine.** A pod in Docker Desktop, kind or minikube reaches the
   internet through this machine, so its traffic would loop back into the tunnel. subtun warns at
   start and cuts such loops (see [Routing loops](#routing-loops)), but those addresses won't work.
-- **DNS:** UDP and ICMP don't go through the tunnel yet, so a DNS server beyond your LAN isn't
-  reachable through it. Add `--dns-domain .` (or `dns.domains: ["."]`) to resolve every name through
-  the tunnel; list the cluster's own domain next to it when it is `cluster.local`, since `.` leaves
-  `.local` names alone ([DNS](#dns)).
+- **DNS:** a DNS server beyond your LAN is reached through the tunnel, from the target's network.
+  To resolve every name with the target's own resolver instead, add `--dns-domain .` (or
+  `dns.domains: ["."]`); list the cluster's own domain next to it when it is `cluster.local`, since
+  `.` leaves `.local` names alone ([DNS](#dns)). Ping (ICMP) to the internet gets no answer.
 - **IPv6:** subtun doesn't carry it yet, so in a full tunnel it blocks outgoing IPv6 (see
   [IPv6](#ipv6)); apps fall back to IPv4.
 - **Testing it:** a full tunnel also carries your remote shell or screen-sharing session. See
@@ -539,9 +547,6 @@ one's names start or stop going through its tunnel.
 **Limits.**
 - One DNS-capturing subtun at a time: a second one refuses to start, since it would take over the
   first one's rules.
-- If the fallback resolver is inside one of your routes, unmatched names fail: their UDP queries go
-  into the utun, which carries TCP only so far. `--dry-run` warns; exclude the resolver's address, or
-  match every name with `.` (names `.` leaves local still use the fallback).
 - If the helper itself is killed (`kill -9`), its rules stay and DNS for the captured servers stops
   working once subtun exits; subtun says so. The next subtun run with routes takes them over by
   itself (a SOCKS-only run only warns); `subtun cleanup` removes them without starting a session.

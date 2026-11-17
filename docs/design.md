@@ -108,9 +108,15 @@ app ──► SOCKS5 proxy  ───┘   smux streams    exec stdio   in the t
 - **Capture** (`internal/capture`, `internal/netstack`, `internal/tundev`). The root helper creates
   a utun interface (MTU 9000, address 198.18.249.1) with routes for the given CIDRs and passes its
   file descriptor to subtun. A gVisor stack on the utun runs in promiscuous mode with spoofing, so
-  it terminates TCP connections to any routed destination. Each connection is dialed through the
-  tunnel *before* the handshake with the local app completes: an unreachable destination gets a
-  TCP reset, as on a real network. TCP settings follow tun2socks (SACK, RACK, no Nagle delay).
+  it terminates TCP connections and UDP flows to any routed destination. Each connection is dialed
+  through the tunnel *before* the handshake with the local app completes: an unreachable
+  destination gets a TCP reset, as on a real network. TCP settings follow tun2socks (SACK, RACK, no
+  Nagle delay). A UDP flow (the app's address and port to one destination) gets its endpoint at its
+  first datagram, which waits there while the flow is dialed (`CmdUDP`: one stream, datagrams
+  framed by a 16-bit length both ways; the agent sends from a connected socket of its own and
+  ignores ICMP errors for single datagrams); it closes after 2 minutes without a datagram either
+  way (15 s for port 53). The loop guard counts UDP flows apart from TCP connections. ICMP isn't
+  carried.
   SOCKS and capture call the same `DialContext` on the tunnel client; the agent can't tell them
   apart.
 - **Routes** (`internal/routes`). Routes and excludes combine like sshuttle's: for any address the
@@ -124,7 +130,7 @@ app ──► SOCKS5 proxy  ───┘   smux streams    exec stdio   in the t
   switch guards the final routes, so it never blocks DHCP, Bonjour or link-local either. Before
   connecting, routes covering subtun's utun address or the default gateway are refused and
   overlaps with local interface networks are reported. At
-  connect time the API server or Docker daemon address is excluded automatically. Details:
+  connect time the API server, Docker daemon or SSH server address is excluded automatically. Details:
   [Configuration](config.md).
 - **Routing loops.** A target on this machine (Docker Desktop, kind, minikube) reaches the internet
   through this machine. Route internet addresses through it, and its connections come back into the
@@ -342,8 +348,8 @@ dns:
   query leaves from the utun's address. pf still redirects it to subtun, but macOS sends subtun's
   answer to that address out of the utun, since the address is also the point-to-point peer. The
   stack hands packets for the utun's own address straight back to the system, so the answer
-  reaches the app. Fallback queries to such a server still fail: they are UDP into the utun, which
-  carries TCP only so far.
+  reaches the app. Fallback queries to such a server go through the tunnel as UDP, so they work
+  too.
 - **Answers outside the routes** (`dns.unrouted`). A tunnel answer with private addresses no route
   covers (a remote cluster's resolver answered `github.com` with `100.64.0.0/10`) is kept with a
   warning (`warn`, default), replaced by the fallback's answer (`fallback`), or rewritten without
@@ -396,8 +402,7 @@ Configuration: [Kill switch](config.md#kill-switch), [IPv6](config.md#ipv6).
 - **Full tunnel** works through route planning: route `0.0.0.0/1` and `128.0.0.0/1`. The real
   default route stays untouched, the LAN stays local and subtun's own connection is excluded. DNS
   follows with `dns.domains: ["."]`. The target must be outside this machine (see
-  [Routing loops](#architecture)), and UDP and ICMP to the internet don't pass, since the utun
-  carries TCP only so far.
+  [Routing loops](#architecture)). TCP and UDP to the internet go through the tunnel; ICMP doesn't.
 - **Kill switch** (`killSwitch.mode: on | lockdown`): if subtun dies, its routes vanish with the
   utun, and that traffic would fall back to the normal default route: a leak. pf rules allow traffic
   to the guarded prefixes only through subtun's utun, and when the tunnel goes away, block rules
@@ -945,8 +950,10 @@ rest (the probe now reports `uname -s`, so a host that isn't Linux gets the Pyth
   tunnel's routes send into the tunnel that is down. The first connection is made before the
   capture starts; a reconnect that needs the plugin again can't reach its login service.
 - **IPv6 DNS servers** are not captured yet (IPv4 only, like sshuttle with `--disable-ipv6`).
-- **UDP through the tunnel:** a fallback resolver inside a routed CIDR fails, because the utun
-  carries TCP only so far.
+- **ICMP through the tunnel** (ping, traceroute's probes, path MTU messages from beyond the target):
+  not carried. An agent-side ping needs a raw or unprivileged ICMP socket in the target, which pods
+  rarely allow.
+- **UDP through the SOCKS proxy** (SOCKS5 UDP ASSOCIATE): not done; the capture carries UDP.
 - **Docker transport upload** is ~25 % below Kubernetes on the same Mac (147 vs 193 MB/s through
   utun). Candidate: one write per smux frame straight onto the hijacked Docker connection, where
   the Kubernetes path batches through client-go.

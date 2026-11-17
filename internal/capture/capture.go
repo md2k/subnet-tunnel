@@ -27,8 +27,8 @@ import (
 const (
 	// DefaultMTU: 9000 more than doubled upload in the October utun
 	// measurements (the cost is per packet). It only applies between the
-	// kernel and our stack; the tunnel carries TCP streams, so nothing is
-	// fragmented.
+	// kernel and our stack; the tunnel carries TCP streams and UDP datagrams
+	// (whole), so nothing is fragmented in it.
 	DefaultMTU = 9000
 	// DefaultTunAddr is the utun's own (point-to-point) address.
 	// 198.18.0.0/15 is reserved for benchmarking (RFC 2544): real networks,

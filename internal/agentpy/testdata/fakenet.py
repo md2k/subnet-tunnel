@@ -87,4 +87,31 @@ def dns_connect(server, kind, timeout):
     return a
 
 
+def _udp_echo(s):
+    # Answers each datagram with "re:" + it (an empty one too), until the
+    # agent shuts its end.
+    try:
+        while True:
+            data = s.recv(65535)
+            s.send(b"re:" + data)
+    except OSError:
+        pass
+    finally:
+        s.close()
+
+
+_UDP = {"dns.svc:53": _udp_echo}
+
+
+def udp_dial(host, port):
+    handler = _UDP.get("%s:%d" % (host, port))
+    if handler is None:
+        raise ConnectionRefusedError(errno.ECONNREFUSED, "connection refused")
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+    t = threading.Thread(target=handler, args=(b,))
+    t.daemon = True
+    t.start()
+    return a
+
+
 main()

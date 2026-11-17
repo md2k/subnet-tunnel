@@ -1,5 +1,5 @@
-// Package netstack terminates captured TCP connections in a userspace
-// TCP/IP stack (gVisor) and opens each one through the tunnel.
+// Package netstack terminates captured TCP connections and UDP flows in a
+// userspace TCP/IP stack (gVisor) and opens each one through the tunnel.
 //
 // Packets come from a Device (the utun interface on macOS). The stack runs
 // in promiscuous mode with spoofing on, so it accepts connections to any
@@ -32,6 +32,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/waiter"
 
 	"github.com/md2k/subnet-tunnel/internal/relay"
@@ -78,6 +79,9 @@ type Options struct {
 	// OnRefuse is told about each connection the loop guard refuses
 	// (status counts them); nil: nothing.
 	OnRefuse func(dst string)
+	// UDPIdle closes a UDP flow without a datagram either way for this
+	// long. 0: 2 minutes, 15 s for DNS (port 53).
+	UDPIdle time.Duration
 }
 
 const (
@@ -104,8 +108,8 @@ type Stack struct {
 	once   sync.Once
 }
 
-// New starts a stack on dev and forwards every captured TCP connection
-// through dialer. Close stops it and closes dev.
+// New starts a stack on dev and forwards every captured TCP connection and
+// UDP flow through dialer. Close stops it and closes dev.
 func New(dev Device, dialer Dialer, opts Options) (*Stack, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
@@ -129,7 +133,7 @@ func New(dev Device, dialer Dialer, opts Options) (*Stack, error) {
 
 	s := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
 	})
 	if err := tune(s); err != nil {
 		s.Close()
@@ -162,6 +166,7 @@ func New(dev Device, dialer Dialer, opts Options) (*Stack, error) {
 	}
 	fwd := tcp.NewForwarder(s, 0, maxInFlight, st.forward)
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, fwd.HandlePacket)
+	s.SetTransportProtocolHandler(udp.ProtocolNumber, udp.NewForwarder(s, st.forwardUDP).HandlePacket)
 
 	st.wg.Add(2)
 	go func() { defer st.wg.Done(); st.inbound(cancel) }()

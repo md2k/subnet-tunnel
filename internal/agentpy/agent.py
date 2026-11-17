@@ -34,7 +34,8 @@ MAX_FRAME = 65535
 KEEPALIVE = 10  # seconds; the client drops the session after 30 s of silence
 
 # Stream request/response (big-endian, see internal/proto).
-CMD_CONNECT, CMD_DNS = 1, 2
+CMD_CONNECT, CMD_DNS, CMD_UDP = 1, 2, 3
+MAX_DATAGRAM = 65535
 ST_OK, ST_FAILURE, ST_REFUSED, ST_UNREACHABLE, ST_TIMEOUT, ST_DNS, ST_BAD_REQUEST = range(7)
 MAX_ADDR = 512
 MAX_MSG = 512
@@ -216,10 +217,11 @@ class Stream(object):
         return data
 
     def read_exact(self, n, timeout):
+        """n bytes; EOFError at EOF; timeout None waits as long as it takes."""
         out = b""
-        deadline = time.time() + timeout
+        deadline = None if timeout is None else time.time() + timeout
         while len(out) < n:
-            chunk = self.read(n - len(out), max(0.0, deadline - time.time()))
+            chunk = self.read(n - len(out), None if deadline is None else max(0.0, deadline - time.time()))
             if not chunk:
                 raise EOFError("stream closed")
             out += chunk
@@ -319,6 +321,9 @@ def handle(st):
         if cmd == CMD_DNS:
             handle_dns(st, addr)
             return
+        if cmd == CMD_UDP:
+            handle_udp(st, addr)
+            return
         if cmd != CMD_CONNECT:
             reply(st, ST_BAD_REQUEST, "unsupported command")
             return
@@ -359,6 +364,77 @@ def handle_dns(st, addr):
         return
     reply(st, ST_OK)
     st.write(struct.pack(">H", len(answer)) + answer)
+
+
+def udp_dial(host, port):
+    family, kind, proto, _, sockaddr = socket.getaddrinfo(host, port, 0, socket.SOCK_DGRAM)[0]
+    sock = socket.socket(family, kind, proto)
+    sock.connect(sockaddr)
+    return sock
+
+
+def handle_udp(st, addr):
+    """One UDP flow: framed datagrams from the stream go to addr from a socket
+    of our own, and what comes back goes into the stream, until subtun closes
+    the stream. An ICMP "port unreachable" doesn't end the flow."""
+    try:
+        host, port = split_host_port(addr)
+        sock = udp_dial(host, port)
+    except Exception as e:
+        log("DEBUG", "udp dial failed", stream=st.sid, addr=addr, err=e)
+        reply(st, status_for(e), "udp %s: %s" % (addr, e))
+        return
+    sock.settimeout(1.0)  # the reader checks for the end at least this often
+    counts = {"up": 0, "down": 0}
+    start = time.time()
+    closing = threading.Event()
+
+    def sock_to_stream():
+        try:
+            while True:
+                try:
+                    data = sock.recv(MAX_DATAGRAM)
+                except ConnectionRefusedError:
+                    continue  # an ICMP error for an earlier datagram
+                except socket.timeout:
+                    if closing.is_set():
+                        break
+                    continue
+                if closing.is_set():
+                    break  # after shutdown recv returns b"" for ever
+                st.write(struct.pack(">H", len(data)) + data)
+                counts["down"] += len(data)
+        except Exception:
+            if not closing.is_set():
+                st.kill()
+
+    t = threading.Thread(target=sock_to_stream)
+    t.daemon = True
+    try:
+        reply(st, ST_OK)
+        t.start()
+        while True:
+            try:
+                n, = struct.unpack(">H", st.read_exact(2, None))
+                data = st.read_exact(n, None) if n else b""
+            except (EOFError, IOError):
+                break
+            try:
+                sock.send(data)
+            except (ConnectionRefusedError, OSError):
+                pass  # dropped, as UDP would
+            counts["up"] += n
+    finally:
+        closing.set()
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        if t.is_alive():
+            t.join(5)
+        sock.close()
+    log("DEBUG", "udp flow closed", stream=st.sid, up=counts["up"], down=counts["down"],
+        dur="%.3fs" % (time.time() - start))
 
 
 def is_ip(s):

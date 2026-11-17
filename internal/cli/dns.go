@@ -81,23 +81,6 @@ func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
 		opts.Fallback = []netip.AddrPort{ap}
 	}
 
-	// Unmatched names leave over UDP; inside a routed CIDR that UDP would go
-	// into the utun, which only carries TCP so far.
-	fallback := opts.Fallback
-	if fallback == nil {
-		for _, a := range opts.Servers {
-			fallback = append(fallback, netip.AddrPortFrom(a, 53))
-		}
-	}
-	for _, ap := range fallback {
-		if rp == nil {
-			break
-		}
-		if p, ok := rp.plan.Routed(ap.Addr()); ok {
-			notes = append(notes, fmt.Sprintf("fallback DNS server %s is inside the routed %s: names not matched will fail (UDP isn't carried through the tunnel yet); exclude it (-x %s) or match all names (--dns-domain .)",
-				ap.Addr(), p, ap.Addr()))
-		}
-	}
 	return opts, notes, nil
 }
 
