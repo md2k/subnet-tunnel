@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -24,6 +25,7 @@ import (
 type fakeNet struct {
 	mu       sync.Mutex
 	handlers map[string]func(net.Conn)
+	wrap     map[string]func(net.Conn) net.Conn // the agent's end, by the same key
 	dialed   []string
 }
 
@@ -35,13 +37,53 @@ func (f *fakeNet) DialContext(_ context.Context, network, addr string) (net.Conn
 	f.mu.Lock()
 	f.dialed = append(f.dialed, addr)
 	h, ok := f.handlers[addr]
+	wrap := f.wrap[addr]
 	f.mu.Unlock()
 	if !ok {
 		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
 	}
 	local, remote := testutil.Pair()
 	go h(remote)
+	if wrap != nil {
+		return wrap(local), nil
+	}
 	return local, nil
+}
+
+// logBuf collects the agent's log lines.
+type logBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// waitLine waits for a log line containing all of parts and returns it.
+func (l *logBuf) waitLine(t *testing.T, parts ...string) string {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+	lines:
+		for _, line := range strings.Split(l.String(), "\n") {
+			for _, p := range parts {
+				if !strings.Contains(line, p) {
+					continue lines
+				}
+			}
+			return line
+		}
+	}
+	t.Fatalf("no log line with %q in:\n%s", parts, l.String())
+	return ""
 }
 
 func echo(c net.Conn) {
@@ -52,11 +94,28 @@ func echo(c net.Conn) {
 // startSession wires a tunnel client to an agent over an in-memory carrier.
 func startSession(t *testing.T, fn *fakeNet, opts tunnel.Options, agentSum string) (*tunnel.Client, error) {
 	t.Helper()
+	return startSessionCfg(t, agent.Config{Version: "test", SHA256: agentSum, Dialer: fn, ResolvConf: "testdata/resolv.conf"}, opts)
+}
+
+// startSessionLog is startSession with the agent's debug log collected.
+func startSessionLog(t *testing.T, fn *fakeNet) (*tunnel.Client, *logBuf) {
+	t.Helper()
+	logs := &logBuf{}
+	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	c, err := startSessionCfg(t, agent.Config{Version: "test", Dialer: fn, Logger: log}, tunnel.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, logs
+}
+
+func startSessionCfg(t *testing.T, cfg agent.Config, opts tunnel.Options) (*tunnel.Client, error) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	clientEnd, agentEnd := testutil.Pair()
 	done := make(chan error, 1)
 	go func() {
-		done <- agent.Serve(ctx, agentEnd, agent.Config{Version: "test", SHA256: agentSum, Dialer: fn, ResolvConf: "testdata/resolv.conf"})
+		done <- agent.Serve(ctx, agentEnd, cfg)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -265,4 +324,105 @@ func TestUDPFlow(t *testing.T) {
 	if _, err := c.DialContext(context.Background(), "ip4:icmp", "x:1"); err == nil {
 		t.Error("an unknown network was accepted")
 	}
+}
+
+// readErr is what a read on a connected UDP socket returns after an ICMP
+// error for an earlier datagram.
+func readErr(errno syscall.Errno) error {
+	return &net.OpError{Op: "read", Net: "udp", Err: os.NewSyscallError("read", errno)}
+}
+
+// errConn is the agent's UDP socket with reads that fail: first with errs,
+// one per read, then normally; with forever set, every read fails until the
+// socket is closed.
+type errConn struct {
+	net.Conn
+	mu      sync.Mutex
+	errs    []error
+	forever error
+	closed  bool
+}
+
+func (c *errConn) Read(b []byte) (int, error) {
+	c.mu.Lock()
+	switch {
+	case c.closed:
+		c.mu.Unlock()
+		return 0, net.ErrClosed
+	case c.forever != nil:
+		c.mu.Unlock()
+		return 0, c.forever
+	case len(c.errs) > 0:
+		err := c.errs[0]
+		c.errs = c.errs[1:]
+		c.mu.Unlock()
+		return 0, err
+	}
+	c.mu.Unlock()
+	return c.Conn.Read(b)
+}
+
+func (c *errConn) Close() error {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+	return c.Conn.Close()
+}
+
+// An ICMP error for one datagram doesn't end the flow: the agent logs it and
+// carries on, and says why the flow ended when it does.
+func TestUDPFlowSurvivesReadErrors(t *testing.T) {
+	fn := &fakeNet{
+		handlers: map[string]func(net.Conn){"udp/quic.svc:443": udpEcho},
+		wrap: map[string]func(net.Conn) net.Conn{"udp/quic.svc:443": func(c net.Conn) net.Conn {
+			return &errConn{Conn: c, errs: []error{readErr(syscall.EHOSTUNREACH), readErr(syscall.EMSGSIZE), readErr(syscall.EHOSTUNREACH)}}
+		}},
+	}
+	c, logs := startSessionLog(t, fn)
+	conn, err := c.DialContext(context.Background(), "udp", "quic.svc:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, proto.MaxDatagramLen)
+	for _, d := range []string{"initial", "handshake"} {
+		if _, err := conn.Write([]byte(d)); err != nil {
+			t.Fatal(err)
+		}
+		n, err := conn.Read(buf)
+		if err != nil || string(buf[:n]) != "re:"+d {
+			t.Fatalf("%q after read errors: got %q, %v", d, buf[:n], err)
+		}
+	}
+	logs.waitLine(t, "udp flow error", "no route to host")
+	logs.waitLine(t, "udp flow error", "message too long")
+	_ = conn.Close()
+	line := logs.waitLine(t, "udp flow closed", "reason=")
+	if !strings.Contains(line, "no route to host (2)") || !strings.Contains(line, "message too long (1)") {
+		t.Errorf("the closing line doesn't count the errors: %s", line)
+	}
+}
+
+// A socket that only fails ends the flow after a while, and subtun hears of
+// it (the stream ends) rather than waiting on a flow the agent dropped.
+func TestUDPFlowEndsWhenItsSocketKeepsFailing(t *testing.T) {
+	fn := &fakeNet{
+		handlers: map[string]func(net.Conn){"udp/dead.svc:9": udpEcho},
+		wrap: map[string]func(net.Conn) net.Conn{"udp/dead.svc:9": func(c net.Conn) net.Conn {
+			return &errConn{Conn: c, forever: readErr(syscall.ENETUNREACH)}
+		}},
+	}
+	c, logs := startSessionLog(t, fn)
+	conn, err := c.DialContext(context.Background(), "udp", "dead.svc:9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_, err = conn.Read(make([]byte, 100))
+	var ne net.Error
+	if err == nil || errors.As(err, &ne) && ne.Timeout() {
+		t.Fatalf("read: %v, want the flow ended by the agent", err)
+	}
+	logs.waitLine(t, "udp flow closed", "reason=", "network is unreachable")
 }
