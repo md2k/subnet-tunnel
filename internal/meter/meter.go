@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -69,10 +70,19 @@ type Counts struct {
 // ConnInfo is one open connection.
 type ConnInfo struct {
 	Dst    string    `json:"dst"`
+	Proto  string    `json:"proto,omitempty"` // "udp" for a UDP flow; "": TCP
 	Via    string    `json:"via"`
 	Opened time.Time `json:"opened"`
 	Up     uint64    `json:"bytesUp"`
 	Down   uint64    `json:"bytesDown"`
+}
+
+// Label is the destination for people: "udp ADDR:PORT" for a UDP flow.
+func (c ConnInfo) Label() string {
+	if c.Proto != "" {
+		return c.Proto + " " + c.Dst
+	}
+	return c.Dst
 }
 
 // Counts returns the totals.
@@ -103,7 +113,7 @@ func (m *Meter) Conns() []ConnInfo {
 	m.mu.Lock()
 	out := make([]ConnInfo, 0, len(m.conns))
 	for _, c := range m.conns {
-		out = append(out, ConnInfo{Dst: c.dst, Via: c.via, Opened: c.opened, Up: c.up.Load(), Down: c.down.Load()})
+		out = append(out, ConnInfo{Dst: c.dst, Proto: c.proto, Via: c.via, Opened: c.opened, Up: c.up.Load(), Down: c.down.Load()})
 	}
 	m.mu.Unlock()
 	slices.SortFunc(out, func(a, b ConnInfo) int { return a.Opened.Compare(b.Opened) })
@@ -156,6 +166,9 @@ func (d dialer) DialContext(ctx context.Context, network, addr string) (net.Conn
 		return nil, err
 	}
 	conn := &Conn{Conn: c, m: d.m, dst: addr, via: d.via, opened: time.Now()}
+	if strings.HasPrefix(network, "udp") {
+		conn.proto = "udp"
+	}
 	d.m.mu.Lock()
 	d.m.next++
 	conn.id = d.m.next
@@ -171,6 +184,7 @@ type Conn struct {
 	m        *Meter
 	id       uint64
 	dst, via string
+	proto    string // "udp", or "" for TCP
 	opened   time.Time
 	up, down atomic.Uint64
 	once     sync.Once

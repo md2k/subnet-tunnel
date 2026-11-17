@@ -7,7 +7,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -20,6 +22,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 
 	"github.com/md2k/subnet-tunnel/internal/testutil"
 )
@@ -89,7 +92,7 @@ func setupDialer(t *testing.T, dialer Dialer, opts Options) *stack.Stack {
 	t.Helper()
 	client := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
 	})
 	cep := channel.New(outQueueLen, testMTU, "")
 	if err := client.CreateNIC(1, cep); err != nil {
@@ -203,5 +206,68 @@ func TestUnreachableDestinationIsRefused(t *testing.T) {
 	var oe *net.OpError
 	if !errors.As(err, &oe) || time.Since(start) > 3*time.Second {
 		t.Fatalf("got %v after %v, want a prompt refusal", err, time.Since(start))
+	}
+}
+
+// udpEcho answers each datagram with "re:" + it.
+func udpEcho(c net.Conn) {
+	defer c.Close()
+	buf := make([]byte, 65535)
+	for {
+		n, err := c.Read(buf)
+		if err != nil {
+			return
+		}
+		if _, err := c.Write(append([]byte("re:"), buf[:n]...)); err != nil {
+			return
+		}
+	}
+}
+
+// An application's UDP datagrams become a flow through the tunnel, the
+// answers come back from the destination's address, and the flow closes
+// once idle; the next datagram opens a new one.
+func TestUDPFlowThroughStack(t *testing.T) {
+	var ended sync.WaitGroup
+	var opened atomic.Int32
+	handler := func(c net.Conn) {
+		opened.Add(1)
+		udpEcho(c)
+		ended.Done()
+	}
+	ended.Add(2)
+	client := setupWith(t, map[string]func(net.Conn){"10.1.2.3:53": handler}, Options{DialTimeout: 5 * time.Second, UDPIdle: 300 * time.Millisecond})
+	conn, err := gonet.DialUDP(client, nil, &tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4([4]byte{10, 1, 2, 3}), Port: 53}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	buf := make([]byte, 65535)
+	exchange := func(d string) {
+		t.Helper()
+		if _, err := conn.Write([]byte(d)); err != nil {
+			t.Fatal(err)
+		}
+		n, err := conn.Read(buf)
+		if err != nil || string(buf[:n]) != "re:"+d {
+			t.Fatalf("%q: got %q %v", d, buf[:n], err)
+		}
+	}
+	exchange("query")
+	exchange("")
+	exchange(strings.Repeat("big", 2500)) // 7.5 KB, under the 9000 MTU
+	time.Sleep(800 * time.Millisecond)    // idle: the flow closes
+	exchange("again")                     // a new flow
+	if n := opened.Load(); n != 2 {
+		t.Errorf("%d flows opened, want 2 (one closed when idle)", n)
+	}
+	time.Sleep(800 * time.Millisecond)
+	done := make(chan struct{})
+	go func() { ended.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Error("an idle flow wasn't closed")
 	}
 }

@@ -211,3 +211,58 @@ func TestDoneOnCarrierLoss(t *testing.T) {
 		t.Fatal("Done not closed after carrier loss")
 	}
 }
+
+// udpEcho answers each datagram with "re:" + it, as a UDP server would.
+func udpEcho(c net.Conn) {
+	defer c.Close()
+	buf := make([]byte, 65535)
+	for {
+		n, err := c.Read(buf)
+		if err != nil {
+			return
+		}
+		if _, err := c.Write(append([]byte("re:"), buf[:n]...)); err != nil {
+			return
+		}
+	}
+}
+
+// A UDP flow through the agent keeps datagram boundaries both ways (an empty
+// datagram too, and a large one); closing it ends the agent's socket; an
+// unreachable destination is refused at the dial.
+func TestUDPFlow(t *testing.T) {
+	ended := make(chan struct{})
+	fn := &fakeNet{handlers: map[string]func(net.Conn){"udp/dns.svc:53": func(c net.Conn) { udpEcho(c); close(ended) }}}
+	c, err := startSession(t, fn, tunnel.Options{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := c.DialContext(context.Background(), "udp", "dns.svc:53")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, proto.MaxDatagramLen)
+	for _, d := range [][]byte{[]byte("query"), {}, bytes.Repeat([]byte("q"), 60000)} {
+		if _, err := conn.Write(d); err != nil {
+			t.Fatal(err)
+		}
+		n, err := conn.Read(buf)
+		if err != nil || !bytes.Equal(buf[:n], append([]byte("re:"), d...)) {
+			t.Fatalf("datagram of %d bytes: got %d bytes, %v", len(d), n, err)
+		}
+	}
+	_ = conn.Close()
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Error("the agent kept the flow's socket after the stream closed")
+	}
+	var de *proto.DialError
+	if _, err := c.DialContext(context.Background(), "udp", "nowhere.svc:53"); !errors.As(err, &de) || de.Status != proto.StatusRefused {
+		t.Errorf("unknown destination: %v", err)
+	}
+	if _, err := c.DialContext(context.Background(), "ip4:icmp", "x:1"); err == nil {
+		t.Error("an unknown network was accepted")
+	}
+}

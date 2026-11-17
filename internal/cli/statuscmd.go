@@ -272,7 +272,7 @@ func writeStatus(w io.Writer, is instanceStatus, now time.Time) {
 		}
 		fmt.Fprintf(w, "  open connections through %s:\n", label)
 		for _, c := range tc.Conns {
-			fmt.Fprintf(w, "    %-28s %-5s %8s  up %s, down %s\n", c.Dst, c.Via, ago(now, c.Opened), meter.Bytes(c.Up), meter.Bytes(c.Down))
+			fmt.Fprintf(w, "    %-28s %-5s %8s  up %s, down %s\n", c.Label(), c.Via, ago(now, c.Opened), meter.Bytes(c.Up), meter.Bytes(c.Down))
 		}
 	}
 }

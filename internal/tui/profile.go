@@ -281,7 +281,7 @@ func (a *app) renderProfile(now time.Time) {
 		a.profConns.SetCell(0, c, tview.NewTableCell(h+"   ").SetTextColor(tcell.ColorGray))
 	}
 	for i, c := range conns {
-		for col, text := range []string{tview.Escape(c.Dst), c.Via, short(now.Sub(c.Opened)), meter.Bytes(c.Up), meter.Bytes(c.Down)} {
+		for col, text := range []string{tview.Escape(c.Label()), c.Via, short(now.Sub(c.Opened)), meter.Bytes(c.Up), meter.Bytes(c.Down)} {
 			a.profConns.SetCell(i+1, col, tview.NewTableCell(text+"   "))
 		}
 	}

@@ -5,7 +5,7 @@
 // stream opened by subtun carries one Request and the agent answers with one
 // Response. For CmdConnectTCP the stream then is a raw byte pipe to the
 // connection the agent opened; for CmdDNS it carries one query and one
-// answer.
+// answer; for CmdUDP, datagrams both ways.
 package proto
 
 import (
@@ -49,7 +49,15 @@ const (
 	// After the request subtun writes the query, framed by WriteDNS; on
 	// StatusOK the agent writes the answer the same way and closes the stream.
 	CmdDNS Cmd = 2
+	// CmdUDP relays the datagrams of one UDP flow: the agent sends them to
+	// Addr from a socket of its own and returns what comes back. After
+	// StatusOK both sides write datagrams framed by WriteDatagram, until
+	// subtun closes the stream (the flow went idle) or the session ends.
+	CmdUDP Cmd = 3
 )
+
+// MaxDatagramLen bounds a framed datagram: a UDP payload fits in it.
+const MaxDatagramLen = 65535
 
 // ResolverSystem as the Addr of a CmdDNS request: the target's own resolver.
 const ResolverSystem = "-"
@@ -276,6 +284,36 @@ func ReadDNS(r io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	return msg, nil
+}
+
+// WriteDatagram writes one datagram, framed by a uint16 length (0 is a
+// valid, empty datagram), in a single write.
+func WriteDatagram(w io.Writer, b []byte) error {
+	if len(b) > MaxDatagramLen {
+		return fmt.Errorf("datagram of %d bytes", len(b))
+	}
+	buf := make([]byte, 0, 2+len(b))
+	buf = binary.BigEndian.AppendUint16(buf, uint16(len(b)))
+	buf = append(buf, b...)
+	_, err := w.Write(buf)
+	return err
+}
+
+// ReadDatagram reads one framed datagram into buf (MaxDatagramLen bytes is
+// always enough) and returns its length; a longer one is an error.
+func ReadDatagram(r io.Reader, buf []byte) (int, error) {
+	var hdr [2]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return 0, err
+	}
+	n := int(binary.BigEndian.Uint16(hdr[:]))
+	if n > len(buf) {
+		return 0, fmt.Errorf("datagram of %d bytes for a %d-byte buffer", n, len(buf))
+	}
+	if _, err := io.ReadFull(r, buf[:n]); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // DialError is a failed Request as reported by the agent.

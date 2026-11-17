@@ -102,3 +102,26 @@ func TestDNSFraming(t *testing.T) {
 		t.Error("truncated message read")
 	}
 }
+
+// Datagrams keep their boundaries; an empty one is a datagram too.
+func TestDatagram(t *testing.T) {
+	var b bytes.Buffer
+	for _, d := range [][]byte{[]byte("one"), {}, bytes.Repeat([]byte("x"), MaxDatagramLen)} {
+		if err := WriteDatagram(&b, d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	buf := make([]byte, MaxDatagramLen)
+	for _, want := range []int{3, 0, MaxDatagramLen} {
+		if n, err := ReadDatagram(&b, buf); err != nil || n != want {
+			t.Fatalf("read %d %v, want %d", n, err, want)
+		}
+	}
+	if err := WriteDatagram(&b, make([]byte, MaxDatagramLen+1)); err == nil {
+		t.Error("too long accepted")
+	}
+	_ = WriteDatagram(&b, []byte("12345"))
+	if _, err := ReadDatagram(&b, make([]byte, 4)); err == nil {
+		t.Error("a datagram bigger than the buffer was read")
+	}
+}

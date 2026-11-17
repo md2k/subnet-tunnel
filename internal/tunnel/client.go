@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/xtaci/smux"
@@ -90,12 +91,16 @@ func (c *Client) Done() <-chan struct{} { return c.sess.CloseChan() }
 // Close ends the session and every stream in it.
 func (c *Client) Close() error { return c.sess.Close() }
 
-// DialContext opens a TCP connection to addr from the agent's side. addr may
-// use a hostname; it is resolved by the agent. A failure reported by the
-// agent is a *proto.DialError.
+// DialContext opens a TCP connection ("tcp") or a UDP flow ("udp") to addr
+// from the agent's side. addr may use a hostname; it is resolved by the
+// agent. A failure reported by the agent is a *proto.DialError. A UDP flow
+// reads and writes one datagram per call.
 func (c *Client) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	cmd := proto.CmdConnectTCP
 	switch network {
 	case "tcp", "tcp4", "tcp6":
+	case "udp", "udp4", "udp6":
+		cmd = proto.CmdUDP
 	default:
 		return nil, fmt.Errorf("tunnel: unsupported network %q", network)
 	}
@@ -108,7 +113,7 @@ func (c *Client) DialContext(ctx context.Context, network, addr string) (net.Con
 	}
 	stop := context.AfterFunc(ctx, func() { _ = st.SetDeadline(time.Now()) })
 
-	resp, err := handshake(st, addr)
+	resp, err := handshake(st, cmd, addr)
 	if !stop() {
 		_ = st.Close()
 		return nil, ctx.Err()
@@ -125,7 +130,51 @@ func (c *Client) DialContext(ctx context.Context, network, addr string) (net.Con
 		return nil, &proto.DialError{Addr: addr, Status: resp.Status, Msg: resp.Msg}
 	}
 	_ = st.SetDeadline(time.Time{})
+	if cmd == proto.CmdUDP {
+		return &datagramConn{Stream: st}, nil
+	}
 	return st, nil
+}
+
+// datagramConn is a UDP flow through the agent: each Write sends one
+// datagram, each Read returns one (a buffer too small for it is an error).
+type datagramConn struct {
+	*smux.Stream
+	rmu sync.Mutex
+}
+
+func (d *datagramConn) Read(p []byte) (int, error) {
+	d.rmu.Lock()
+	defer d.rmu.Unlock()
+	return proto.ReadDatagram(d.Stream, p)
+}
+
+func (d *datagramConn) Write(p []byte) (int, error) {
+	if err := proto.WriteDatagram(d.Stream, p); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// WriteTo copies the flow's datagrams to w, one Write each (the stream's
+// own WriteTo would copy the framing).
+func (d *datagramConn) WriteTo(w io.Writer) (int64, error) {
+	buf := make([]byte, proto.MaxDatagramLen)
+	var total int64
+	for {
+		n, err := d.Read(buf)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return total, nil
+			}
+			return total, err
+		}
+		m, err := w.Write(buf[:n])
+		total += int64(m)
+		if err != nil {
+			return total, err
+		}
+	}
 }
 
 // ExchangeDNS sends one DNS query through the agent to the target's own
@@ -170,8 +219,8 @@ func exchangeDNS(st *smux.Stream, query []byte) ([]byte, error) {
 	return proto.ReadDNS(st)
 }
 
-func handshake(st *smux.Stream, addr string) (proto.Response, error) {
-	if err := proto.WriteRequest(st, proto.Request{Cmd: proto.CmdConnectTCP, Addr: addr}); err != nil {
+func handshake(st *smux.Stream, cmd proto.Cmd, addr string) (proto.Response, error) {
+	if err := proto.WriteRequest(st, proto.Request{Cmd: cmd, Addr: addr}); err != nil {
 		return proto.Response{}, err
 	}
 	return proto.ReadResponse(st)

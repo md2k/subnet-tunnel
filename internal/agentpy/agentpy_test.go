@@ -207,3 +207,30 @@ func TestPythonAgentDNS(t *testing.T) {
 		}
 	}
 }
+
+// A UDP flow: datagrams keep their boundaries both ways (an empty one too);
+// an unknown destination is refused.
+func TestPythonAgentUDP(t *testing.T) {
+	c := startAgent(t)
+	conn, err := c.DialContext(context.Background(), "udp", "dns.svc:53")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	buf := make([]byte, 65535)
+	// (The test's socket pair takes datagrams up to 2 KB on macOS; real UDP
+	// sockets take 64 KB.)
+	for _, d := range []string{"first", "", strings.Repeat("x", 1500)} {
+		if _, err := conn.Write([]byte(d)); err != nil {
+			t.Fatal(err)
+		}
+		n, err := conn.Read(buf)
+		if err != nil || string(buf[:n]) != "re:"+d {
+			t.Fatalf("datagram %.10q: got %.13q %v", d, buf[:n], err)
+		}
+	}
+	if _, err := c.DialContext(context.Background(), "udp", "nowhere.svc:53"); err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("unknown destination: %v", err)
+	}
+}
