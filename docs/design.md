@@ -765,7 +765,7 @@ deferred: started in the foreground for sudo, then detached.
 A profile's target is where its agent runs: a pod or a container that subtun creates and deletes
 (the default), or an existing one it only starts its agent in. It stays per profile (`defaults:`
 can't hold one), even when two profiles repeat it: the profile is what connects, whatever the
-transport (SSH next).
+transport (Kubernetes, Docker, SSH).
 
 ```yaml
 profiles:
@@ -843,15 +843,53 @@ became `subtun up --k8s` / `--docker`: one entry point, with the target's keys a
 agent inside, so a created pod needs no upload, shell or writable directory (images published with
 each release); spreading profiles that share a selector over its pods.
 
+### SSH targets
+
+`target: {ssh: {host, user, port, identity, jump}}`, or `subtun up --ssh [user@]host[:port] -i KEY
+-J JUMP`: the agent runs on a host subtun logs in to, as the login user, the way sshuttle works.
+Nothing to create: the transport only runs commands (`Execer`), and the shared bootstrap does the
+rest (the probe now reports `uname -s`, so a host that isn't Linux gets the Python agent).
+
+- **Client:** built in (`golang.org/x/crypto/ssh`), one connection per connect with a session per
+  command (probe, upload, the agent), keepalives from `ServerAliveInterval` /
+  `ServerAliveCountMax`, so a dead network closes the connection and reconnect takes over. The
+  system `ssh` binary (everything OpenSSH supports, Kerberos and ControlMaster included) can be an
+  option later; a connection per command, quoting through the remote shell and prompts in the
+  middle of a run are its costs.
+- **Configuration:** `ssh -G` resolves the host exactly as OpenSSH would (Include, Match, Host
+  patterns, HostName, User, Port, IdentityFile, CertificateFile, ProxyJump, ProxyCommand, known_hosts
+  files, StrictHostKeyChecking, HostKeyAlgorithms), with the target's own keys passed as ssh's flags
+  so they win the same way. Without an ssh binary, OpenSSH's defaults. Writing a config parser was
+  rejected: Match and Include are where they differ.
+- **Logins:** keys only. The configured key files first (signed by the agent when it holds the same
+  key, so no passphrase), then the agent's other keys (none with IdentitiesOnly): a server counts
+  every key offered against MaxAuthTries. An encrypted key asks for its passphrase when the server
+  accepts its public key (from `KEY.pub` or the file's header), once per run. Passwords and
+  keyboard-interactive are left out: reconnects never prompt.
+- **Host keys:** known_hosts as OpenSSH keeps it (plain, hashed, `@cert-authority`, `@revoked`). An
+  unknown key is asked about on the terminal and saved (OpenSSH's `ask`; `yes` refuses, `accept-new`
+  and `no` save without asking); with no terminal subtun refuses and names the `ssh` command that
+  accepts it. A changed key is always refused. The server is asked for its keys in OpenSSH's order,
+  narrowed to the types known_hosts has for the host; otherwise it may offer another type of its
+  keys, which would look like a changed key.
+- **Questions while running:** `transport.Ask` asks on `/dev/tty`, one question at a time; with
+  `--tui` the terminal UI steps aside for it as it does for sudo (`transport.WithLend`).
+- **Jump hosts and proxies:** ProxyJump hops are dialled through each other, each with its own
+  `ssh -G` settings (`-i` is the destination's only, as in OpenSSH); ProxyCommand runs through
+  `/bin/sh -c "exec ..."`. The routes keep out the address subtun's own connection goes to: the
+  first hop, or the host; behind a ProxyCommand it isn't known.
+- **sshuttle:** `subtun import sshuttle` turns `-r` into this target, with `-i`, `-J`, `-p` and `-l`
+  from `--ssh-cmd`; a password in `-r` is left out.
+
 ## Decisions
 
 - **Capture:** utun / TUN interface plus the gVisor network stack, with utun MTU 9000. Data never
   goes through pf; the firewall (pf, nftables, WFP) is only used for DNS capture, the kill switch and
   blocking IPv6, through a firewall driver.
 - **OS-specific code behind drivers** (tun, routes, firewall, resolver), chosen by configuration.
-- **Remote side:** an agent over exec stdio, not SSH `direct-tcpip`. Containers rarely run sshd,
-  and UDP, remote DNS and host discovery need an agent anyway. The Go binary by default, the
-  Python edition where the binary can't run.
+- **Remote side:** an agent over exec stdio (or an SSH session), not SSH `direct-tcpip`. Containers
+  rarely run sshd, and UDP, remote DNS and host discovery need an agent anyway. The Go binary by
+  default, the Python edition where the binary can't run (or the host isn't Linux).
 - **Agent location:** never a shared, world-writable path. Per-user 0700 directories, `$HOME` first.
 - **DNS:** capture the system's queries (firewall redirect by default) and decide per name in
   subtun: domains and patterns through the tunnel, the rest to a fallback. Supplemental and override
