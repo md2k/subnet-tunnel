@@ -129,6 +129,18 @@ A target is where the agent runs: a Kubernetes pod, a Docker container, or a hos
   (GSSAPI) and ControlMaster.
 - A target can't go in `defaults`: each profile names its own, even when two repeat it.
 
+**Agents.** subtun starts a small agent in the target and opens connections from there. Two agents
+speak the same protocol; `agent: auto` (`--agent`, the default) picks the first that can run:
+
+| `agent` | Target needs | Writes to the target |
+|---|---|---|
+| `binary` | Linux amd64/arm64, `sh` with basic tools (busybox is enough), a writable directory that allows exec | one cached ~3.5 MB binary in a private directory: `~/.cache/subtun`, else `/tmp/subtun-<uid>`, `/var/tmp/subtun-<uid>`, `/dev/shm/subtun-<uid>`, or `agentDir` |
+| `python` | Python 3.6+ (no shell needed) | nothing: the source is sent over and run from memory, like sshuttle |
+
+Both reach about the same speed in our tests. Targets with neither a shell nor Python (distroless
+static, scratch) are not supported yet; a pod or container subtun creates runs busybox, so it's
+fine.
+
 **Defaults.** Settings under `defaults` apply to every profile. A profile's own value wins; lists
 (`routes`, `exclude`, `dns.domains`, `dns.patterns`) add up, so a home-LAN exclude in `defaults`
 applies everywhere. Settings that need routes (DNS capture, the kill switch, IPv6 blocking) are
@@ -155,6 +167,7 @@ the words you meant (`mode: off`, `capture: off` work).
 | `subtun cleanup` | remove firewall rules an earlier session left (a kill switch's blocks), without starting one |
 | `subtun import sshuttle FILE` | turn an sshuttle options file into a profile ([below](#importing-from-sshuttle)) |
 | `subtun version` | print the version |
+| `subtun completion bash\|zsh\|fish\|powershell` | a shell completion script |
 
 Global flags: `--config FILE`, `-v` (debug logging, in subtun and in the agent). Hidden flags for
 testing (`--max-duration`, `--dns-listen`, `--agent-file`) are described in
@@ -285,12 +298,78 @@ profiles:
     socks: 127.0.0.1:1080
 ```
 
+An office network behind an SSH gateway, reached through a bastion, as with sshuttle `-r`: the
+gateway's networks and the company's names. `~/.ssh/config` still applies (a `Host office-gw`
+there can hold the user, port and key instead).
+
+```yaml
+profiles:
+  office:
+    target: {ssh: {host: me@gw.office.example.com, jump: me@bastion.example.com, identity: ~/.ssh/work}}
+    routes: [10.20.0.0/16, 10.21.0.0/16]
+    dns: {domains: [corp.example.com]}
+```
+
+Everything through a host abroad, the way `sshuttle -r host 0/0 --dns` is used: every name resolved
+there, nothing leaking while it's down. The host's own address is kept out of the routes
+automatically, so the SSH connection itself never goes into the tunnel.
+
+```yaml
+profiles:
+  abroad:
+    target: {ssh: {host: me@vps.example.net}}
+    routes: [0.0.0.0/1, 128.0.0.0/1]
+    dns: {domains: ["."]}
+    killSwitch: {mode: on}
+```
+
+Shared gateway pods: a Deployment keeps a few pods labelled `app=subtun-gw` (for clusters that allow
+exec but not creating pods); subtun picks a running one at each connect, so a reconnect finds a
+replacement.
+
+```yaml
+profiles:
+  shared:
+    target: {k8s: {context: prod-eu, namespace: ops, selector: app=subtun-gw}}
+    routes: [10.20.0.0/16]
+```
+
+Two remotes at once: the cluster's ranges and names through its pod, the office's through SSH; each
+connection and name goes to the profile that routes it, and each reconnects on its own. Run both
+with `subtun up --profile dev,office` (more in [Several profiles at once](#several-profiles-at-once)).
+
+```yaml
+profiles:
+  dev:
+    target: {k8s: {context: dev, namespace: tools}}
+    routes: [10.96.0.0/12, 10.244.0.0/16]
+    dns: {domains: [cluster.local]}
+  office:
+    target: {ssh: {host: me@gw.office.example.com}}
+    routes: [10.20.0.0/16]
+    dns: {domains: [corp.example.com]}
+```
+
 The same from the command line:
 
 ```sh
 subtun up --k8s -n tools 10.96.0.0/12 10.244.0.0/16 --dns-domain cluster.local
 subtun up --k8s --context remote -n tools 0.0.0.0/1 128.0.0.0/1 --dns-domain . --dns-domain cluster.local --kill-switch on
 subtun up --docker --network app_default --socks 127.0.0.1:1080
+subtun up --ssh me@gw.office.example.com -J me@bastion.example.com -i ~/.ssh/work 10.20.0.0/16 10.21.0.0/16 --dns-domain corp.example.com
+subtun up --ssh me@vps.example.net 0.0.0.0/1 128.0.0.0/1 --dns-domain . --kill-switch on
+subtun up --k8s --context prod-eu -n ops -l app=subtun-gw 10.20.0.0/16
+```
+
+Watching and changing a run:
+
+```sh
+subtun up --profile dev,office --control full     # changes allowed from other terminals
+subtun status                                     # tunnels, routes, DNS names, traffic
+subtun logs -f
+subtun route add --profile office 10.22.0.0/16    # without a restart
+subtun profile reconnect dev
+subtun tui                                        # the same in a terminal UI
 ```
 
 ## Routes and excludes

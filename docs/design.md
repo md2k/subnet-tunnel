@@ -498,13 +498,14 @@ app ──► SOCKS (one per profile) ───── its own tunnel only
   from routing it, and an address dev excludes goes to work if work routes it. Excludes in
   `defaults:` apply to every profile.
 - The automatic excludes apply to each profile as today. Every tunnel's own endpoints (API
-  servers, Docker daemons) are excluded from every route, so no tunnel's connection runs inside
-  another tunnel. They come from the kubeconfig or docker context, so they are known before a
+  servers, Docker daemons, SSH servers or their first jump host) are excluded from every route, so no tunnel's connection runs inside
+  another tunnel. They come from the kubeconfig, docker context or `ssh -G`, so they are known before a
   tunnel connects; they are looked up after rules an earlier session left (which may block DNS)
   are taken over, and a failed lookup is reported.
 - Later: a priority for a CIDR or domain listed in two profiles, and with it failover (the same
   CIDR through two remotes, the second used while the first is down). Until then both are errors
-  at start.
+  at start. (A design for this, with deciding per destination inside subtun, is being discussed:
+  [Planned](../README.md#planned).)
 
 **Command line:**
 - The profiles are `up`'s argument plus every `--profile` (repeatable or comma-separated); with
@@ -685,7 +686,7 @@ are built once. They keep their behaviour:
 **Built on it later** (not part of this):
 - `dns.unrouted: tunnel` and `auto`;
 - routes that follow network changes (the automatic local excludes recomputed);
-- reconnecting to a recreated pod by label or owner;
+- reconnecting to a recreated pod by label or owner (done: [Targets](#targets));
 - an embedded web UI (the terminal UI is built: below);
 - saving runtime changes back to the config file.
 
@@ -887,6 +888,8 @@ rest (the probe now reports `uname -s`, so a host that isn't Linux gets the Pyth
   goes through pf; the firewall (pf, nftables, WFP) is only used for DNS capture, the kill switch and
   blocking IPv6, through a firewall driver.
 - **OS-specific code behind drivers** (tun, routes, firewall, resolver), chosen by configuration.
+- **Targets:** per profile; subtun creates its pod or container by default (and deletes it), or uses
+  an existing one by name or labels; SSH hosts with a built-in client, keys only.
 - **Remote side:** an agent over exec stdio (or an SSH session), not SSH `direct-tcpip`. Containers
   rarely run sshd, and UDP, remote DNS and host discovery need an agent anyway. The Go binary by
   default, the Python edition where the binary can't run (or the host isn't Linux).
@@ -910,13 +913,14 @@ rest (the probe now reports `uname -s`, so a host that isn't Linux gets the Pyth
   exclude that splits the routes inside the new LAN would put parts of it into the tunnel. The
   session helper can change routes while running (several profiles, `control: full`); what's
   missing is recomputing the automatic excludes when the networks change.
-- **Reconnecting to a recreated pod:** a pod named exactly is looked for by that name; one picked by
-  [labels](#targets), or created by subtun, is found again. Also, if the API
-  server's address moves inside the routes after a reconnect, a one-shot helper (one profile,
-  routes only, without `control: full`) can't change the routes: subtun only warns (restart to
-  exclude it). With a session it is carved out.
-- **Targets with neither a shell nor Python** (distroless static, scratch): an ephemeral debug
-  container (Kubernetes) or a helper container in the target's network namespace (Docker).
+- **subtun's own connection moving inside the routes:** if the API server's, the Docker daemon's or
+  the SSH server's address changes to one inside the routes after a reconnect, a one-shot helper (one
+  profile, routes only, without `control: full`) can't change the routes: subtun only warns (restart
+  to exclude it). With a session it is carved out. (Finding the pod again is solved: a pod picked by
+  [labels](#targets), or created by subtun, is found again; one named exactly is looked for by name.)
+- **Existing targets with neither a shell nor Python** (distroless static, scratch): an ephemeral
+  debug container (Kubernetes) or a helper container in the target's network namespace (Docker).
+  Pods and containers subtun creates run busybox, so they're fine.
 - **Aborted streams:** smux has no reset. When the laptop side closes a stream abruptly, an agent
   still sending to it waits for window updates that never come, until the destination closes.
   Both agents behave the same; needs a reset signal in the protocol.
@@ -924,7 +928,9 @@ rest (the probe now reports `uname -s`, so a host that isn't Linux gets the Pyth
   pod's own internet connection. A full tunnel reached about 20 MB/s down and 8-9 MB/s up, against
   53 and 38 MB/s directly (SOCKS through the same pod: 20 MB/s down). Where that limit sits (the
   node, its uplink, exec through the API server, smux) isn't known yet; transport flow control
-  (several carriers in parallel against head-of-line blocking) waits for that answer.
+  (several carriers in parallel against head-of-line blocking) waits for that answer. Through an SSH
+  host on the same LAN, routes carried a download at 43.0 MB/s against 43.6 MB/s directly, so smux
+  and the agent aren't the limit at that speed; exec through the API server is the next suspect.
 - **Coexistence** with other VPN or security software that owns its own utun interface or pf anchor
   (pf driver: own anchor, `quick` rules, warn on other anchors; to be tested next to Zscaler).
 - **A helper killed with SIGKILL** leaves its running rules, including the DNS redirect to subtun's
@@ -944,3 +950,6 @@ rest (the probe now reports `uname -s`, so a host that isn't Linux gets the Pyth
 - **Docker transport upload** is ~25 % below Kubernetes on the same Mac (147 vs 193 MB/s through
   utun). Candidate: one write per smux frame straight onto the hijacked Docker connection, where
   the Kubernetes path batches through client-go.
+- **The system `ssh` as an SSH client:** for what the built-in client doesn't do (Kerberos/GSSAPI,
+  ControlMaster, rare options). Not needed so far; certificates, IdentitiesOnly and ProxyCommand are
+  unit-tested but haven't met real servers yet.
