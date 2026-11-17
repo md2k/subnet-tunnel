@@ -5,11 +5,15 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
+	"path"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
+	"github.com/md2k/subnet-tunnel/internal/config"
 	"github.com/md2k/subnet-tunnel/internal/dns"
 	"github.com/md2k/subnet-tunnel/internal/routes"
 )
@@ -20,10 +24,30 @@ type Profile struct {
 	Exclude  []string
 	Domains  []string
 	Patterns []string
-	Servers  []string // DNS servers to capture (--ns-hosts)
-	Fallback string   // --dns-to
-	Notes    []string // options and values not carried over, or changed
-	Dropped  []string // redundant routes and excludes, and covered domains
+	Servers  []string   // DNS servers to capture (--ns-hosts)
+	Fallback string     // --dns-to
+	SSH      *SSHRemote // -r/--remote, with -i, -J, -p, -l from -e/--ssh-cmd
+	Notes    []string   // options and values not carried over, or changed
+	Dropped  []string   // redundant routes and excludes, and covered domains
+}
+
+// SSHRemote is sshuttle's SSH remote as a subtun SSH target.
+type SSHRemote struct {
+	Host     string // [user@]host[:port]
+	Identity string
+	Jump     string
+}
+
+// Target is the remote as a profile's target, in YAML flow style.
+func (r *SSHRemote) Target() string {
+	parts := []string{"host: " + yamlQuote(r.Host)}
+	if r.Identity != "" {
+		parts = append(parts, "identity: "+yamlQuote(r.Identity))
+	}
+	if r.Jump != "" {
+		parts = append(parts, "jump: "+yamlQuote(r.Jump))
+	}
+	return "{ssh: {" + strings.Join(parts, ", ") + "}}"
 }
 
 // sshuttle options that take a value, by every name they have.
@@ -60,9 +84,8 @@ var sshuttleIgnored = map[string]string{
 	"--listen":              "subtun captures with a utun interface, no local listener",
 	"--method":              "subtun captures with a utun interface, not pf/nft",
 	"--python":              "subtun's agent picks Python by itself (--agent)",
-	"--ssh-cmd":             "no SSH transport yet",
-	"--remote-shell":        "no SSH transport yet",
-	"--no-cmd-delimiter":    "no SSH transport yet",
+	"--remote-shell":        "subtun's agent runs under sh, or Python, by itself",
+	"--no-cmd-delimiter":    "not needed with subtun's SSH client",
 	"--no-latency-control":  "subtun has no latency control to turn off",
 	"--latency-buffer-size": "subtun has no latency control",
 	"--wrap":                "not needed",
@@ -122,6 +145,8 @@ type collector struct {
 	excludes []string
 	patterns []string
 	dns      bool
+	remote   string
+	sshCmd   string
 	ignored  map[string]bool
 	readFile func(string) ([]byte, error)
 }
@@ -222,11 +247,103 @@ func (c *collector) option(name, val string) error {
 			c.p.Servers = append(c.p.Servers, a.String())
 		}
 	case "--remote":
-		c.note("--remote %s: SSH targets aren't supported yet; set the target to a pod or container", val)
+		c.remote = val
+	case "--ssh-cmd":
+		c.sshCmd = val
 	default:
 		c.ignore(name)
 	}
 	return nil
+}
+
+// sshRemote turns -r [user[:password]@]host[:port] and the ssh options of
+// -e/--ssh-cmd into the SSH target. A password isn't kept: subtun logs in
+// with keys or the SSH agent.
+func (c *collector) sshRemote() {
+	if c.remote == "" {
+		if c.sshCmd != "" {
+			c.note("--ssh-cmd: left out (no --remote)")
+		}
+		return
+	}
+	host := c.remote
+	if at := strings.LastIndex(host, "@"); at >= 0 {
+		if user, _, ok := strings.Cut(host[:at], ":"); ok {
+			c.note("--remote: the password is left out; subtun logs in with keys or the SSH agent")
+			host = user + host[at:]
+		}
+	}
+	user, name, port, err := config.SplitSSHHost(host)
+	if err != nil {
+		c.note("--remote %s: %v; left out", host, err)
+		return
+	}
+	r := &SSHRemote{}
+	if c.sshCmd != "" {
+		var cmdUser, cmdPort string
+		r.Identity, r.Jump, cmdUser, cmdPort = c.sshOptions(c.sshCmd)
+		if user == "" {
+			user = cmdUser
+		}
+		if port == 0 && cmdPort != "" {
+			if n, err := strconv.Atoi(cmdPort); err == nil && n > 0 && n < 65536 {
+				port = n
+			} else {
+				c.note("--ssh-cmd: port %q left out", cmdPort)
+			}
+		}
+	}
+	r.Host = name
+	if port != 0 {
+		r.Host = net.JoinHostPort(name, strconv.Itoa(port))
+	}
+	if user != "" {
+		r.Host = user + "@" + r.Host
+	}
+	c.p.SSH = r
+}
+
+// sshOptions reads the ssh options subtun has from an sshuttle --ssh-cmd
+// ("ssh -i KEY -J JUMP -p PORT -l USER ..."); the rest are reported.
+func (c *collector) sshOptions(cmd string) (identity, jump, user, port string) {
+	f := strings.Fields(cmd)
+	for i := range f {
+		f[i] = strings.Trim(f[i], `'"`)
+	}
+	if len(f) == 0 || path.Base(f[0]) != "ssh" {
+		c.note("--ssh-cmd %q: not an ssh command; left out", cmd)
+		return
+	}
+	const withValue = "BbcDEeFIiJLlmOopQRSWw" // ssh's options that take a value
+	for i := 1; i < len(f); i++ {
+		a := f[i]
+		if len(a) < 2 || a[0] != '-' {
+			c.note("--ssh-cmd: %s left out", a)
+			continue
+		}
+		opt, val := a[1], a[2:]
+		if !strings.ContainsRune(withValue, rune(opt)) {
+			c.note("--ssh-cmd: %s left out (set it in ~/.ssh/config)", a)
+			continue
+		}
+		if val == "" && i+1 < len(f) {
+			i++
+			val = f[i]
+		}
+		switch opt {
+		case 'i':
+			identity = val
+		case 'J':
+			jump = val
+		case 'l':
+			user = val
+		case 'p':
+			port = val
+		default:
+			c.note("--ssh-cmd: -%c %s left out (set it in ~/.ssh/config)", opt, val)
+		}
+	}
+	return
 }
 
 func splitList(s string) []string {
@@ -297,6 +414,7 @@ func (c *collector) subnet(s string, exclude bool) {
 var suffixPattern = regexp.MustCompile(`^\.\*\\?\.((?:[a-zA-Z0-9_-]+\\?\.)*[a-zA-Z0-9_-]+)\.?$`)
 
 func (c *collector) finish() (*Profile, error) {
+	c.sshRemote()
 	if err := c.routes(); err != nil {
 		return nil, err
 	}

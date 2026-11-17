@@ -48,9 +48,12 @@ func TestSSHuttleFile(t *testing.T) {
 	if p.Fallback != "192.0.2.53" {
 		t.Errorf("fallback %q", p.Fallback)
 	}
+	if p.SSH == nil || p.SSH.Host != "user@bastion.example.net" {
+		t.Errorf("remote: %+v", p.SSH)
+	}
 	for _, want := range []string{
 		"--method: left out", "--no-latency-control: left out", "--latency-buffer-size: left out",
-		"--disable-ipv6", "--remote user@bastion.example.net", "--frobnicate: unknown",
+		"--disable-ipv6", "--frobnicate: unknown",
 		"port 8080 dropped", "written as 10.20.0.0/16", "gitlab.example.com: only IP addresses",
 		"fd00::/8: subtun captures IPv4 only", "(unclosed: not valid", "4 pattern(s) of the form .*.suffix",
 	} {
@@ -184,5 +187,60 @@ func TestAddProfile(t *testing.T) {
 	}
 	if _, err := AddProfile([]byte("profiles: {dev: {target: {k8s: {create: false, name: p}}, socks: x}}\n"), entry); err == nil {
 		t.Error("inline profiles accepted")
+	}
+}
+
+// sshuttle's -r becomes an SSH target, with -i, -J, -p and -l from its
+// --ssh-cmd; a password is dropped and never shown; other ssh options are
+// reported.
+func TestSSHuttleRemote(t *testing.T) {
+	read := func(lines ...string) *Profile {
+		t.Helper()
+		p, err := SSHuttle(strings.NewReader(strings.Join(lines, "\n")), noFiles)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	p := read("-r", "alice:s3cret@[2001:db8::5]:2200", "10.0.0.0/8")
+	if p.SSH == nil || p.SSH.Host != "alice@[2001:db8::5]:2200" || !hasNote(p, "the password is left out") {
+		t.Errorf("password: %+v %q", p.SSH, p.Notes)
+	}
+	if strings.Contains(strings.Join(p.Notes, " "), "s3cret") {
+		t.Errorf("the password shows in the notes: %q", p.Notes)
+	}
+
+	p = read("--remote=db.example.net", `--ssh-cmd=ssh -i ~/.ssh/work -J me@jump.example.net -p 2222 -l bob -o ServerAliveInterval=10 -C`, "10.0.0.0/8")
+	want := SSHRemote{Host: "bob@db.example.net:2222", Identity: "~/.ssh/work", Jump: "me@jump.example.net"}
+	if p.SSH == nil || *p.SSH != want {
+		t.Errorf("ssh-cmd: %+v, want %+v", p.SSH, want)
+	}
+	for _, n := range []string{"-o ServerAliveInterval=10 left out", "-C left out"} {
+		if !hasNote(p, n) {
+			t.Errorf("no note %q in %q", n, p.Notes)
+		}
+	}
+	if got := p.SSH.Target(); got != `{ssh: {host: 'bob@db.example.net:2222', identity: '~/.ssh/work', jump: 'me@jump.example.net'}}` {
+		t.Errorf("target %s", got)
+	}
+	// The user and port in -r win over the command's.
+	if p := read("-r", "carol@db:22", "-e", "ssh -l bob -p 2222", "10.0.0.0/8"); p.SSH.Host != "carol@db:22" {
+		t.Errorf("-r wins: %+v", p.SSH)
+	}
+
+	for want, lines := range map[string][]string{
+		"not an ssh command":                {"-r", "db", "-e", "autossh -M 0", "10.0.0.0/8"},
+		"--ssh-cmd: left out (no --remote)": {"-e", "ssh -i k", "10.0.0.0/8"},
+		"not [user@]host[:port]; left out":  {"-r", "me@", "10.0.0.0/8"},
+	} {
+		if p := read(lines...); !hasNote(p, want) {
+			t.Errorf("%q: no note %q in %q", lines, want, p.Notes)
+		}
+	}
+
+	// The generated profile loads.
+	p = read("-r", "me@db.example.net", "-e", "ssh -J me@jump.example.net", "10.0.0.0/8")
+	if _, err := config.Parse(p.YAML("db", p.SSH.Target(), "x.conf"), "generated"); err != nil {
+		t.Errorf("generated YAML: %v\n%s", err, p.YAML("db", p.SSH.Target(), "x.conf"))
 	}
 }

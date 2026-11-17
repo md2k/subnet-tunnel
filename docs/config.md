@@ -18,7 +18,7 @@ defaults:                          # optional: any profile key except target, fo
 
 profiles:
   dev-cluster:                     # a lowercase letter or digit, then also '.', '_', '-'
-    target:                        # exactly one of k8s / docker: see Targets below
+    target:                        # exactly one of k8s / docker / ssh: see Targets below
       k8s:                         # a pod subtun creates, and deletes on stop
         kubeconfig: ~/.kube/dev    # default: $KUBECONFIG or ~/.kube/config
         context: dev               # default: the kubeconfig's current context
@@ -80,13 +80,21 @@ profiles:
     target:
       docker: {create: false, selector: com.docker.compose.service=web}   # or name: app-web-1
     socks: 127.0.0.1:1083
+
+  office:
+    target:
+      ssh:                         # a host over SSH: the agent runs there as you
+        host: me@gw.example.com:22 # [user@]host[:port], or a Host from ~/.ssh/config
+        identity: ~/.ssh/work      # optional: a key tried first
+        jump: me@bastion.example.com   # optional: ProxyJump, comma-separated hops
+    routes: [10.40.0.0/16]
 ```
 
 A profile needs `routes`, `socks` or both (its own or from `defaults`).
 
 ### Targets
 
-A target is where the agent runs: a Kubernetes pod or a Docker container (SSH is planned).
+A target is where the agent runs: a Kubernetes pod, a Docker container, or a host over SSH.
 
 - **Created** (the default): subtun creates the pod or container, starts its agent in it, creates
   it again if it goes (deleted, evicted, its node gone), and deletes it when the profile stops.
@@ -107,6 +115,18 @@ A target is where the agent runs: a Kubernetes pod or a Docker container (SSH is
   else the newest. So a reconnect finds a pod that replaced one that went, and several pods with
   the same labels act as spares. `selector` alone means an existing one (`create: false` can be
   left out).
+- **SSH** (`ssh`): a host subtun logs in to, as sshuttle does; the agent runs there as the login
+  user, and nothing needs to be installed but sshd and a POSIX `sh` (the binary agent on Linux,
+  the Python agent on other systems). subtun's own client connects the way `ssh` would:
+  `~/.ssh/config` as OpenSSH reads it (`ssh -G`: Host, Match and Include, HostName, User, Port,
+  IdentityFile, ProxyJump, ProxyCommand, known_hosts files), under `user`, `port`, `identity` and
+  `jump` set here. Logins are by key only: the SSH agent's keys and key files (an encrypted key
+  asks for its passphrase once per run, and only when the server takes it), certificates too; no
+  passwords. A host key not yet in known_hosts is asked about on the terminal, as `ssh` asks, and
+  saved (`StrictHostKeyChecking yes` refuses it instead, `accept-new` saves it without asking;
+  without a terminal subtun refuses and says how to accept it with `ssh`). A changed key is always
+  refused. With `--tui` the terminal UI steps aside for these questions. Not supported: Kerberos
+  (GSSAPI) and ControlMaster.
 - A target can't go in `defaults`: each profile names its own, even when two repeat it.
 
 **Defaults.** Settings under `defaults` apply to every profile. A profile's own value wins; lists
@@ -123,6 +143,7 @@ the words you meant (`mode: off`, `capture: off` work).
 | `subtun up [PROFILE] [CIDR...]` | run a profile from the config file; without a name, list them |
 | `subtun up --k8s [CIDR...]` | tunnel through a pod given here: one subtun creates (`--image`, `--name`, `--requests`, `--limits`), or an existing one (`--create=false` with `--name` or `-l`); `-n`, `-c`, `--context`, `--kubeconfig` |
 | `subtun up --docker [CIDR...]` | the same through a Docker container (`--network`, `-H`, `--context`) |
+| `subtun up --ssh [USER@]HOST[:PORT] [CIDR...]` | through a host over SSH (`-i KEY`, `-J JUMP`; the rest from `~/.ssh/config`) |
 | `subtun up --profile A,B` | run several profiles at once ([below](#several-profiles-at-once)) |
 | `subtun status` | what every running subtun is doing ([below](#status-and-logs)) |
 | `subtun logs [-f]` | a running subtun's recent log lines |
@@ -153,7 +174,8 @@ Flags given on the command line override the profile's (and defaults') values (`
 `--dns-unrouted`, `--kill-switch`, `--kill-switch-dns`, `--block-ipv6`, `--reconnect-attempts`,
 `--reconnect-delay`, `--reconnect-max-delay`). CIDRs, `-x/--exclude`,
 `--dns-domain` and `--dns-pattern` given on the command line are **added** to the profile's. Without
-a profile, the same flags work with a target given on the command line (`--k8s`, `--docker`).
+a profile, the same flags work with a target given on the command line (`--k8s`, `--docker`,
+`--ssh`).
 
 ## Several profiles at once
 
@@ -252,7 +274,9 @@ profiles:
     killSwitch: {mode: on}
 ```
 
-Only a SOCKS proxy, no root needed: point a browser or `curl --socks5-hostname` at it.
+Only a SOCKS proxy, no root needed: point a browser or `curl --socks5-hostname` at it. (Apple's git
+uses a libcurl, 8.7.1, whose SOCKS support can stall: clones through a SOCKS proxy, any proxy, may
+crawl. Capture the routes instead, or use a git built with a newer libcurl.)
 
 ```yaml
 profiles:
@@ -778,7 +802,8 @@ line, `#` comments) and makes a named profile from it (`--name`, default `import
 
 ```sh
 subtun import sshuttle work.conf --name work > work.yaml                    # review it first
-subtun import sshuttle work.conf --name work --k8s debug -n tools --write   # add it to your config
+subtun import sshuttle work.conf --name work --write                        # add it, through its SSH remote
+subtun import sshuttle work.conf --name work --k8s debug -n tools --write   # or through a pod instead
 ```
 
 | sshuttle | subtun profile |
@@ -790,14 +815,17 @@ subtun import sshuttle work.conf --name work --k8s debug -n tools --write   # ad
 | other `--dns-domains` patterns | `dns.patterns`, anchored with `^` as sshuttle's `re.match` was; check them, Python and Go regexps differ in details |
 | `--dns-to IP:PORT` | `dns.fallback` |
 | `--ns-hosts` | `dns.servers` |
+| `-r [user[:password]@]host[:port]` | `target: {ssh: {host: ...}}`; the password is left out (subtun logs in with keys or the SSH agent) |
+| `-e "ssh -i KEY -J JUMP -p PORT -l USER ..."` | `identity`, `jump`, and the port and user when `-r` has none; other ssh options are listed (set them in `~/.ssh/config`) |
 
-Options subtun doesn't need or have (`--method`, `--no-latency-control`, `--remote`, `-N`, ...),
-names and IPv6 subnets, and port ranges are listed in comments above the profile, together with what
-was dropped as redundant. The target can't come from sshuttle's SSH remote: give `--k8s POD`
-(`-n`, `--context`) or `--docker CONTAINER`; without one the printed profile has a placeholder.
+Options subtun doesn't need or have (`--method`, `--no-latency-control`, `-N`, ...), names and IPv6
+subnets, and port ranges are listed in comments above the profile, together with what was dropped
+as redundant. The target is sshuttle's SSH remote; `--k8s POD` (`-n`, `--context`) or `--docker
+CONTAINER` give an existing pod or container instead. Without any of them the printed profile has a
+placeholder.
 
 `--write` adds the profile to your config file (`--config`, `$SUBTUN_CONFIG` or the default) right
 below `profiles:`, with the indentation of your other profiles, keeping comments and everything else.
-It needs a target (`--k8s` or `--docker`), refuses if the name is taken or the result wouldn't load,
+It needs a target (sshuttle's `-r`, `--k8s` or `--docker`), refuses if the name is taken or the result wouldn't load,
 and keeps the old file as `.bak`.
 

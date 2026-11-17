@@ -8,8 +8,8 @@ Inspired by [sshuttle](https://github.com/sshuttle/sshuttle). Built because on m
 pf-based capture caps upload at a few MB/s, while a utun interface with a userspace TCP/IP stack
 reached ~170 MB/s end to end in the same test (see [docs/design.md](docs/design.md)).
 
-> **Status:** early development. Kubernetes and Docker targets, transparent capture of CIDRs or a
-> full tunnel on macOS (utun + gVisor), split DNS, a kill switch and a SOCKS5 proxy.
+> **Status:** early development. Kubernetes, Docker and SSH targets, transparent capture of CIDRs
+> or a full tunnel on macOS (utun + gVisor), split DNS, a kill switch and a SOCKS5 proxy.
 
 ## Build
 
@@ -51,6 +51,9 @@ curl --socks5-hostname 127.0.0.1:1080 http://my-svc.team-a.svc.cluster.local
 # Both at once, and the same with a container subtun creates on a Docker network
 build/subtun up --docker --network my-app_default 172.20.0.0/16 --socks 127.0.0.1:1080
 
+# Through a host over SSH, as sshuttle does (your ~/.ssh/config, keys and agent; -J for a jump host)
+build/subtun up --ssh me@bastion.example.com 10.0.0.0/8
+
 # Split DNS: names under cluster.local resolve inside the pod, everything else as before
 build/subtun up --k8s -n team-a 10.96.0.0/12 10.244.0.0/16 --dns-domain cluster.local
 curl http://my-svc.team-a.svc.cluster.local:8080/
@@ -64,9 +67,9 @@ build/subtun up --k8s -n team-a 10.0.0.0/8 --dry-run   # what would happen, with
 build/subtun cleanup                                    # remove blocks a kill switch left
 ```
 
-subtun connects with your kubeconfig or Docker context, starts a small agent in the target over exec
-and opens connections from inside the target. No `kubectl port-forward`, no sshd, no second
-terminal.
+subtun connects with your kubeconfig, Docker context or SSH config, starts a small agent in the
+target (over exec, or an SSH session) and opens connections from inside the target. No `kubectl
+port-forward`, nothing to install on the far side, no second terminal.
 
 **Capture and root.** subtun runs as your user. With CIDRs, sudo asks for your password once: a
 short-lived helper creates a utun interface (MTU 9000), adds routes for your CIDRs, hands the
@@ -153,7 +156,6 @@ turns an sshuttle options file into a profile ([details](docs/config.md#importin
 
 - Routes that follow network changes, and DNS answers outside the routes routed into the tunnel;
   subtun in the background (a daemon); a web UI.
-- SSH transport to any host.
 - DNS without firewall rules: subtun as the system resolver, or only for the listed domains.
 - UDP and IPv6 through the tunnel; capture on Linux (TUN) and Windows (wintun).
 

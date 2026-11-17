@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -410,6 +411,18 @@ func configTarget(t config.Target) string {
 			return "containers with " + d.Selector
 		}
 		return "container " + d.Name
+	case t.SSH != nil:
+		user, host, port, err := t.SSH.Dest()
+		if err != nil {
+			return "ssh " + t.SSH.Host
+		}
+		if user != "" {
+			host = user + "@" + host
+		}
+		if port != 0 {
+			host += ":" + strconv.Itoa(port)
+		}
+		return "ssh " + host
 	}
 	return ""
 }

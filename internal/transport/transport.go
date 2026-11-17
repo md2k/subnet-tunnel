@@ -229,6 +229,7 @@ func Bootstrap(ctx context.Context, ex Execer, agents []agentbin.Binary, opts Op
 // Args: dir (or ""), agent file names...
 const probeScript = `o=$1; shift
 echo "arch $(uname -m)"
+echo "os $(uname -s)"
 u=$(id -u 2>/dev/null) || u=0
 if [ -n "$o" ]; then
   c=$o
@@ -276,6 +277,7 @@ exit 1`
 
 type probeResult struct {
 	arch   string   // raw uname -m
+	os     string   // raw uname -s
 	have   []string // cached agent paths
 	dir    string   // usable dir for an upload, "" if none
 	skips  []string // "<dir> <reason>" for candidates that didn't work
@@ -300,6 +302,8 @@ func probe(ctx context.Context, ex Execer, agents []agentbin.Binary, dir string)
 		switch key {
 		case "arch":
 			pr.arch = val
+		case "os":
+			pr.os = val
 		case "have":
 			pr.have = append(pr.have, val)
 		case "dir":
@@ -319,6 +323,9 @@ func probe(ctx context.Context, ex Execer, agents []agentbin.Binary, dir string)
 func (pr *probeResult) pick(agents []agentbin.Binary) (*agentbin.Binary, error) {
 	if len(agents) == 0 {
 		return nil, errors.New("this subtun has no binary agents embedded (build with `make`)")
+	}
+	if pr.os != "" && pr.os != "Linux" { // an SSH host may be a Mac or a BSD
+		return nil, fmt.Errorf("the binary agent runs on Linux and the target runs %s", pr.os)
 	}
 	arch, ok := agentbin.ArchFromUname(pr.arch)
 	if !ok {

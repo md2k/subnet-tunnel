@@ -41,6 +41,7 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/tunnel` | laptop side: check the hello, open streams through the agent |
 | `internal/transport` | get an agent running in a target (probe, choose binary or Python, start); the labels and idle script of what subtun creates (`owned.go`), a selector's last pick (`picked.go`) |
 | `internal/transport/k8s`, `.../docker` | exec into a pod / container; create, reuse and delete subtun's own (`pod.go`, `container.go`); pick an existing one by labels |
+| `internal/transport/ssh` | the SSH client: settings from `ssh -G` (`config.go`), keys and the agent (`auth.go`), known_hosts (`hostkey.go`), jump hosts, proxy commands and commands as sessions (`ssh.go`); tests run an SSH server in the test process |
 | `internal/socks` | SOCKS5 frontend |
 | `internal/control` | the control socket (per process, user-only), its HTTP+JSON API (status, samples, the config's profiles, logs, changes), the client the commands use |
 | `internal/tui` | the terminal UI (`subtun tui`, `--tui`; tview): dashboard in two layouts, profile screen, logs, dialogs with dry runs; on a `Source` (the control socket, subtun's API in memory, or a fake); inside subtun, the stop question and the terminal lent to sudo (`Terminal`) |
@@ -48,7 +49,7 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/logring` | the recent log lines in memory (capped by lines and bytes) |
 | `internal/logx` | levels per component (the `component` attribute), masking of DNS names and destinations, log files rotated by size and pruned by age and total size |
 | `internal/xdg` | subtun's directories, nix style: state (`~/.local/state/subtun`: logs) and run (`$XDG_RUNTIME_DIR/subtun` or `<state>/run`: sockets) |
-| `internal/cli` | the commands; planning of routes (automatic excludes), DNS and the kill switch; dry-run output; the engine every run uses, one profile or several (`multi.go`: planning, each profile's tunnel, `runEngine`; `router.go`: a connection's tunnel; `change.go`: changes while running, planned and checked; `status.go`, `statuscmd.go`, `changecmd.go`, `tuicmd.go`, `uptui.go`: status, the control commands and the terminal UI, attached or inside subtun; `target.go`: a target given with `up --k8s` / `--docker`) |
+| `internal/cli` | the commands; planning of routes (automatic excludes), DNS and the kill switch; dry-run output; the engine every run uses, one profile or several (`multi.go`: planning, each profile's tunnel, `runEngine`; `router.go`: a connection's tunnel; `change.go`: changes while running, planned and checked; `status.go`, `statuscmd.go`, `changecmd.go`, `tuicmd.go`, `uptui.go`: status, the control commands and the terminal UI, attached or inside subtun; `target.go`: a target given with `up --k8s` / `--docker` / `--ssh`) |
 | `internal/capture` | utun capture setup: helper → utun + routes → netstack; the DNS runtime; the kill switch guard following the local networks; routes and guard changing while running |
 | `internal/dns` | DNS engine: match names (`.` leaves local names alone) and pick a tunnel among several, tunnel or fallback, answers outside the routes, UDP/TCP listener, loop-free forwarder |
 | `internal/routes` | route planning: excludes by subtraction, cleanup, safety checks |
@@ -253,6 +254,29 @@ curl --socks5-hostname 127.0.0.1:18087 http://web:8080/
 subtun create another; Ctrl-C deletes it; after `kill -9` the pod stays (it exits after 5 idle
 minutes) and the next start deletes it. `-l app=web` picks the `web` Deployment's pod, and
 `kubectl delete pod -l app=web` makes the reconnect pick its replacement.
+
+### SSH targets
+
+The compose `ssh` profile runs two OpenSSH servers (linuxserver/openssh-server) that take a
+throwaway key: `sshd` published on 127.0.0.1:2222 (with TCP forwarding, so it's also a jump host)
+and `sshd-inner` on the compose network only. `SUBTUN_SSH_CONFIG` hands subtun's `ssh -G` another
+config file (`ssh -F`), so the test keeps its host keys out of your own known_hosts.
+
+```sh
+mkdir -p build/ssh-test && ssh-keygen -t ed25519 -N "" -f build/ssh-test/id_ed25519
+printf 'Host *\n  UserKnownHostsFile %s/build/ssh-test/known_hosts\n  IdentityFile %s/build/ssh-test/id_ed25519\n  IdentitiesOnly yes\n' "$PWD" "$PWD" > build/ssh-test/config
+docker compose -f test/dev/compose.yaml --profile ssh up -d
+export SUBTUN_SSH_CONFIG=build/ssh-test/config
+build/subtun up --ssh subtun@127.0.0.1:2222 --socks 127.0.0.1:18090                            # asks about the host key
+curl --socks5-hostname 127.0.0.1:18090 http://web:8080/
+build/subtun up --ssh subtun@sshd-inner:2222 -J subtun@127.0.0.1:2222 --socks 127.0.0.1:18091  # through the jump host
+docker compose -f test/dev/compose.yaml --profile ssh down
+```
+
+Without a terminal the unknown host key is refused (run it from a script to see the hint);
+`docker exec subtun-dev-sshd-1 pkill -f subtun-agent` reconnects without asking again; `docker
+restart subtun-dev-sshd-1` drops the connection and reconnect brings it back. With `--tui` the
+terminal UI steps aside for the host key question.
 
 ### The terminal UI inside subtun
 

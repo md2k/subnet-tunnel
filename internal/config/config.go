@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -255,10 +257,70 @@ func (t *Toggle) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Target is where the agent runs: exactly one of K8s or Docker.
+// Target is where the agent runs: exactly one of K8s, Docker or SSH.
 type Target struct {
 	K8s    *K8sTarget    `json:"k8s,omitempty"`
 	Docker *DockerTarget `json:"docker,omitempty"`
+	SSH    *SSHTarget    `json:"ssh,omitempty"`
+}
+
+// SSHTarget is a host the agent runs on as the login user, reached over
+// SSH. What isn't set here comes from ~/.ssh/config, as OpenSSH resolves it
+// (ssh -G): HostName, User, Port, IdentityFile, ProxyJump, ProxyCommand,
+// known_hosts files.
+type SSHTarget struct {
+	Host     string `json:"host"`               // [user@]host[:port], or a ~/.ssh/config Host
+	User     string `json:"user,omitempty"`     // also as user@ in host
+	Port     int    `json:"port,omitempty"`     // also as :port in host
+	Identity string `json:"identity,omitempty"` // a private key file, tried first
+	Jump     string `json:"jump,omitempty"`     // ProxyJump: [user@]host[:port], comma-separated
+}
+
+// Dest is the host with the user and port from either place.
+func (t SSHTarget) Dest() (user, host string, port int, err error) {
+	user, host, port, err = SplitSSHHost(t.Host)
+	if err != nil {
+		return "", "", 0, err
+	}
+	switch {
+	case user != "" && t.User != "":
+		return "", "", 0, fmt.Errorf("target.ssh: the user is in host (%s@) and in user", user)
+	case port != 0 && t.Port != 0:
+		return "", "", 0, fmt.Errorf("target.ssh: the port is in host (:%d) and in port", port)
+	}
+	if t.User != "" {
+		user = t.User
+	}
+	if t.Port != 0 {
+		port = t.Port
+	}
+	return user, host, port, nil
+}
+
+// SplitSSHHost reads [user@]host[:port]; an IPv6 address with a port goes
+// in brackets ([::1]:2222).
+func SplitSSHHost(s string) (user, host string, port int, err error) {
+	bad := func(why string) (string, string, int, error) {
+		return "", "", 0, fmt.Errorf("%q: %s", s, why)
+	}
+	host = s
+	if i := strings.LastIndex(host, "@"); i >= 0 {
+		user, host = host[:i], host[i+1:]
+		if user == "" {
+			return bad("empty user before @")
+		}
+	}
+	if h, p, e := net.SplitHostPort(host); e == nil {
+		n, e := strconv.Atoi(p)
+		if e != nil || n < 1 || n > 65535 {
+			return bad("port " + p + " isn't 1-65535")
+		}
+		host, port = h, n
+	}
+	if host == "" || strings.ContainsAny(host, " \t/") || strings.HasPrefix(host, "-") {
+		return bad("not [user@]host[:port]")
+	}
+	return user, host, port, nil
 }
 
 // K8sTarget is the pod the agent runs in. By default subtun creates it
@@ -491,14 +553,47 @@ func (f *File) Names() []string {
 // command line goes through it too).
 func (t Target) Validate() error {
 	switch {
-	case t.K8s != nil && t.Docker != nil:
-		return errors.New("target: set either k8s or docker, not both")
+	case btoi(t.K8s != nil)+btoi(t.Docker != nil)+btoi(t.SSH != nil) > 1:
+		return errors.New("target: set one of k8s, docker, ssh")
 	case t.K8s != nil:
 		return t.K8s.validate()
 	case t.Docker != nil:
 		return t.Docker.validate()
+	case t.SSH != nil:
+		return t.SSH.validate()
 	}
-	return errors.New("target: set k8s or docker")
+	return errors.New("target: set k8s, docker or ssh")
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func (t SSHTarget) validate() error {
+	if t.Host == "" {
+		return errors.New("target.ssh.host: [user@]host[:port], or a Host from ~/.ssh/config")
+	}
+	if t.Port < 0 || t.Port > 65535 {
+		return fmt.Errorf("target.ssh.port %d: 1-65535", t.Port)
+	}
+	if _, _, _, err := t.Dest(); err != nil {
+		if strings.HasPrefix(err.Error(), "target.ssh") {
+			return err
+		}
+		return fmt.Errorf("target.ssh.host %v", err)
+	}
+	for _, hop := range strings.Split(t.Jump, ",") {
+		if t.Jump == "" {
+			break
+		}
+		if _, _, _, err := SplitSSHHost(strings.TrimSpace(hop)); err != nil {
+			return fmt.Errorf("target.ssh.jump %v", err)
+		}
+	}
+	return nil
 }
 
 func (t K8sTarget) validate() error {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -81,6 +82,8 @@ func TestTargets(t *testing.T) {
   labels: {target: {k8s: {selector: "app=toolbox,tier!=db"}}, socks: 127.0.0.1:4}
   box: {target: {docker: {network: dev_default, resources: {limits: {cpu: "1"}}}}, socks: 127.0.0.1:5}
   web: {target: {docker: {selector: com.docker.compose.service=web}}, socks: 127.0.0.1:6}
+  jump: {target: {ssh: {host: "me@[2001:db8::5]:2200", identity: ~/.ssh/work, jump: "a@j1:2222, j2"}}, socks: 127.0.0.1:7}
+  alias: {target: {ssh: {host: db-prod, user: ops, port: 2022}}, socks: 127.0.0.1:8}
 `), "t")
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +98,24 @@ func TestTargets(t *testing.T) {
 			t.Errorf("%s creates: %v", name, !creates)
 		}
 	}
+	for name, want := range map[string]string{"jump": "me 2001:db8::5 2200", "alias": "ops db-prod 2022"} {
+		p, _ := f.Profile(name)
+		user, host, port, err := p.Target.SSH.Dest()
+		if got := fmt.Sprintf("%s %s %d", user, host, port); err != nil || got != want {
+			t.Errorf("%s: %q %v, want %q", name, got, err, want)
+		}
+	}
 	for doc, want := range map[string]string{
+		`{ssh: {}}`:                                      "target.ssh.host: [user@]host[:port]",
+		`{ssh: {host: "me@"}}`:                           `target.ssh.host "me@": not [user@]host[:port]`,
+		`{ssh: {host: "h:0"}}`:                           `target.ssh.host "h:0": port 0 isn't 1-65535`,
+		`{ssh: {host: "a@h", user: b}}`:                  "target.ssh: the user is in host (a@) and in user",
+		`{ssh: {host: "h:22", port: 2222}}`:              "target.ssh: the port is in host (:22) and in port",
+		`{ssh: {host: h, port: 70000}}`:                  "target.ssh.port 70000: 1-65535",
+		`{ssh: {host: h, jump: "a b"}}`:                  `target.ssh.jump "a b": not [user@]host[:port]`,
+		`{ssh: {host: "-oProxyCommand=x"}}`:              "not [user@]host[:port]",
+		`{ssh: {host: h}, docker: {}}`:                   "target: set one of k8s, docker, ssh",
+		`{}`:                                             "target: set k8s, docker or ssh",
 		`{k8s: {create: false}}`:                         "target.k8s (an existing pod) needs one of name, selector",
 		`{k8s: {create: false, name: p, selector: x}}`:   "target.k8s (an existing pod): name and selector don't go together",
 		`{k8s: {create: false, name: p, image: i}}`:      "target.k8s.image: only with create (the default)",

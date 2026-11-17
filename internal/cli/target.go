@@ -18,6 +18,9 @@ import (
 // profile's: the same keys as a profile's target, as flags.
 type targetFlags struct {
 	k8s, docker bool
+	ssh         string
+	identity    string
+	jump        string
 	create      bool
 	name        string
 	selector    string
@@ -34,12 +37,18 @@ type targetFlags struct {
 
 // The flags that belong to a target given here.
 var targetFlagNames = []string{"create", "name", "selector", "image", "network", "requests", "limits",
-	"namespace", "container", "context", "kubeconfig", "host"}
+	"namespace", "container", "context", "kubeconfig", "host", "identity", "jump"}
+
+// The flags of pod and container targets (not --ssh's).
+var podFlagNames = targetFlagNames[:12]
 
 func (tf *targetFlags) register(cmd *cobra.Command) {
 	f := cmd.Flags()
 	f.BoolVar(&tf.k8s, "k8s", false, "the target is a Kubernetes pod: one subtun creates (the default), or an existing one (--create=false with --name or -l)")
 	f.BoolVar(&tf.docker, "docker", false, "the target is a Docker container: one subtun creates (the default), or an existing one (--create=false with --name or -l)")
+	f.StringVar(&tf.ssh, "ssh", "", "the target is a host reached over SSH, [user@]host[:port] or a Host from ~/.ssh/config: the agent runs there as you")
+	f.StringVarP(&tf.identity, "identity", "i", "", "--ssh: a private key file, tried first")
+	f.StringVarP(&tf.jump, "jump", "J", "", "--ssh: jump hosts (ProxyJump), [user@]host[:port], comma-separated")
 	f.BoolVar(&tf.create, "create", true, "--k8s, --docker: create the pod or container (and delete it on stop); false: use an existing one")
 	f.StringVar(&tf.name, "name", "", "--k8s, --docker: the pod's or container's name: to create (default: generated), or the existing one")
 	f.StringVarP(&tf.selector, "selector", "l", "", "--k8s, --docker: an existing pod or container with these labels, picked at each connect (k8s: kubectl's syntax; docker: key=value, comma-separated); implies --create=false")
@@ -55,7 +64,7 @@ func (tf *targetFlags) register(cmd *cobra.Command) {
 }
 
 // given reports whether a target was given here.
-func (tf *targetFlags) given() bool { return tf.k8s || tf.docker }
+func (tf *targetFlags) given() bool { return tf.k8s || tf.docker || tf.ssh != "" }
 
 // unused refuses the target's flags without a target given here.
 func (tf *targetFlags) unused(flags *pflag.FlagSet) error {
@@ -68,13 +77,26 @@ func (tf *targetFlags) unused(flags *pflag.FlagSet) error {
 	if len(used) == 0 {
 		return nil
 	}
-	return fmt.Errorf("%s: for a target given here, with --k8s or --docker (a profile has them in its target)", strings.Join(used, ", "))
+	return fmt.Errorf("%s: for a target given here, with --k8s, --docker or --ssh (a profile has them in its target)", strings.Join(used, ", "))
 }
 
 // target is the target given here, checked as a profile's would be.
 func (tf *targetFlags) target(flags *pflag.FlagSet) (config.Target, error) {
-	if tf.k8s && tf.docker {
-		return config.Target{}, errors.New("--k8s and --docker don't go together")
+	if kinds := btoi(tf.k8s) + btoi(tf.docker) + btoi(tf.ssh != ""); kinds > 1 {
+		return config.Target{}, errors.New("--k8s, --docker and --ssh don't go together: one target")
+	}
+	if tf.ssh != "" {
+		if err := onlyFor(flags, "--k8s or --docker", podFlagNames...); err != nil {
+			return config.Target{}, err
+		}
+		tg := config.Target{SSH: &config.SSHTarget{Host: tf.ssh, Identity: tf.identity, Jump: tf.jump}}
+		if err := tg.Validate(); err != nil {
+			return config.Target{}, sshFlagWords(err)
+		}
+		return tg, nil
+	}
+	if err := onlyFor(flags, "--ssh", "identity", "jump"); err != nil {
+		return config.Target{}, err
 	}
 	var create *bool
 	if flags.Changed("create") {
@@ -117,6 +139,19 @@ func (tf *targetFlags) spec(flags *pflag.FlagSet, args []string, s settings, g *
 	sp := &tunnelSpec{s: s}
 	sp.connect, sp.endpoint, sp.release = profileTarget("", tg, &sp.s, g)
 	return sp, nil
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// sshFlagWords says an SSH target error in flags.
+func sshFlagWords(err error) error {
+	r := strings.NewReplacer("target.ssh.host", "--ssh", "target.ssh.jump", "--jump", "target.ssh.identity", "--identity", "target.ssh", "--ssh")
+	return errors.New(r.Replace(err.Error()))
 }
 
 // onlyFor refuses flags that belong to the other kind of target.
