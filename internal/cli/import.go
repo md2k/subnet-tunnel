@@ -41,8 +41,10 @@ becomes the DNS fallback, --ns-hosts the captured DNS servers; plain --dns
 sends every name through the tunnel. Options subtun doesn't need or have are
 listed in comments at the top, with what was dropped as redundant.
 
-The target (pod or container) can't come from sshuttle's SSH remote: give it
-with --k8s/--docker (required with --write), or fill in the placeholder.`,
+The target comes from sshuttle's SSH remote (-r, with -i, -J, -p and -l from
+its --ssh-cmd; a password is left out: subtun logs in with keys or the SSH
+agent). --k8s or --docker give an existing pod or container instead. Without
+any of them the target is a placeholder to fill in (and --write refuses).`,
 		Example: `  subtun import sshuttle work.conf --name work --k8s debug -n tools --context dev --write
   subtun import sshuttle work.conf --name work > work.yaml    # review first`,
 		Args: cobra.ExactArgs(1),
@@ -75,11 +77,16 @@ with --k8s/--docker (required with --write), or fill in the placeholder.`,
 				target = "{k8s: {" + strings.Join(parts, ", ") + "}}"
 			case container != "":
 				target = "{docker: {create: false, name: " + quote(container) + "}}"
+			case p.SSH != nil:
+				target = p.SSH.Target()
+			}
+			if p.SSH != nil && (pod != "" || container != "") {
+				p.Notes = append(p.Notes, "--remote "+p.SSH.Host+": replaced by the target given with --k8s/--docker")
 			}
 			errOut := cmd.ErrOrStderr()
 			if write {
 				if target == "" {
-					return errors.New("--write needs --k8s or --docker: subtun refuses a profile without a target")
+					return errors.New("--write needs a target: sshuttle's -r, or --k8s or --docker (subtun refuses a profile without one)")
 				}
 				path := g.config
 				if path == "" {

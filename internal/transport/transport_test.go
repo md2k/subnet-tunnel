@@ -24,6 +24,7 @@ import (
 type fakeTarget struct {
 	noShell bool
 	uname   string
+	os      string          // uname -s; "": Linux
 	dir     string          // usable dir reported by the probe, "" for none
 	cached  map[string]bool // full paths of cached agents
 	python  string          // python command, "" for none
@@ -45,6 +46,11 @@ func (f *fakeTarget) Run(_ context.Context, cmd []string, stdin io.Reader) (stri
 	case cmd[0] == "sh" && cmd[2] == probeScript:
 		var b strings.Builder
 		b.WriteString("arch " + f.uname + "\n")
+		if f.os == "" {
+			b.WriteString("os Linux\n")
+		} else {
+			b.WriteString("os " + f.os + "\n")
+		}
 		for _, name := range cmd[5:] { // sh -c script sh dir names...
 			for p := range f.cached {
 				if strings.HasSuffix(p, "/"+name) {
@@ -142,6 +148,7 @@ func TestAutoFallsBackToPython(t *testing.T) {
 		"no usable dir": {uname: "x86_64", python: "python3", pyver: "3.11"},
 		"no shell":      {noShell: true, python: "python3", pyver: "3.11"},
 		"unknown arch":  {uname: "s390x", dir: "/tmp/subtun-0", python: "python3", pyver: "3.11"},
+		"not Linux":     {uname: "arm64", os: "Darwin", dir: "/tmp/subtun-501", python: "python3", pyver: "3.9"}, // an SSH host
 	}
 	for name, f := range cases {
 		t.Run(name, func(t *testing.T) {

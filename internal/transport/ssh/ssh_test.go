@@ -430,3 +430,28 @@ func TestConnect(t *testing.T) {
 	}
 	_ = carrier.Close()
 }
+
+// The server is asked for host keys in OpenSSH's order, narrowed to the
+// types known_hosts has for the host.
+func TestHostKeyAlgorithms(t *testing.T) {
+	home := t.TempDir()
+	_, priv, _ := ed25519.GenerateKey(nil)
+	ed, _ := ssh.NewSignerFromKey(priv)
+	kh := filepath.Join(home, "known_hosts")
+	_ = os.WriteFile(kh, []byte(knownhosts.Line([]string{"[known.example]:2222"}, ed.PublicKey())+"\n"), 0o600)
+	order := []string{"ssh-ed25519-cert-v01@openssh.com", "ecdsa-sha2-nistp256", "ssh-ed25519", "rsa-sha2-512", "no-such-algo"}
+	h, err := newHostKeys(context.Background(), &hostConfig{userKnown: []string{kh}, hostKeyAlgos: order}, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := h.algorithms("known.example:2222"); fmt.Sprint(got) != "[ssh-ed25519]" {
+		t.Errorf("known host: %q", got)
+	}
+	if got := h.algorithms("other.example:22"); fmt.Sprint(got) != "[ssh-ed25519-cert-v01@openssh.com ecdsa-sha2-nistp256 ssh-ed25519 rsa-sha2-512]" {
+		t.Errorf("unknown host: %q", got)
+	}
+	h.c.hostKeyAlgos = nil
+	if got := h.algorithms("other.example:22"); got != nil {
+		t.Errorf("no ssh -G: %q", got)
+	}
+}

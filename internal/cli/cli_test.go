@@ -510,6 +510,16 @@ func TestImportSSHuttle(t *testing.T) {
 	if _, err := runCLI(t, "import", "sshuttle", "../importer/testdata/sshuttle.conf", "--k8s", "p", "--docker", "c"); err == nil {
 		t.Error("two targets accepted")
 	}
+	// Without --k8s/--docker, sshuttle's own remote is the target; with
+	// one, it's replaced (and said so).
+	out, err = runCLI(t, "import", "sshuttle", "../importer/testdata/sshuttle.conf", "--name", "work")
+	if err != nil || !strings.Contains(out, "    target: {ssh: {host: 'user@bastion.example.net'}}") {
+		t.Errorf("ssh target: %v\n%s", err, out)
+	}
+	out, _ = runCLI(t, "import", "sshuttle", "../importer/testdata/sshuttle.conf", "--docker", "app")
+	if !strings.Contains(out, "--remote user@bastion.example.net: replaced by the target given with --k8s/--docker") {
+		t.Errorf("no replaced note in\n%s", out)
+	}
 }
 
 func TestDNSCatchAllLeavesLocal(t *testing.T) {
