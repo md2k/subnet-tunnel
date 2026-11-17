@@ -306,11 +306,15 @@ func TestDNSProfileAndFlags(t *testing.T) {
 		"queries to 203.0.113.53 are answered", // pinned in the profile
 		"through the tunnel: svc.cluster.local, company.com\n",
 		"other names: 198.51.100.53:5353", // flag overrides the profile's fallback
-		"warning: fallback DNS server 198.51.100.53 is inside the routed 198.51.100.0/24",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in\n%s", want, out)
 		}
+	}
+	// The fallback inside the routes (198.51.100.0/24) is reached through the
+	// tunnel now that UDP is carried: no warning.
+	if strings.Contains(out, "is inside the routed") {
+		t.Errorf("a warning about the fallback inside the routes:\n%s", out)
 	}
 	if strings.Contains(out, "follow the system") {
 		t.Error("pinned servers must not follow the system's")

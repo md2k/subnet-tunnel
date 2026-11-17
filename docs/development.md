@@ -56,7 +56,7 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/config` | YAML config profiles |
 | `internal/importer` | `subtun import sshuttle`: sshuttle options file → profile, insertion into a config file |
 | `internal/netinfo` | local interface networks and default gateway (read-only) |
-| `internal/netstack` | gVisor stack on a packet device; dials each captured connection through the tunnel; loop guard; hands packets for the utun's own address back |
+| `internal/netstack` | gVisor stack on a packet device; dials each captured connection through the tunnel, and each UDP flow (`udp.go`); loop guard; hands packets for the utun's own address back |
 | `internal/tundev` | utun as a netstack device (macOS) |
 | `internal/privhelper` | the root helper (`subtun helper`) and subtun's side of it; a session also takes route changes |
 | `internal/platform` | OS driver interfaces used by the helper (`Tun`, `Routes`, `Firewall`, `DNSCache`) |

@@ -78,9 +78,9 @@ More examples: [Configuration → Examples](docs/config.md#examples).
   `ssh` keeps it, keys only). subtun starts a small agent there over exec or an SSH session: a Go
   binary, or a Python one where the binary can't run.
 - **Capture** ([routes](docs/config.md#routes-and-excludes), [full tunnel](docs/config.md#full-tunnel)):
-  your CIDRs go through a utun interface, so every program reaches them directly. Root only for a
-  short-lived helper that sets up the interface and routes ([privileges](docs/design.md#privileges));
-  everything else runs as you. Excludes win by being more specific; your LAN and subtun's own
+  your CIDRs go through a utun interface, TCP and UDP (QUIC too), so every program reaches them
+  directly. Root only for a short-lived helper that sets up the interface and routes
+  ([privileges](docs/design.md#privileges)); everything else runs as you. Excludes win by being more specific; your LAN and subtun's own
   connection are excluded automatically; routing loops are caught.
 - **Split DNS** ([DNS](docs/config.md#dns)): names under your domains or patterns resolve inside the
   target, the rest as before; `--dns-domain .` sends every name but local ones.
@@ -119,7 +119,7 @@ dry run.
 
 ## Planned
 
-- UDP (QUIC too) and IPv6 through the tunnel; capture on Linux (TUN) and Windows (wintun).
+- IPv6 through the tunnel; capture on Linux (TUN) and Windows (wintun).
 - Deciding per destination inside subtun: names that get their own address and lead to their
   profile wherever they resolve; everything into subtun with the rest leaving directly; failover and
   balancing between profiles.
