@@ -43,10 +43,53 @@ type pipeCarrier struct {
 	io.WriteCloser
 }
 
+// lockedBuf is the agent's stderr, read while the agent runs.
+type lockedBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// waitLine waits for a log line containing all of parts and returns it.
+func (l *lockedBuf) waitLine(t *testing.T, parts ...string) string {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+	lines:
+		for _, line := range strings.Split(l.String(), "\n") {
+			for _, p := range parts {
+				if !strings.Contains(line, p) {
+					continue lines
+				}
+			}
+			return line
+		}
+	}
+	t.Fatalf("no log line with %q", parts) // the cleanup prints the log
+	return ""
+}
+
 // startAgent runs the Python agent locally over pipes, with dial() and
 // dns_connect() replaced by in-process socket pairs (testdata/fakenet.py),
 // and connects a tunnel client to it. Skips if there is no suitable python3.
 func startAgent(t *testing.T) *tunnel.Client {
+	t.Helper()
+	c, _ := startAgentLog(t)
+	return c
+}
+
+// startAgentLog is startAgent with the agent's log (debug level).
+func startAgentLog(t *testing.T) (*tunnel.Client, *lockedBuf) {
 	t.Helper()
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -76,8 +119,8 @@ func startAgent(t *testing.T) *tunnel.Client {
 	cmd := exec.Command(python, "-c", loader, "-v")
 	stdin, _ := cmd.StdinPipe()
 	stdout, _ := cmd.StdoutPipe()
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	stderr := &lockedBuf{}
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +149,7 @@ func startAgent(t *testing.T) *tunnel.Client {
 		t.Fatalf("%v\nagent stderr:\n%s", err, stderr.String())
 	}
 	t.Cleanup(func() { _ = c.Close() })
-	return c
+	return c, stderr
 }
 
 func TestPythonAgentEcho(t *testing.T) {
@@ -232,5 +275,66 @@ func TestPythonAgentUDP(t *testing.T) {
 	}
 	if _, err := c.DialContext(context.Background(), "udp", "nowhere.svc:53"); err == nil || !strings.Contains(err.Error(), "connection refused") {
 		t.Errorf("unknown destination: %v", err)
+	}
+}
+
+// An ICMP error for one datagram doesn't end the flow: the agent logs it and
+// carries on, and says why the flow ended when it does.
+func TestPythonAgentUDPSurvivesErrors(t *testing.T) {
+	c, logs := startAgentLog(t)
+	conn, err := c.DialContext(context.Background(), "udp", "quic.svc:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 100)
+	for _, d := range []string{"initial", "handshake"} {
+		if _, err := conn.Write([]byte(d)); err != nil {
+			t.Fatal(err)
+		}
+		n, err := conn.Read(buf)
+		if err != nil || string(buf[:n]) != "re:"+d {
+			t.Fatalf("%q after read errors: got %q, %v", d, buf[:n], err)
+		}
+	}
+	logs.waitLine(t, "udp flow error", "No route to host")
+	logs.waitLine(t, "udp flow error", "Message too long")
+	_ = conn.Close()
+	line := logs.waitLine(t, "udp flow closed", "reason=")
+	for _, want := range []string{"No route to host (2)", "Message too long (1)", "Connection refused (1)"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("the closing line doesn't count %q: %s", want, line)
+		}
+	}
+}
+
+// A socket that only fails ends the flow after a while, and subtun hears of
+// it (the stream ends) rather than waiting on a flow the agent dropped.
+func TestPythonAgentUDPEndsWhenItsSocketKeepsFailing(t *testing.T) {
+	c, logs := startAgentLog(t)
+	conn, err := c.DialContext(context.Background(), "udp", "dead.svc:9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_, err = conn.Read(make([]byte, 100))
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("read: %v, want EOF: the flow ended by the agent", err)
+	}
+	logs.waitLine(t, "udp flow closed", "reason=", "Network is unreachable")
+}
+
+// A connection the agent aborts (the target reset it) ends for subtun too.
+func TestPythonAgentAbortReachesSubtun(t *testing.T) {
+	c := startAgent(t)
+	conn, err := c.DialContext(context.Background(), "tcp", "reset.svc:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Read(make([]byte, 100)); !errors.Is(err, io.EOF) {
+		t.Fatalf("read: %v, want EOF after the agent's abort", err)
 	}
 }

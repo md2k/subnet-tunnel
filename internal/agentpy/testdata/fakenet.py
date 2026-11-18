@@ -2,6 +2,7 @@
 # dns_connect() with in-process socket pairs (no network), then starts the
 # agent.
 import errno
+import os
 import socket
 import struct
 import threading
@@ -32,17 +33,54 @@ def _reply_after_eof(s):
         s.close()
 
 
-_HANDLERS = {"echo.svc:7": _echo, "rr.svc:80": _reply_after_eof}
+def _wait_eof(s):
+    try:
+        while s.recv(65536):
+            pass
+    except OSError:
+        pass
+    finally:
+        s.close()
+
+
+class _Failing(object):
+    """Wraps a socket: recv fails with errs first, one per call, then works;
+    with forever set, every recv fails."""
+
+    def __init__(self, sock, errs=(), forever=None):
+        self._sock = sock
+        self._errs = list(errs)
+        self._forever = forever
+
+    def recv(self, n):
+        if self._forever is not None:
+            raise OSError(self._forever, os.strerror(self._forever))
+        if self._errs:
+            e = self._errs.pop(0)
+            if e == errno.ECONNRESET:
+                raise ConnectionResetError(e, os.strerror(e))
+            raise OSError(e, os.strerror(e))
+        return self._sock.recv(n)
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
+
+
+_HANDLERS = {"echo.svc:7": _echo, "rr.svc:80": _reply_after_eof, "reset.svc:80": _wait_eof}
+_FAIL_TCP = {"reset.svc:80": dict(errs=[errno.ECONNRESET])}
 
 
 def dial(host, port):
-    handler = _HANDLERS.get("%s:%d" % (host, port))
+    key = "%s:%d" % (host, port)
+    handler = _HANDLERS.get(key)
     if handler is None:
         raise ConnectionRefusedError(errno.ECONNREFUSED, "connection refused")
     a, b = socket.socketpair()
     t = threading.Thread(target=handler, args=(b,))
     t.daemon = True
     t.start()
+    if key in _FAIL_TCP:
+        return _Failing(a, **_FAIL_TCP[key])
     return a
 
 
@@ -100,17 +138,25 @@ def _udp_echo(s):
         s.close()
 
 
-_UDP = {"dns.svc:53": _udp_echo}
+_UDP = {"dns.svc:53": _udp_echo, "quic.svc:443": _udp_echo, "dead.svc:9": _udp_echo}
+# ICMP errors for earlier datagrams, as a connected UDP socket reports them.
+_FAIL_UDP = {
+    "quic.svc:443": dict(errs=[errno.EHOSTUNREACH, errno.EMSGSIZE, errno.EHOSTUNREACH, errno.ECONNREFUSED]),
+    "dead.svc:9": dict(forever=errno.ENETUNREACH),
+}
 
 
 def udp_dial(host, port):
-    handler = _UDP.get("%s:%d" % (host, port))
+    key = "%s:%d" % (host, port)
+    handler = _UDP.get(key)
     if handler is None:
         raise ConnectionRefusedError(errno.ECONNREFUSED, "connection refused")
     a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
     t = threading.Thread(target=handler, args=(b,))
     t.daemon = True
     t.start()
+    if key in _FAIL_UDP:
+        return _Failing(a, **_FAIL_UDP[key])
     return a
 
 
