@@ -224,6 +224,64 @@ func udpEcho(c net.Conn) {
 	}
 }
 
+// An ICMP error from the application's side (here: port unreachable, for a
+// datagram that arrived after its socket closed) doesn't end the flow: the
+// next socket on the same port carries on in it. (gVisor reports the error on
+// the next read, so ending the flow there also lost the next datagram.)
+func TestUDPFlowSurvivesICMPError(t *testing.T) {
+	var opened atomic.Int32
+	lateSent := make(chan struct{})
+	handler := func(c net.Conn) {
+		opened.Add(1)
+		defer c.Close()
+		buf := make([]byte, 65535)
+		for {
+			n, err := c.Read(buf)
+			if err != nil {
+				return
+			}
+			_, _ = c.Write(append([]byte("re:"), buf[:n]...))
+			if string(buf[:n]) == "first" {
+				time.Sleep(200 * time.Millisecond) // the app's socket is closed by now
+				_, _ = c.Write([]byte("late"))
+				close(lateSent)
+			}
+		}
+	}
+	client := setupWith(t, map[string]func(net.Conn){"10.1.2.3:443": handler}, Options{DialTimeout: 5 * time.Second})
+	local := &tcpip.FullAddress{NIC: 1, Port: 40000}
+	remote := &tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4([4]byte{10, 1, 2, 3}), Port: 443}
+	exchange := func(conn *gonet.UDPConn, d string) {
+		t.Helper()
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		if _, err := conn.Write([]byte(d)); err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, 100)
+		n, err := conn.Read(buf)
+		if err != nil || string(buf[:n]) != "re:"+d {
+			t.Fatalf("%q: got %q %v", d, buf[:n], err)
+		}
+	}
+	first, err := gonet.DialUDP(client, local, remote, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchange(first, "first")
+	_ = first.Close()
+	<-lateSent
+	time.Sleep(200 * time.Millisecond) // the app's stack answers "late" with port unreachable
+	second, err := gonet.DialUDP(client, local, remote, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	exchange(second, "second")
+	if n := opened.Load(); n != 1 {
+		t.Errorf("%d flows opened, want 1: the ICMP error ended the flow", n)
+	}
+}
+
 // An application's UDP datagrams become a flow through the tunnel, the
 // answers come back from the destination's address, and the flow closes
 // once idle; the next datagram opens a new one.
