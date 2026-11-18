@@ -47,6 +47,16 @@ func TestRuleArgs(t *testing.T) {
 	}
 }
 
+// A table the kernel has never seen is empty, not an error.
+func TestMissingTable(t *testing.T) {
+	if !missingTable("ip -4 -j route show table 32761: exit status 2: Error: ipv4: FIB table does not exist.\nDump terminated") {
+		t.Error("FIB table does not exist: not recognised")
+	}
+	if missingTable("ip -4 -j route show table 32761: exit status 1: Operation not permitted") {
+		t.Error("another error taken for a missing table")
+	}
+}
+
 func TestCountJSON(t *testing.T) {
 	for out, want := range map[string]int{
 		"":     0,

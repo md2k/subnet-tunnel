@@ -85,6 +85,9 @@ func (Route) Teardown() (bool, error) {
 	}
 	out, err := output("ip", "-4", "-j", "route", "show", "table", strconv.Itoa(Table))
 	if err != nil {
+		if missingTable(err.Error()) {
+			return removed, nil
+		}
 		return removed, err
 	}
 	if n, err := countJSON(out); err != nil {

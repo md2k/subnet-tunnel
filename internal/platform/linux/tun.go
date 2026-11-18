@@ -19,9 +19,16 @@ const tunDev = "/dev/net/tun"
 // information header, no offloads.
 type Tun struct{}
 
-// Create makes a TUN interface, sets its MTU and address and brings it up.
-// It isn't persistent: the kernel removes it, with its routes, once no
-// process holds it open.
+// Create makes a TUN interface, sets its MTU and brings it up. It isn't
+// persistent: the kernel removes it, with its routes, once no process holds
+// it open.
+//
+// Unlike the macOS utun, it gets no address: routes into it don't need one,
+// and connections through it use one of this machine's own addresses, to
+// which the answers come back. A new address would make other software
+// react: microk8s's apiserver-kicker adds it to the API server certificate
+// and restarts the API server (and again when it goes), and mDNS responders
+// may announce it. addr is checked but not assigned.
 func (Tun) Create(mtu int, addr netip.Addr) (platform.TunDevice, error) {
 	if !addr.Is4() {
 		return nil, fmt.Errorf("TUN address %s: IPv4 only so far", addr)
@@ -50,7 +57,6 @@ func (Tun) Create(mtu int, addr netip.Addr) (platform.TunDevice, error) {
 	_ = os.WriteFile("/proc/sys/net/ipv6/conf/"+d.name+"/disable_ipv6", []byte("1"), 0o644)
 	for _, args := range [][]string{
 		{"link", "set", "dev", d.name, "mtu", strconv.Itoa(mtu)},
-		{"-4", "addr", "add", addr.String() + "/32", "dev", d.name},
 		{"link", "set", "dev", d.name, "up"},
 	} {
 		if err := run("ip", args...); err != nil {

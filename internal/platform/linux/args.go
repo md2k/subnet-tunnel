@@ -61,6 +61,12 @@ func ruleArgs(verb string) [][]string {
 	}
 }
 
+// missingTable reports whether an `ip route show table N` error only says
+// the table doesn't exist yet (nothing was ever routed into it).
+func missingTable(msg string) bool {
+	return strings.Contains(msg, "FIB table does not exist")
+}
+
 // countJSON counts the entries of `ip -j ... show` output (empty output: 0).
 func countJSON(out []byte) (int, error) {
 	s := strings.TrimSpace(string(out))
