@@ -408,6 +408,12 @@ machine is back to normal. Your LAN, multicast and link-local stay local (see th
 under [Safety checks](#safety-checks)), and subtun's own connection to the API server or Docker
 daemon is excluded automatically.
 
+On Linux the IPv6 block isn't implemented yet, and a full tunnel turns it on by itself (see
+[IPv6](#ipv6)): add `--block-ipv6 false` there for now (IPv6 then bypasses the tunnel). Routes on
+Linux only take this machine's own traffic: containers, pods and VMs on this machine keep their
+normal routes, and this machine's specific routes (the LAN, container and pod networks, other VPNs)
+stay in front of subtun's ([design](design.md#linux)).
+
 ```sh
 subtun up --k8s --context remote -n tools 0.0.0.0/1 128.0.0.0/1 --dns-domain . --dns-domain cluster.local
 ```
@@ -461,10 +467,12 @@ into the tunnel, to the target again, without end. subtun guards against that:
 
 ## subtun's own addresses
 
-`tun.address` (`--tun-addr`) is the utun's point-to-point address, by default `198.18.249.1`. The
-range 198.18.0.0/15 is reserved for benchmarking (RFC 2544), so real networks, VPN clients and
+`tun.address` (`--tun-addr`) is the macOS utun's point-to-point address, by default `198.18.249.1`.
+The range 198.18.0.0/15 is reserved for benchmarking (RFC 2544), so real networks, VPN clients and
 corporate address plans don't use it. Change it if yours does. It must be a unicast IPv4 address;
-if your routes contain it, it is excluded from them.
+if your routes contain it, it is excluded from them. On Linux the tunnel interface gets no address
+(connections through it use one of the machine's own; see [design](design.md#linux)), so the
+setting changes nothing there.
 
 ## DNS
 

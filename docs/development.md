@@ -24,6 +24,41 @@ docker run --rm -v "$PWD/internal/agentpy:/w" -w /w -v "$PWD/build/agentpy-linux
   -e SUBTUN_UDP_BENCH=1 -e SUBTUN_UDP_RATE=100 python:3.12-alpine /t -test.v
 ```
 
+The same works for any package's tests on Linux (the Linux drivers' argument builders, the helper
+loop, the CLI): mount the repository, since some tests read files next to their package.
+
+```sh
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -o build/cli-linux.test ./internal/cli/
+docker run --rm -v "$PWD:/repo:ro" -w /repo/internal/cli alpine:3.20 /repo/build/cli-linux.test
+```
+
+### Capture on a Linux machine (needs root there)
+
+Build `subtun` for the machine (`make build` first, for the embedded agents), copy it, and run it
+there as a user that may sudo; the helper is started through sudo as on macOS:
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o build/subtun-linux-arm64 ./cmd/subtun
+scp build/subtun-linux-arm64 lab:subtun-test/subtun
+ssh lab 'cd subtun-test && ./subtun -v up --docker --max-duration 3m 1.1.1.1/32'
+```
+
+A container (or pod) on the same machine is a fine target on Linux: its traffic doesn't use
+subtun's routes. What to look at while it runs: `ip -br link show type tun` (`subtun0`, no
+address), `ip rule` (32760 and 32761), `ip route show table 32761`, `ip route get ADDR` (routed
+addresses: `dev subtun0 table 32761`; the LAN and container networks: as before). After it stops,
+none of those are left; `subtun cleanup` removes the rules if subtun and its helper were killed.
+
+For a full tunnel (`0.0.0.0/1 128.0.0.0/1 --block-ipv6 false`) on a machine you reach over the
+network, arm a dead-man switch first, so the machine repairs itself if you lose it:
+
+```sh
+sudo systemd-run --unit=subtun-deadman --on-active=300 /bin/sh -c \
+  "pkill -x subtun; ip rule del pref 32760 iif lo lookup main suppress_prefixlength 0; ip rule del pref 32761 iif lo lookup 32761; ip route flush table 32761"
+# ... the test ...
+sudo systemctl stop subtun-deadman.timer
+```
+
 ## Releases
 
 `make release VERSION=vX.Y.Z` runs [scripts/release.sh](../scripts/release.sh): preflight (clean
@@ -59,17 +94,18 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/logx` | levels per component (the `component` attribute), masking of DNS names and destinations, log files rotated by size and pruned by age and total size |
 | `internal/xdg` | subtun's directories, nix style: state (`~/.local/state/subtun`: logs) and run (`$XDG_RUNTIME_DIR/subtun` or `<state>/run`: sockets) |
 | `internal/cli` | the commands; planning of routes (automatic excludes), DNS and the kill switch; dry-run output; the engine every run uses, one profile or several (`multi.go`: planning, each profile's tunnel, `runEngine`; `router.go`: a connection's tunnel; `change.go`: changes while running, planned and checked; `status.go`, `statuscmd.go`, `changecmd.go`, `tuicmd.go`, `uptui.go`: status, the control commands and the terminal UI, attached or inside subtun; `target.go`: a target given with `up --k8s` / `--docker` / `--ssh`) |
-| `internal/capture` | utun capture setup: helper → utun + routes → netstack; the DNS runtime; the kill switch guard following the local networks; routes and guard changing while running |
+| `internal/capture` | capture setup: helper → tunnel interface + routes → netstack; the DNS runtime; the kill switch guard following the local networks; routes and guard changing while running |
 | `internal/dns` | DNS engine: match names (`.` leaves local names alone) and pick a tunnel among several, tunnel or fallback, answers outside the routes, UDP/TCP listener, loop-free forwarder |
 | `internal/routes` | route planning: excludes by subtraction, cleanup, safety checks |
 | `internal/config` | YAML config profiles |
 | `internal/importer` | `subtun import sshuttle`: sshuttle options file → profile, insertion into a config file |
 | `internal/netinfo` | local interface networks and default gateway (read-only) |
 | `internal/netstack` | gVisor stack on a packet device; dials each captured connection through the tunnel, and each UDP flow (`udp.go`); loop guard; hands packets for the utun's own address back |
-| `internal/tundev` | utun as a netstack device (macOS) |
+| `internal/tundev` | the tunnel interface as a netstack device (macOS utun, Linux TUN) |
 | `internal/privhelper` | the root helper (`subtun helper`) and subtun's side of it; a session also takes route changes |
-| `internal/platform` | OS driver interfaces used by the helper (`Tun`, `Routes`, `Firewall`, `DNSCache`) |
-| `internal/platform/darwin`, `.../fake` | macOS drivers (utun, `/sbin/route`, pf, DNS cache); recording fakes for tests |
+| `internal/platform` | OS driver interfaces used by the helper (`Tun`, `Routes`, `Firewall`, `DNSCache`; `RouteTable` for routes with rules of their own) |
+| `internal/platform/darwin`, `.../linux`, `.../fake` | macOS drivers (utun, `/sbin/route`, pf, DNS cache); Linux drivers (TUN, routes in subtun's own table with `ip`; no firewall yet); recording fakes for tests |
+| `internal/syscmd` | finds the system commands subtun runs, in fixed system directories, only if root owns them |
 | `internal/relay` | bidirectional copy with half-close; the error counts of a UDP flow (`errors.go`) |
 | `internal/testutil`, `internal/version` | in-memory connection pairs for tests; the version stamped in at build time |
 | `test/dev` | local test setup for both targets |
