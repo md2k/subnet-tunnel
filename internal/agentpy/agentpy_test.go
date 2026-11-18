@@ -209,6 +209,38 @@ func TestPythonAgentRelayStats(t *testing.T) {
 	logs.waitLine(t, "msg=closed", "up=100000", "up_writes=", "up_wait=", "up_read=", "down=100000", "down_writes=", "down_wait=", "down_read=")
 }
 
+// The Python agent reads at most a smux frame's worth from a socket, so each
+// read goes out as one frame (reading 65536 bytes made a 65535-byte frame and
+// a 1-byte one). A stream Read returns one frame's data at most.
+func TestPythonAgentWholeFrames(t *testing.T) {
+	c := startAgent(t)
+	conn, err := c.DialContext(context.Background(), "tcp", "blob.svc:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	buf := make([]byte, 1<<20)
+	total, tiny, largest := 0, 0, 0
+	for {
+		n, err := conn.Read(buf)
+		total += n
+		if n == 1 {
+			tiny++
+		}
+		largest = max(largest, n)
+		if err != nil {
+			break
+		}
+	}
+	if total != 1<<20 {
+		t.Fatalf("got %d bytes, want 1 MiB", total)
+	}
+	if tiny > 0 || largest > 65535 {
+		t.Errorf("%d one-byte frames, the largest %d bytes: reads split across frames", tiny, largest)
+	}
+}
+
 func TestPythonAgentHalfClose(t *testing.T) {
 	c := startAgent(t)
 	conn, err := c.DialContext(context.Background(), "tcp", "rr.svc:80")

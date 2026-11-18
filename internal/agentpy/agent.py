@@ -638,7 +638,7 @@ def relay(st, sock):
         try:
             while True:
                 t0 = clock()
-                data = sock.recv(65536)
+                data = sock.recv(MAX_FRAME)  # one read, one frame
                 reads["down"] += clock() - t0
                 if not data:
                     break

@@ -66,7 +66,20 @@ class _Failing(object):
         return getattr(self._sock, name)
 
 
-_HANDLERS = {"echo.svc:7": _echo, "rr.svc:80": _reply_after_eof, "reset.svc:80": _wait_eof}
+def _blob(s):
+    # 1 MiB at once (the socket buffers hold it all), then EOF.
+    try:
+        s.sendall(bytes(1 << 20))
+        s.shutdown(socket.SHUT_WR)
+        while s.recv(65536):
+            pass
+    except OSError:
+        pass
+    finally:
+        s.close()
+
+
+_HANDLERS = {"echo.svc:7": _echo, "rr.svc:80": _reply_after_eof, "reset.svc:80": _wait_eof, "blob.svc:80": _blob}
 _FAIL_TCP = {"reset.svc:80": dict(errs=[errno.ECONNRESET])}
 
 
@@ -76,6 +89,9 @@ def dial(host, port):
     if handler is None:
         raise ConnectionRefusedError(errno.ECONNREFUSED, "connection refused")
     a, b = socket.socketpair()
+    if handler is _blob:
+        a.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
+        b.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 << 20)
     t = threading.Thread(target=handler, args=(b,))
     t.daemon = True
     t.start()
