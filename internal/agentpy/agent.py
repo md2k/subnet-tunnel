@@ -617,8 +617,13 @@ def truncated(msg):
 
 
 def relay(st, sock):
+    # Per direction: bytes, writes and the time spent in them (the next hop
+    # holding the copy back); the rest of the time is waiting for data.
     counts = {"up": 0, "down": 0}
+    writes = {"up": 0, "down": 0}
+    waits = {"up": 0.0, "down": 0.0}
     start = time.time()
+    clock = getattr(time, "monotonic", time.time)
 
     def abort():
         st.kill()
@@ -633,7 +638,10 @@ def relay(st, sock):
                 data = sock.recv(65536)
                 if not data:
                     break
+                t0 = clock()
                 st.write(data)
+                waits["down"] += clock() - t0
+                writes["down"] += 1
                 counts["down"] += len(data)
             st.close_write()
         except Exception:
@@ -647,14 +655,18 @@ def relay(st, sock):
             data = st.read(65536)
             if not data:
                 break
+            t0 = clock()
             sock.sendall(data)
+            waits["up"] += clock() - t0
+            writes["up"] += 1
             counts["up"] += len(data)
         if not st.dead:
             sock.shutdown(socket.SHUT_WR)
     except Exception:
         abort()
     t.join()
-    log("DEBUG", "closed", stream=st.sid, up=counts["up"], down=counts["down"],
+    log("DEBUG", "closed", stream=st.sid, up=counts["up"], up_writes=writes["up"], up_wait="%.3fs" % waits["up"],
+        down=counts["down"], down_writes=writes["down"], down_wait="%.3fs" % waits["down"],
         dur="%.3fs" % (time.time() - start))
 
 

@@ -250,7 +250,8 @@ func (st *Stack) forward(r *tcp.ForwarderRequest) {
 	start := time.Now()
 	log.Debug("connected")
 	sent, recv := relay.Pipe(conn, up)
-	log.Debug("closed", "sent", sent, "recv", recv, "dur", time.Since(start).Round(time.Millisecond))
+	attrs := append(sent.Attrs("sent"), recv.Attrs("recv")...)
+	log.Debug("closed", append(attrs, "dur", time.Since(start).Round(time.Millisecond))...)
 }
 
 func setKeepalive(ep tcpip.Endpoint) {

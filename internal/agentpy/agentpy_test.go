@@ -189,6 +189,26 @@ func TestPythonAgentEcho(t *testing.T) {
 	wg.Wait()
 }
 
+// A TCP connection's closing line has each direction's bytes, writes and
+// time spent waiting to write.
+func TestPythonAgentRelayStats(t *testing.T) {
+	c, logs := startAgentLog(t)
+	conn, err := c.DialContext(context.Background(), "tcp", "echo.svc:7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("x"), 100000)
+	go func() {
+		_, _ = conn.Write(payload)
+		_ = conn.(interface{ CloseWrite() error }).CloseWrite()
+	}()
+	if got, err := io.ReadAll(conn); err != nil || len(got) != len(payload) {
+		t.Fatalf("echo: %d bytes, %v", len(got), err)
+	}
+	_ = conn.Close()
+	logs.waitLine(t, "msg=closed", "up=100000", "up_writes=", "up_wait=", "down=100000", "down_writes=", "down_wait=")
+}
+
 func TestPythonAgentHalfClose(t *testing.T) {
 	c := startAgent(t)
 	conn, err := c.DialContext(context.Background(), "tcp", "rr.svc:80")

@@ -118,7 +118,9 @@ func handle(ctx context.Context, st *smux.Stream, cfg Config) {
 	start := time.Now()
 	log.Debug("connected", "addr", req.Addr)
 	up, down := relay.Pipe(st, c)
-	log.Debug("closed", "addr", req.Addr, "up", up, "down", down, "dur", time.Since(start).Round(time.Millisecond))
+	attrs := append([]any{"addr", req.Addr}, up.Attrs("up")...)
+	attrs = append(attrs, down.Attrs("down")...)
+	log.Debug("closed", append(attrs, "dur", time.Since(start).Round(time.Millisecond))...)
 }
 
 // StatusFor maps a dial error to the status reported to the client.
