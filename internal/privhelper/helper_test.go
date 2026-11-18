@@ -381,7 +381,7 @@ func TestHelperRefusesBadFirewallRules(t *testing.T) {
 	bad := map[string]Request{
 		"no rules":   {Op: OpApplyFirewall},
 		"no servers": firewallReq(),
-		"loopback":   firewallReq("127.0.0.1"),
+		"multicast":  firewallReq("224.0.0.251"),
 		"IPv6":       firewallReq("fd00::53"),
 		"17 servers": firewallReq(many...),
 	}

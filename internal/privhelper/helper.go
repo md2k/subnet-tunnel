@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -426,10 +427,13 @@ func (h *helper) cleanup() (string, error) {
 		}
 		_ = h.state.remove()
 		h.flushDNSCache()
-		if released {
+		switch {
+		case released:
 			done = append(done, "removed subtun's firewall rules and released pf")
-		} else {
+		case runtime.GOOS == "darwin":
 			done = append(done, "removed subtun's firewall rules (pf stays enabled until reboot: its reference was not recorded)")
+		default:
+			done = append(done, "removed subtun's firewall rules")
 		}
 	}
 	if len(done) == 0 {

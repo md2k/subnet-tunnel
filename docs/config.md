@@ -408,11 +408,9 @@ machine is back to normal. Your LAN, multicast and link-local stay local (see th
 under [Safety checks](#safety-checks)), and subtun's own connection to the API server or Docker
 daemon is excluded automatically.
 
-On Linux the IPv6 block isn't implemented yet, and a full tunnel turns it on by itself (see
-[IPv6](#ipv6)): add `--block-ipv6 false` there for now (IPv6 then bypasses the tunnel). Routes on
-Linux only take this machine's own traffic: containers, pods and VMs on this machine keep their
-normal routes, and this machine's specific routes (the LAN, container and pod networks, other VPNs)
-stay in front of subtun's ([design](design.md#linux)).
+Routes on Linux only take this machine's own traffic: containers, pods and VMs on this machine keep
+their normal routes, and this machine's specific routes (the LAN, container and pod networks, other
+VPNs) stay in front of subtun's ([design](design.md#linux)).
 
 ```sh
 subtun up --k8s --context remote -n tools 0.0.0.0/1 128.0.0.0/1 --dns-domain . --dns-domain cluster.local
@@ -536,9 +534,11 @@ Like every setting, it works in `defaults:` and per profile. Routing such addres
 automatically is planned.
 
 **Servers.** With `auto`, subtun reads the system's IPv4 DNS servers from `/etc/resolv.conf` and
-follows them when the network changes (Wi-Fi switch, VPN up or down). IPv6 DNS servers and local
-ones (`127.0.0.1`) are reported and not captured. Resolvers that only a VPN client uses for its own
-domains aren't in that file and keep working as before.
+follows them when the network changes (Wi-Fi switch, VPN up or down). IPv6 DNS servers are reported
+and not captured. Local ones (`127.0.0.1`) are reported and not captured on macOS; on Linux they
+are captured like any other: systemd-resolved's `127.0.0.53` (Ubuntu's `/etc/resolv.conf` lists only
+that one) or a local dnsmasq, and other names go back to it. Resolvers that only a VPN client uses
+for its own domains aren't in that file and keep working as before.
 
 **How it works on macOS.** The root helper puts a few pf rules into subtun's own anchor,
 `com.apple/subtun`. The stock `/etc/pf.conf` evaluates every anchor under `com.apple/`, so the main
@@ -552,6 +552,17 @@ starts, so earlier answers don't bypass it, and when it ends, so answers obtaine
 (addresses only reachable through it) don't linger. It flushes it again when a tunnel comes back
 after an outage, so lookups that failed meanwhile are tried afresh, and with several profiles when
 one's names start or stop going through its tunnel.
+
+**How it works on Linux.** The same intent, with nftables: the helper loads subtun's own table,
+`inet subtun` (replaced in one step, deleted at the end; Docker's or any other software's tables
+are never touched). A rule in its nat output chain hands this machine's queries to the captured
+servers (UDP and TCP port 53) to subtun's listener on 127.0.0.1, except those from subtun's own
+fallback port. With systemd-resolved that server is `127.0.0.53`: apps that send their queries
+there are captured, and the other names go back to resolved, which asks its upstream servers
+itself (not captured, so nothing loops). The helper flushes resolved's cache (`resolvectl
+flush-caches`) at the same moments as on macOS. Applications that ask resolved through its own
+interface instead of `127.0.0.53` (resolved's NSS module, as some distributions set up) aren't
+captured yet; Debian and Ubuntu use `127.0.0.53`.
 
 **Limits.**
 - One DNS-capturing subtun at a time: a second one refuses to start, since it would take over the

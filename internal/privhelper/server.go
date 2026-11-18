@@ -11,9 +11,11 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -25,6 +27,11 @@ func Serve(ctx context.Context, socketPath string, stdin io.Reader, log *slog.Lo
 	if os.Geteuid() != 0 {
 		return errors.New("the helper must run as root (subtun starts it with sudo)")
 	}
+	// The log goes to subtun through a pipe. When subtun dies, a write to it
+	// must fail quietly instead of ending the helper (Go exits on SIGPIPE
+	// for stdout and stderr): the end of a session still has work to do
+	// (the kill switch's rules, removing the routing rules).
+	signal.Ignore(syscall.SIGPIPE)
 	uid, err := strconv.Atoi(os.Getenv("SUDO_UID"))
 	if err != nil {
 		return errors.New("SUDO_UID not set: the helper is started by subtun through sudo, not by hand")

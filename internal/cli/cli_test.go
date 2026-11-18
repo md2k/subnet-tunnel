@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/md2k/subnet-tunnel/internal/config"
+	"github.com/md2k/subnet-tunnel/internal/dns"
 	"github.com/md2k/subnet-tunnel/internal/privhelper"
 )
 
@@ -329,13 +330,32 @@ func TestDNSErrors(t *testing.T) {
 	fakeSystemDNS(t)
 	cases := map[string][]string{
 		"use firewall or off":        {"up", "--k8s", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-capture", "magic"},
-		"unicast IPv4":               {"up", "--k8s", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-servers", "127.0.0.1"},
+		"unicast IPv4":               {"up", "--k8s", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-servers", "224.0.0.251"},
 		"want system, IP or IP:port": {"up", "--k8s", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-fallback", "dns.google"},
 		"regular expression":         {"up", "--k8s", "203.0.113.0/24", "--dns-domain", `.*\.company\.com`},
 	}
 	for want, args := range cases {
 		if _, err := runCLI(t, append(args, "--dry-run")...); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%v: got %v, want %q", args, err, want)
+		}
+	}
+}
+
+// A local resolver (systemd-resolved's 127.0.0.53) is a DNS server to
+// capture where the OS can (Linux), refused where it can't (macOS).
+func TestDNSLocalServer(t *testing.T) {
+	fakeSystemDNS(t)
+	args := []string{"up", "--k8s", "203.0.113.0/24", "--dns-domain", "company.com", "--dns-servers", "127.0.0.53", "--dry-run"}
+	for _, local := range []bool{false, true} {
+		old := dns.LocalServers
+		dns.LocalServers = local
+		out, err := runCLI(t, args...)
+		dns.LocalServers = old
+		if local && (err != nil || !strings.Contains(out, "127.0.0.53")) {
+			t.Errorf("local resolvers captured: %v\n%s", err, out)
+		}
+		if !local && (err == nil || !strings.Contains(err.Error(), "unicast IPv4")) {
+			t.Errorf("local resolvers not captured: got %v", err)
 		}
 	}
 }

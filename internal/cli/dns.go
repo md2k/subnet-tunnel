@@ -101,7 +101,7 @@ func parseServers(list []string) ([]netip.Addr, error) {
 	var out []netip.Addr
 	for _, v := range list {
 		a, err := netip.ParseAddr(v)
-		if err != nil || !a.Is4() || a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() {
+		if err != nil || !a.Is4() || a.IsUnspecified() || a.IsMulticast() || a.IsLoopback() && !dns.LocalServers {
 			return nil, fmt.Errorf("DNS server %q: need a unicast IPv4 address (or auto)", v)
 		}
 		out = append(out, a)

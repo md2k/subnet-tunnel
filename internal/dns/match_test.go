@@ -69,12 +69,28 @@ nameserver fd00::1
 nameserver 127.0.0.1
 nameserver bogus
 nameserver 1.1.1.1
-`))
+`), false)
 	if want := []netip.Addr{netip.MustParseAddr("192.168.1.1"), netip.MustParseAddr("1.1.1.1")}; !slices.Equal(servers, want) {
 		t.Fatalf("servers %v", servers)
 	}
 	if len(notes) != 2 || !strings.Contains(notes[0], "IPv6") || !strings.Contains(notes[1], "127.0.0.1") {
 		t.Fatalf("notes %q", notes)
+	}
+}
+
+// Where local resolvers can be captured (Linux: systemd-resolved's stub, a
+// local dnsmasq), a loopback server is a server like any other.
+func TestParseResolvConfLocal(t *testing.T) {
+	servers, notes := parseResolvConf([]byte(`# This is /run/systemd/resolve/stub-resolv.conf managed by man:systemd-resolved(8).
+nameserver 127.0.0.53
+options edns0 trust-ad
+search lan
+`), true)
+	if want := []netip.Addr{netip.MustParseAddr("127.0.0.53")}; !slices.Equal(servers, want) || len(notes) != 0 {
+		t.Fatalf("servers %v, notes %q", servers, notes)
+	}
+	if servers, _ := parseResolvConf([]byte("nameserver 0.0.0.0\n"), true); len(servers) != 0 {
+		t.Fatalf("unspecified address taken: %v", servers)
 	}
 }
 

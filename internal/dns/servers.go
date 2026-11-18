@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -16,18 +17,26 @@ import (
 // is generated from the primary network service's resolver.
 const ResolvConf = "/etc/resolv.conf"
 
+// LocalServers reports whether a local resolver (a loopback address:
+// systemd-resolved's 127.0.0.53, a local dnsmasq) can be captured on this
+// OS: on Linux the firewall redirects in the output hook, and the resolver
+// asks upstream from its own process, which isn't redirected; macOS's pf
+// redirect works through lo0 and can't.
+var LocalServers = runtime.GOOS == "linux"
+
 // SystemServers returns the IPv4 DNS servers listed in a resolv.conf, and a
-// note for each server that can't be captured (IPv6, loopback).
+// note for each server that can't be captured (IPv6; loopback, unless
+// LocalServers).
 func SystemServers(path string) ([]netip.Addr, []string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, err
 	}
-	servers, notes := parseResolvConf(data)
+	servers, notes := parseResolvConf(data, LocalServers)
 	return servers, notes, nil
 }
 
-func parseResolvConf(data []byte) ([]netip.Addr, []string) {
+func parseResolvConf(data []byte, local bool) ([]netip.Addr, []string) {
 	var servers []netip.Addr
 	var notes []string
 	sc := bufio.NewScanner(bytes.NewReader(data))
@@ -44,7 +53,7 @@ func parseResolvConf(data []byte) ([]netip.Addr, []string) {
 		switch {
 		case !a.Is4():
 			notes = append(notes, fmt.Sprintf("IPv6 DNS server %s is not captured (IPv4 only so far)", a))
-		case a.IsLoopback() || a.IsUnspecified():
+		case a.IsUnspecified() || a.IsLoopback() && !local:
 			notes = append(notes, fmt.Sprintf("local DNS server %s is not captured", a))
 		case !slices.Contains(servers, a):
 			servers = append(servers, a)
