@@ -617,8 +617,15 @@ def truncated(msg):
 
 
 def relay(st, sock):
+    # Per direction: bytes, writes, the time spent writing (the next hop
+    # holding the copy back) and reading (waiting for data); what's left of
+    # the direction's time is the agent's own work.
     counts = {"up": 0, "down": 0}
+    writes = {"up": 0, "down": 0}
+    waits = {"up": 0.0, "down": 0.0}
+    reads = {"up": 0.0, "down": 0.0}
     start = time.time()
+    clock = getattr(time, "monotonic", time.time)
 
     def abort():
         st.kill()
@@ -630,10 +637,15 @@ def relay(st, sock):
     def sock_to_stream():
         try:
             while True:
-                data = sock.recv(65536)
+                t0 = clock()
+                data = sock.recv(MAX_FRAME)  # one read, one frame
+                reads["down"] += clock() - t0
                 if not data:
                     break
+                t0 = clock()
                 st.write(data)
+                waits["down"] += clock() - t0
+                writes["down"] += 1
                 counts["down"] += len(data)
             st.close_write()
         except Exception:
@@ -644,18 +656,25 @@ def relay(st, sock):
     t.start()
     try:
         while True:
+            t0 = clock()
             data = st.read(65536)
+            reads["up"] += clock() - t0
             if not data:
                 break
+            t0 = clock()
             sock.sendall(data)
+            waits["up"] += clock() - t0
+            writes["up"] += 1
             counts["up"] += len(data)
         if not st.dead:
             sock.shutdown(socket.SHUT_WR)
     except Exception:
         abort()
     t.join()
-    log("DEBUG", "closed", stream=st.sid, up=counts["up"], down=counts["down"],
-        dur="%.3fs" % (time.time() - start))
+    log("DEBUG", "closed", stream=st.sid,
+        up=counts["up"], up_writes=writes["up"], up_wait="%.3fs" % waits["up"], up_read="%.3fs" % reads["up"],
+        down=counts["down"], down_writes=writes["down"], down_wait="%.3fs" % waits["down"],
+        down_read="%.3fs" % reads["down"], dur="%.3fs" % (time.time() - start))
 
 
 def main():

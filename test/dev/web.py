@@ -1,8 +1,10 @@
-# Test service reached through the tunnel.
+# Test service reached through the tunnel: python3 web.py [ADDR [PORT]]
+# (default: all addresses, port 8080).
 #   GET /           -> "subtun-dev web ok"
 #   GET /bytes/N    -> N zero bytes (download throughput)
 #   PUT|POST any    -> reads and discards the body, returns its length (upload throughput)
 import http.server
+import sys
 
 CHUNK = bytes(1 << 20)
 
@@ -45,4 +47,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-http.server.ThreadingHTTPServer(("", 8080), Handler).serve_forever()
+addr = sys.argv[1] if len(sys.argv) > 1 else ""
+port = int(sys.argv[2]) if len(sys.argv) > 2 else 8080
+http.server.ThreadingHTTPServer((addr, port), Handler).serve_forever()

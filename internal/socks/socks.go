@@ -94,7 +94,9 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 	start := time.Now()
 	s.Logger.Debug("connected", "dst", addr)
 	sent, recv := relay.Pipe(c, up)
-	s.Logger.Debug("closed", "dst", addr, "sent", sent, "recv", recv, "dur", time.Since(start).Round(time.Millisecond))
+	attrs := append([]any{"dst", addr}, sent.Attrs("sent")...)
+	attrs = append(attrs, recv.Attrs("recv")...)
+	s.Logger.Debug("closed", append(attrs, "dur", time.Since(start).Round(time.Millisecond))...)
 }
 
 // Handshake runs the SOCKS5 greeting and request on c and returns the
