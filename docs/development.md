@@ -37,7 +37,7 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/agentbin` | embedded Linux agent binaries |
 | `internal/agentpy` | the Python agent (`agent.py`) and its loader |
 | `internal/proto` | hello line, per-stream request/response, smux settings |
-| `internal/agent` | agent side: serve smux on stdio, dial on request |
+| `internal/agent` | agent side: serve smux on stdio, dial on request; UDP flows (`udp.go`: socket reader, queue, stream writer) |
 | `internal/tunnel` | laptop side: check the hello, open streams through the agent |
 | `internal/transport` | get an agent running in a target (probe, choose binary or Python, start); the labels and idle script of what subtun creates (`owned.go`), a selector's last pick (`picked.go`) |
 | `internal/transport/k8s`, `.../docker` | exec into a pod / container; create, reuse and delete subtun's own (`pod.go`, `container.go`); pick an existing one by labels |
@@ -61,7 +61,7 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/privhelper` | the root helper (`subtun helper`) and subtun's side of it; a session also takes route changes |
 | `internal/platform` | OS driver interfaces used by the helper (`Tun`, `Routes`, `Firewall`, `DNSCache`) |
 | `internal/platform/darwin`, `.../fake` | macOS drivers (utun, `/sbin/route`, pf, DNS cache); recording fakes for tests |
-| `internal/relay` | bidirectional copy with half-close |
+| `internal/relay` | bidirectional copy with half-close; the error counts of a UDP flow (`errors.go`) |
 | `internal/testutil`, `internal/version` | in-memory connection pairs for tests; the version stamped in at build time |
 | `test/dev` | local test setup for both targets |
 
