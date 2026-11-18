@@ -9,11 +9,20 @@ Make targets are listed in the [README](../README.md#build).
 without them, but then subtun has no agent to upload; pass `--agent-file` (hidden flag) with a
 Linux build of `cmd/subtun-agent` instead.
 
-Unit tests use in-memory connections and stub dialers. They open no network sockets. The Python
-agent tests in `internal/agentpy` run the real `agent.py` with the local `python3` over pipes, with
-dialing replaced by in-process socket pairs (`testdata/fakenet.py`), against the Go tunnel client;
-they skip when there is no Python 3.6+. Older interpreters are covered by the `py36` compose target
-below.
+Unit tests use in-memory connections and stub dialers. The Python agent tests in `internal/agentpy`
+run the real `agent.py` with the local `python3` over pipes, with dialing replaced by in-process
+socket pairs (`testdata/fakenet.py`), against the Go tunnel client; they skip when there is no
+Python 3.6+. Older interpreters are covered by the `py36` compose target below. The only real
+sockets are UDP on 127.0.0.1: one Python test closes a flow on a real socket, and
+`TestPythonAgentUDPThroughput` (skipped unless `SUBTUN_UDP_BENCH=1`; `SUBTUN_UDP_RATE` in MB/s,
+`SUBTUN_UDP_COUNT` datagrams) measures a paced UDP download through the agent. To run the Python
+tests on Linux with another Python, build the test binary and run it in an image:
+
+```sh
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -o build/agentpy-linux.test ./internal/agentpy/
+docker run --rm -v "$PWD/internal/agentpy:/w" -w /w -v "$PWD/build/agentpy-linux.test:/t:ro" \
+  -e SUBTUN_UDP_BENCH=1 -e SUBTUN_UDP_RATE=100 python:3.12-alpine /t -test.v
+```
 
 ## Releases
 
