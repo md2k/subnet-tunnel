@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 package privhelper
 
@@ -15,14 +15,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/md2k/subnet-tunnel/internal/platform"
-	"github.com/md2k/subnet-tunnel/internal/platform/darwin"
 )
 
 // Serve is the helper process (`subtun helper --socket PATH`, run by sudo).
 // It reads the token from stdin, connects to subtun's socket and executes
-// commands until Done or until subtun goes away, using the macOS drivers.
+// commands until Done or until subtun goes away, using this OS's drivers
+// (osDrivers).
 func Serve(ctx context.Context, socketPath string, stdin io.Reader, log *slog.Logger) error {
 	if os.Geteuid() != 0 {
 		return errors.New("the helper must run as root (subtun starts it with sudo)")
@@ -63,18 +61,13 @@ func Serve(ctx context.Context, socketPath string, stdin io.Reader, log *slog.Lo
 	}
 
 	h := &helper{
-		conn: conn,
-		log:  log,
-		drivers: platform.Drivers{
-			Tun:      darwin.Utun{},
-			Routes:   darwin.Route{},
-			Firewall: &darwin.PF{Log: log},
-			DNSCache: darwin.DNSCache{},
-		},
-		state: fileState{dir: "/var/run/subtun"},
-		alive: processAlive,
-		pid:   os.Getpid(),
-		grace: 5 * time.Second,
+		conn:    conn,
+		log:     log,
+		drivers: osDrivers(log),
+		state:   fileState{dir: "/var/run/subtun"},
+		alive:   processAlive,
+		pid:     os.Getpid(),
+		grace:   5 * time.Second,
 	}
 	return h.loop(ctx)
 }

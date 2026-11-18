@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -39,6 +40,7 @@ type helper struct {
 	adopted  bool            // rules taken over from an earlier session
 	applied  bool            // this session applied rules of its own
 	dnsOn    bool            // the rules in place redirect DNS to subtun
+	table    bool            // the routes driver's table is set up (platform.RouteTable)
 	session  atomic.Bool     // setup done, staying up for the session
 	until    atomic.Int64    // read deadline after a signal (unix nanos), 0: none
 }
@@ -65,6 +67,7 @@ func (h *helper) loop(ctx context.Context) error {
 				// subtun exited, crashed or was killed without saying how
 				// to end, or didn't answer after a signal.
 				h.leave("subtun went away")
+				h.teardownTable()
 				h.log.Info("session ended")
 				if gone {
 					return nil
@@ -91,6 +94,7 @@ func (h *helper) loop(ctx context.Context) error {
 			} else {
 				h.flushFirewall()
 			}
+			h.teardownTable()
 			h.log.Info("session ended")
 			return writeMsg(h.conn, Response{OK: true})
 		}
@@ -98,6 +102,7 @@ func (h *helper) loop(ctx context.Context) error {
 		if err := writeMsg(h.conn, resp, fds...); err != nil {
 			if h.session.Load() {
 				h.leave("connection lost")
+				h.teardownTable()
 			} else {
 				h.undo()
 			}
@@ -123,8 +128,12 @@ func (h *helper) finishSetup(session bool) (end bool, err error) {
 		// replaces them with nothing.
 		h.flushFirewall()
 	}
-	if h.firewall && !session {
-		if err := writeMsg(h.conn, Response{Error: "firewall rules need session mode"}); err != nil {
+	if (h.firewall || h.table) && !session {
+		msg := "firewall rules need session mode"
+		if !h.firewall {
+			msg = "routes on this system need session mode (the helper removes their rules when subtun stops)"
+		}
+		if err := writeMsg(h.conn, Response{Error: msg}); err != nil {
 			h.undo()
 			return true, err
 		}
@@ -145,6 +154,7 @@ func (h *helper) finishSetup(session bool) (end bool, err error) {
 	}
 	if err := writeMsg(h.conn, Response{OK: true}); err != nil {
 		h.leave("connection lost")
+		h.teardownTable()
 		return true, err
 	}
 	h.session.Store(session)
@@ -166,7 +176,7 @@ func (h *helper) handle(req Request) (Response, []int) {
 	switch req.Op {
 	case OpCreateTun:
 		if h.dev != nil {
-			return fail(errors.New("utun already created"))
+			return fail(errors.New("tunnel interface already created"))
 		}
 		if err := ValidateMTU(req.MTU); err != nil {
 			return fail(err)
@@ -179,8 +189,15 @@ func (h *helper) handle(req Request) (Response, []int) {
 		if err != nil {
 			return fail(err)
 		}
+		if rt, ok := h.drivers.Routes.(platform.RouteTable); ok {
+			if err := rt.Setup(dev.Name()); err != nil {
+				_ = dev.Close()
+				return fail(err)
+			}
+			h.table = true
+		}
 		h.dev, h.ifname = dev, dev.Name()
-		h.log.Info("utun created", "name", dev.Name(), "mtu", req.MTU, "addr", addr)
+		h.log.Info("tunnel interface created", "name", dev.Name(), "mtu", req.MTU, "addr", addr)
 		fd, err := rawFD(dev.File())
 		if err != nil {
 			h.undo()
@@ -190,7 +207,7 @@ func (h *helper) handle(req Request) (Response, []int) {
 
 	case OpAddRoute:
 		if h.ifname == "" {
-			return fail(errors.New("create the utun first"))
+			return fail(errors.New("create the tunnel interface first"))
 		}
 		p, err := ParseCIDR(req.CIDR)
 		if err != nil {
@@ -368,8 +385,19 @@ func (h *helper) adoptLeftovers() (msg string, running bool, err error) {
 	return "kill switch from an earlier session taken over (DNS allowed while connecting)", false, nil
 }
 
-// cleanup removes whatever an earlier session left (subtun cleanup).
+// cleanup removes whatever an earlier session left (subtun cleanup): its
+// routing rules (platform.RouteTable) and its firewall rules.
 func (h *helper) cleanup() (string, error) {
+	rt, _ := h.drivers.Routes.(platform.RouteTable)
+	if rt != nil {
+		name, err := rt.InUse()
+		if err != nil {
+			return "", err
+		}
+		if name != "" {
+			return "", fmt.Errorf("a subtun session is running (interface %s); stop it instead", name)
+		}
+	}
 	busy, err := h.drivers.Firewall.Busy()
 	if err != nil {
 		return "", err
@@ -378,22 +406,53 @@ func (h *helper) cleanup() (string, error) {
 	if st != nil && busy && h.alive(st.Owner) {
 		return "", fmt.Errorf("a subtun session (helper pid %d) is running; stop it instead", st.Owner)
 	}
-	if !busy && st == nil {
+	var done []string
+	if rt != nil {
+		removed, err := rt.Teardown()
+		if err != nil {
+			return "", err
+		}
+		if removed {
+			done = append(done, "removed subtun's routing rules")
+		}
+	}
+	if busy || st != nil {
+		released := st != nil && st.Token != ""
+		if released {
+			h.drivers.Firewall.Adopt(st.Token)
+		}
+		if err := h.drivers.Firewall.Flush(); err != nil {
+			return "", err
+		}
+		_ = h.state.remove()
+		h.flushDNSCache()
+		if released {
+			done = append(done, "removed subtun's firewall rules and released pf")
+		} else {
+			done = append(done, "removed subtun's firewall rules (pf stays enabled until reboot: its reference was not recorded)")
+		}
+	}
+	if len(done) == 0 {
 		return "nothing to clean up", nil
 	}
-	released := st != nil && st.Token != ""
-	if released {
-		h.drivers.Firewall.Adopt(st.Token)
+	return strings.Join(done, "; "), nil
+}
+
+// teardownTable removes the routes driver's table, if this helper set it up.
+func (h *helper) teardownTable() {
+	if !h.table {
+		return
 	}
-	if err := h.drivers.Firewall.Flush(); err != nil {
-		return "", err
+	rt, ok := h.drivers.Routes.(platform.RouteTable)
+	if !ok {
+		return
 	}
-	_ = h.state.remove()
-	h.flushDNSCache()
-	if released {
-		return "removed subtun's firewall rules and released pf", nil
+	if _, err := rt.Teardown(); err != nil {
+		h.log.Warn("removing subtun's routing rules", "err", err)
+		return
 	}
-	return "removed subtun's firewall rules (pf stays enabled until reboot: its reference was not recorded)", nil
+	h.table = false
+	h.log.Info("routing rules removed")
 }
 
 // leave ends a session. With rules meant to stay (kill switch), they
@@ -484,7 +543,8 @@ func (h *helper) undo() {
 	h.routes = nil
 	_ = h.dev.Close()
 	h.dev = nil
-	h.log.Info("utun closed", "name", name)
+	h.log.Info("tunnel interface closed", "name", name)
+	h.teardownTable()
 }
 
 // rawFD returns f's descriptor without File.Fd's side effect of switching it

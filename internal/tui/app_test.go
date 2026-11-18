@@ -362,7 +362,7 @@ func TestProfileScreen(t *testing.T) {
 	u.key(tcell.KeyEnter)
 	u.wait("subtun › work · up 1h12m · pod ops/toolbox (binary agent 0.4.1) · kill switch on", "Routes (2) · DNS names (2)",
 		"a add  x exclude  d delete", "t DNS names", "10.0.0.0/8", "parts carried by dev (more specific)", "added 15:02", "configured",
-		"Open connections (1)", "10.0.4.17:5432", "(on the utun)", "Traffic · 5 min", "· peak ", "· scale ", "esc back · ? help",
+		"Open connections (1)", "10.0.4.17:5432", "(on the tunnel interface)", "Traffic · 5 min", "· peak ", "· scale ", "esc back · ? help",
 		"Logs · work", "reconnected via", "Counts", "via      context ops · https://192.0.2.10:6443")
 	// t: the DNS names tab.
 	u.press("t")

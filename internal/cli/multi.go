@@ -198,7 +198,7 @@ func planMulti(specs []*tunnelSpec) (*multiPlan, error) {
 			continue
 		}
 		if rp == nil {
-			note(sp.name, "DNS settings ignored: DNS capture works together with the utun capture, and this profile has no routes (CIDRs)")
+			note(sp.name, "DNS settings ignored: DNS capture works together with the route capture, and this profile has no routes (CIDRs)")
 			continue
 		}
 		mp.dnsNames[i] = dns.Names{Domains: sp.s.dnsDomains, Patterns: sp.s.dnsPatterns}
@@ -704,8 +704,8 @@ func printMultiPlan(w io.Writer, mp *multiPlan) {
 		fmt.Fprintf(w, "warning: %s\n", wn)
 	}
 	if mp.hasRoutes() {
-		fmt.Fprintf(w, "utun %s, MTU %d; the root helper stays up so routes can follow the profiles. Endpoints excluded from every route: %v\n",
-			mp.tunAddr, mp.mtu, mp.endpoints)
+		fmt.Fprintf(w, "%s; the root helper stays up so routes can follow the profiles. Endpoints excluded from every route: %v\n",
+			tunIfaceText(mp.tunAddr, mp.mtu), mp.endpoints)
 	}
 }
 
@@ -1675,7 +1675,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 				} else {
 					tl.Info("reconnected", "via", ev.carrier.Desc, "after", time.Since(lost[ev.i]).Round(100*time.Millisecond))
 				}
-				if prev == stateConnecting && ev.carrier.Local && routesInternet(mp.final(ev.i)) {
+				if prev == stateConnecting && localTargetsLoop && ev.carrier.Local && routesInternet(mp.final(ev.i)) {
 					tl.Warn(localLoopWarning)
 				}
 				if changed, err := mp.addEndpoints(ev.carrier.Endpoints); err != nil {
@@ -1818,7 +1818,7 @@ func startMultiCapture(ctx context.Context, mp *multiPlan, active []bool, lives 
 	c, err := capture.Start(ctx, all, opts, rt, log.With(logx.ComponentKey, "capture"))
 	if err != nil {
 		marker.startFailed()
-		return nil, startErr(ctx, fmt.Errorf("utun capture: %w", err))
+		return nil, startErr(ctx, fmt.Errorf("capture: %w", err))
 	}
 	return c, nil
 }

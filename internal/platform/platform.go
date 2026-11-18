@@ -61,6 +61,22 @@ type Routes interface {
 	Delete(p netip.Prefix, iface string) error
 }
 
+// RouteTable is implemented by Routes drivers that keep subtun's routes in a
+// table of their own and steer this machine's traffic to it with rules
+// (Linux). Unlike routes, the rules don't go away with the interface, so the
+// helper stays up for the session to take them down.
+type RouteTable interface {
+	// Setup puts the rules in place for iface, replacing any an earlier
+	// session left; it refuses while another subtun's interface exists.
+	Setup(iface string) error
+	// Teardown removes the rules (and the table's routes) and reports
+	// whether there was anything to remove.
+	Teardown() (bool, error)
+	// InUse names a subtun interface that exists now ("" if none): a
+	// running session, whose rules cleanup leaves alone.
+	InUse() (string, error)
+}
+
 // Firewall manages subtun's own firewall rules (macOS: a pf anchor), never
 // anyone else's.
 type Firewall interface {

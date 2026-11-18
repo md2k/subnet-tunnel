@@ -21,6 +21,13 @@ type Drivers struct {
 	// DNSCache adds a DNS cache driver, recorded as "flush dns cache". Off
 	// by default, so call sequences of tests that don't care stay short.
 	DNSCache bool
+	// Table makes the routes driver a platform.RouteTable ("table setup
+	// utun0", "table teardown"); TableErr fails Setup, TableLeft makes
+	// Teardown report leftovers, TableInUse is what InUse reports.
+	Table      bool
+	TableErr   error
+	TableLeft  bool
+	TableInUse string
 
 	mu    sync.Mutex
 	calls []string
@@ -34,7 +41,36 @@ func (d *Drivers) Platform() platform.Drivers {
 	if d.DNSCache {
 		p.DNSCache = dnsCache{d}
 	}
+	if d.Table {
+		p.Routes = tableRoutes{d}
+	}
 	return p
+}
+
+// tableRoutes is the routes driver with a table of its own.
+type tableRoutes struct{ *Drivers }
+
+func (t tableRoutes) Setup(iface string) error {
+	if t.TableErr != nil {
+		return t.TableErr
+	}
+	t.record("table setup %s", iface)
+	return nil
+}
+
+func (t tableRoutes) Teardown() (bool, error) {
+	t.record("table teardown")
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	left := t.TableLeft
+	t.TableLeft = false
+	return left, nil
+}
+
+func (t tableRoutes) InUse() (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.TableInUse, nil
 }
 
 type dnsCache struct{ d *Drivers }

@@ -59,7 +59,7 @@ func planGuard(s settings, rp *routePlan) (*guardPlan, []string, error) {
 			notes = append(notes, "kill switch ignored: it guards routed CIDRs, and there are no routes")
 		}
 		if s.blockIPv6 == "true" {
-			notes = append(notes, "IPv6 blocking ignored: it works together with the utun capture, and there are no routes")
+			notes = append(notes, "IPv6 blocking ignored: it works together with the route capture, and there are no routes")
 		}
 		return nil, notes, nil
 	}

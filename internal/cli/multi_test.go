@@ -66,7 +66,7 @@ func TestUpSeveralDryRun(t *testing.T) {
 		"DNS capture (firewall): queries to 192.0.2.53 are answered by subtun\n",
 		"  names under local, lan, 77.168.192.in-addr.arpa",
 		"IPv6",
-		"utun 198.18.249.1, MTU 9000; the root helper stays up",
+		tunIfaceText(netip.MustParseAddr("198.18.249.1"), 9000) + "; the root helper stays up",
 	} {
 		if want == "IPv6" {
 			if strings.Contains(out, want) {
@@ -111,7 +111,7 @@ func TestUpOneProfileFlag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "routes on the utun (1, from 1 given, 0 excluded):\n  10.50.0.0/16\n") {
+	if !strings.Contains(out, "routes on the tunnel interface (1, from 1 given, 0 excluded):\n  10.50.0.0/16\n") {
 		t.Errorf("got\n%s", out)
 	}
 }

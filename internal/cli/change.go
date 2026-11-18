@@ -276,7 +276,7 @@ func (mp *multiPlan) planDNSChange(i int, req control.Change, m *dns.Matcher) (*
 	case m == nil:
 		return nil, errors.New("this run doesn't capture DNS (no profile had DNS names when it started, or DNS capture is off): names can't be added while it runs; restart subtun with them")
 	case mp.rps[i] == nil:
-		return nil, fmt.Errorf("%s has no routes: DNS capture works together with the utun capture", label)
+		return nil, fmt.Errorf("%s has no routes: DNS capture works together with the route capture", label)
 	case sp.s.dnsCapture == "off":
 		return nil, fmt.Errorf("%s has dns.capture: off", label)
 	}
@@ -562,7 +562,7 @@ func (mp *multiPlan) planReload(i int, ns *tunnelSpec, host string, addrs []neti
 	if len(ns.s.dnsDomains)+len(ns.s.dnsPatterns) > 0 && ns.s.dnsCapture != "off" {
 		switch {
 		case rp == nil:
-			warns = append(warns, "DNS settings ignored: DNS capture works together with the utun capture, and this profile has no routes (CIDRs)")
+			warns = append(warns, "DNS settings ignored: DNS capture works together with the route capture, and this profile has no routes (CIDRs)")
 		case m == nil:
 			warns = append(warns, "DNS names ignored: this run doesn't capture DNS; restart subtun to capture them")
 		default:
@@ -830,7 +830,7 @@ func (mp *multiPlan) planAdd(ns *tunnelSpec, host string, addrs []netip.Addr, m 
 		return nil, fmt.Errorf("%s: %w", label, err)
 	}
 	if ac.rp != nil && !mp.hasRoutes() {
-		return nil, fmt.Errorf("%s has routes, and this run has no utun capture (no profile had routes when it started); restart subtun with it", label)
+		return nil, fmt.Errorf("%s has routes, and this run has no route capture (no profile had routes when it started); restart subtun with it", label)
 	}
 	gp, notes, err := planGuard(ns.s, ac.rp)
 	if err != nil {
@@ -880,7 +880,7 @@ func (mp *multiPlan) planAdd(ns *tunnelSpec, host string, addrs []netip.Addr, m 
 	if len(ns.s.dnsDomains)+len(ns.s.dnsPatterns) > 0 && ns.s.dnsCapture != "off" {
 		switch {
 		case ac.rp == nil:
-			warns = append(warns, "DNS settings ignored: DNS capture works together with the utun capture, and this profile has no routes (CIDRs)")
+			warns = append(warns, "DNS settings ignored: DNS capture works together with the route capture, and this profile has no routes (CIDRs)")
 		case m == nil:
 			warns = append(warns, "DNS names ignored: this run doesn't capture DNS; restart subtun to capture them")
 		default:

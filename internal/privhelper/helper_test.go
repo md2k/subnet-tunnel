@@ -192,10 +192,10 @@ func TestHelperRefusesInvalidCommands(t *testing.T) {
 			t.Errorf("%+v: got %+v, want error containing %q", req, r, want)
 		}
 	}
-	refuse(Request{Op: OpAddRoute, CIDR: "10.244.0.0/16"}, "create the utun first")
+	refuse(Request{Op: OpAddRoute, CIDR: "10.244.0.0/16"}, "create the tunnel interface first")
 	refuse(Request{Op: OpCreateTun, MTU: 100, Addr: "198.18.249.1"}, "MTU")
 	refuse(Request{Op: OpCreateTun, MTU: 9000, Addr: "127.0.0.1"}, "unicast IPv4")
-	refuse(Request{Op: OpCreateTun, MTU: 9000, Addr: "utun0; rm"}, "utun address")
+	refuse(Request{Op: OpCreateTun, MTU: 9000, Addr: "utun0; rm"}, "tunnel interface address")
 	call(t, c, createReq)
 	refuse(createReq, "already created")
 	refuse(Request{Op: OpAddRoute, CIDR: "0.0.0.0/0"}, "default route")
@@ -277,7 +277,7 @@ func TestHelperSession(t *testing.T) {
 func TestHelperSessionRouteChanges(t *testing.T) {
 	d := &fake.Drivers{}
 	c, done := startHelper(t, context.Background(), d)
-	if r := call(t, c, Request{Op: OpAddRoute, CIDR: "10.0.0.0/8"}); r.OK || !strings.Contains(r.Error, "create the utun first") {
+	if r := call(t, c, Request{Op: OpAddRoute, CIDR: "10.0.0.0/8"}); r.OK || !strings.Contains(r.Error, "create the tunnel interface first") {
 		t.Fatalf("add_route before create_tun: %+v", r)
 	}
 	call(t, c, createReq)
@@ -763,4 +763,89 @@ func TestHelperFlushDNSCacheOp(t *testing.T) {
 	}
 	checkCalls(t, d, created, "firewall dns [192.168.1.1] 53530 53531", "flush dns cache", "release utun0",
 		"flush dns cache", "flush", "flush dns cache")
+}
+
+// Route drivers with a table of their own (Linux): the helper sets it up
+// with the interface, needs session mode to take it down again, and takes
+// it down when the session ends.
+func TestHelperRouteTable(t *testing.T) {
+	d := &fake.Drivers{Table: true}
+	c, done := startHelper(t, context.Background(), d)
+	call(t, c, createReq)
+	call(t, c, Request{Op: OpAddRoute, CIDR: "10.244.0.0/16"})
+	if r := call(t, c, Request{Op: OpDone}); r.OK || !strings.Contains(r.Error, "session") {
+		t.Fatalf("done without session: %+v", r)
+	}
+	if r := call(t, c, Request{Op: OpDone, Session: true}); !r.OK {
+		t.Fatalf("done: %+v", r)
+	}
+	_ = c.Close()
+	if err := wait(t, done); err != nil {
+		t.Fatal(err)
+	}
+	checkCalls(t, d, created, "table setup utun0", "add 10.244.0.0/16 utun0", "release utun0", "table teardown")
+
+	// End takes it down too, whatever happens to the firewall rules.
+	for _, keep := range []bool{false, true} {
+		d = &fake.Drivers{Table: true}
+		c, done = startHelper(t, context.Background(), d)
+		call(t, c, createReq)
+		call(t, c, Request{Op: OpDone, Session: true})
+		if r := call(t, c, Request{Op: OpEnd, Keep: keep}); !r.OK {
+			t.Fatalf("end: %+v", r)
+		}
+		wait(t, done)
+		checkCalls(t, d, created, "table setup utun0", "release utun0", "table teardown")
+	}
+
+	// Setup undone: the table goes after the routes and the interface.
+	d = &fake.Drivers{Table: true}
+	c, done = startHelper(t, context.Background(), d)
+	call(t, c, createReq)
+	call(t, c, Request{Op: OpAddRoute, CIDR: "10.244.0.0/16"})
+	_ = c.Close()
+	wait(t, done)
+	checkCalls(t, d, created, "table setup utun0", "add 10.244.0.0/16 utun0",
+		"delete 10.244.0.0/16 utun0", "close utun0", "table teardown")
+
+	// A table that can't be set up: the interface goes, nothing stays.
+	d = &fake.Drivers{Table: true, TableErr: errors.New("rule 5209 belongs to someone else")}
+	c, done = startHelper(t, context.Background(), d)
+	if r := call(t, c, createReq); r.OK || !strings.Contains(r.Error, "someone else") {
+		t.Fatalf("create with a failing table: %+v", r)
+	}
+	_ = c.Close()
+	wait(t, done)
+	checkCalls(t, d, created, "close utun0")
+}
+
+// subtun cleanup removes a table an earlier session left (its helper was
+// killed), and says so.
+func TestHelperCleanupRouteTable(t *testing.T) {
+	d := &fake.Drivers{Table: true, TableLeft: true}
+	c, done := startHelper(t, context.Background(), d)
+	if r := call(t, c, Request{Op: OpCleanup}); !r.OK || !strings.Contains(r.Message, "routing rules") {
+		t.Fatalf("cleanup: %+v", r)
+	}
+	call(t, c, Request{Op: OpDone})
+	wait(t, done)
+	checkCalls(t, d, "table teardown")
+
+	d = &fake.Drivers{Table: true}
+	c, done = startHelper(t, context.Background(), d)
+	if r := call(t, c, Request{Op: OpCleanup}); !r.OK || r.Message != "nothing to clean up" {
+		t.Fatalf("empty cleanup: %+v", r)
+	}
+	_ = c.Close()
+	wait(t, done)
+
+	// A running session's table (its interface exists) is not touched.
+	d = &fake.Drivers{Table: true, TableLeft: true, TableInUse: "subtun0"}
+	c, done = startHelper(t, context.Background(), d)
+	if r := call(t, c, Request{Op: OpCleanup}); r.OK || !strings.Contains(r.Error, "subtun0") {
+		t.Fatalf("cleanup of a running session: %+v", r)
+	}
+	_ = c.Close()
+	wait(t, done)
+	checkCalls(t, d)
 }

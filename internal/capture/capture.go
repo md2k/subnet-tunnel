@@ -374,7 +374,7 @@ func Start(ctx context.Context, prefixes []netip.Prefix, opts Options, dialer ne
 		guarded = guard.get()
 	}
 	running, persist := rules(opts, guarded, guarded, name, dr)
-	session := !running.Empty() || opts.Session
+	session := !running.Empty() || opts.Session || privhelper.NeedsSession()
 	if session {
 		if !running.Empty() {
 			if err := h.ApplyFirewall(running, persist); err != nil {

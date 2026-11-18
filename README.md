@@ -8,9 +8,10 @@ Inspired by [sshuttle](https://github.com/sshuttle/sshuttle). Built because on m
 pf-based capture caps upload at a few MB/s, while a utun interface with a userspace TCP/IP stack
 reached ~170 MB/s end to end in the same test (see [docs/design.md](docs/design.md)).
 
-> **Status:** early development, macOS. Kubernetes, Docker and SSH targets; transparent capture of
-> CIDRs or a full tunnel (utun + gVisor), split DNS, a kill switch, several profiles at once, a
-> SOCKS5 proxy, status and a terminal UI.
+> **Status:** early development, macOS; Linux (Debian, Ubuntu) has the capture of CIDRs and a full
+> tunnel, not yet split DNS, the kill switch or the IPv6 block. Kubernetes, Docker and SSH targets;
+> transparent capture of CIDRs or a full tunnel (TUN + gVisor), split DNS, a kill switch, several
+> profiles at once, a SOCKS5 proxy, status and a terminal UI.
 
 ## Quick start
 
@@ -119,7 +120,8 @@ dry run.
 
 ## Planned
 
-- IPv6 through the tunnel; capture on Linux (TUN) and Windows (wintun).
+- IPv6 through the tunnel; on Linux DNS capture, the kill switch and the IPv6 block (nftables);
+  capture on Windows (wintun).
 - Deciding per destination inside subtun: names that get their own address and lead to their
   profile wherever they resolve; everything into subtun with the rest leaving directly; failover and
   balancing between profiles.

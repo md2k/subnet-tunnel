@@ -532,7 +532,7 @@ var componentWhat = map[string]string{
 	"tunnel":    "connecting, reconnecting, changes while running",
 	"dns":       "DNS: at debug every query and its answer",
 	"conn":      "at debug every captured connection",
-	"capture":   "the utun, routes, firewall, kill switch",
+	"capture":   "the tunnel interface, routes, firewall, kill switch",
 	"helper":    "the root helper's lines",
 	"control":   "the control socket (status, changes)",
 	"socks":     "the SOCKS proxy; at debug every connection",

@@ -39,9 +39,9 @@ func TestUpDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"routes on the utun (2, from 3 given, 1 excluded):\n  198.51.100.0/24\n  203.0.113.0/25\n",
+		"routes on the tunnel interface (2, from 3 given, 1 excluded):\n  198.51.100.0/24\n  203.0.113.0/25\n",
 		"route 203.0.113.7/32: already covered by 203.0.113.0/24",
-		"utun 198.18.249.1, MTU 9000",
+		tunIfaceText(netip.MustParseAddr("198.18.249.1"), 9000),
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in\n%s", want, out)
@@ -56,10 +56,10 @@ func TestUpFlagsOverrideAndAdd(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"  192.0.2.0/24\n",            // added on the command line
-		"  198.51.100.128/25\n",       // profile route minus command-line exclude
-		"  203.0.113.0/25\n",          // profile exclude still applies
-		"utun 198.18.250.1, MTU 4000", // flags override the profile
+		"  192.0.2.0/24\n",      // added on the command line
+		"  198.51.100.128/25\n", // profile route minus command-line exclude
+		"  203.0.113.0/25\n",    // profile exclude still applies
+		tunIfaceText(netip.MustParseAddr("198.18.250.1"), 4000), // flags override the profile
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in\n%s", want, out)
@@ -81,7 +81,7 @@ func TestK8sDryRunWithoutConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "routes on the utun (8, from 1 given, 1 excluded)") {
+	if !strings.Contains(out, "routes on the tunnel interface (8, from 1 given, 1 excluded)") {
 		t.Fatalf("got\n%s", out)
 	}
 }
@@ -100,7 +100,7 @@ func TestUpTarget(t *testing.T) {
 		{"up", "--ssh", "me@192.0.2.10:2222", "203.0.113.0/24", "--dry-run"},
 		{"up", "--ssh", "192.0.2.10", "-J", "me@192.0.2.20", "-i", "~/.ssh/id_test", "203.0.113.0/24", "--dry-run"},
 	} {
-		if out, err := runCLI(t, args...); err != nil || !strings.Contains(out, "routes on the utun") {
+		if out, err := runCLI(t, args...); err != nil || !strings.Contains(out, "routes on the tunnel interface") {
 			t.Errorf("%v: %v\n%s", args, err, out)
 		}
 	}
@@ -202,7 +202,7 @@ func TestFullTunnelDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"198.18.249.1/32: subtun's own utun address, excluded automatically",
+		"198.18.249.1/32: subtun's own tunnel interface address, excluded automatically",
 		"224.0.0.0/3: multicast, reserved and broadcast, stays out of the tunnel (excluded automatically)",
 		"127.0.0.0/8: loopback, stays out",
 		"192.168.77.0/24: local network on en0, stays out",
@@ -255,7 +255,7 @@ func routeLines(out string) []netip.Prefix {
 	in := false
 	for _, l := range strings.Split(out, "\n") {
 		switch {
-		case strings.HasPrefix(l, "routes on the utun"):
+		case strings.HasPrefix(l, "routes on the tunnel interface"):
 			in = true
 		case in && strings.HasPrefix(l, "  "):
 			if p, err := netip.ParsePrefix(strings.TrimSpace(l)); err == nil {

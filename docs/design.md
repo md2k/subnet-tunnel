@@ -267,9 +267,9 @@ session, and refuses while a session is running.
 
 Everything that differs per operating system goes behind small interfaces, implemented once per OS
 and chosen by configuration (with a default per OS). `Tun`, `Routes`, `Firewall` and `DNSCache`
-exist (`internal/platform`, macOS drivers in `internal/platform/darwin`: utun, `/sbin/route`, pf,
-`dscacheutil` and mDNSResponder); `Resolver` is planned, for the `override` and `supplemental` DNS
-modes. The app describes **intent**; each driver translates it into its OS's mechanism, so app code
+exist (`internal/platform`; macOS drivers in `internal/platform/darwin`: utun, `/sbin/route`, pf,
+`dscacheutil` and mDNSResponder; Linux drivers in `internal/platform/linux`, see [Linux](#linux));
+`Resolver` is planned, for the `override` and `supplemental` DNS modes. The app describes **intent**; each driver translates it into its OS's mechanism, so app code
 never contains pf, nftables or route syntax.
 
 ```go
@@ -307,11 +307,12 @@ type DNSRedirect struct {
 }
 ```
 
-| | macOS (first) | Linux (later) | Windows (later) |
+| | macOS | Linux (Debian, Ubuntu) | Windows (later) |
 |---|---|---|---|
-| Tun | utun (wireguard-go) | TUN (wireguard-go) | wintun (wireguard-go) |
-| Routes | `/sbin/route` | netlink | IP helper API |
-| Firewall | pf | nftables, iptables as fallback | WFP |
+| Tun | utun (wireguard-go) | TUN, plain IP packets, no address | wintun (wireguard-go) |
+| Routes | `/sbin/route` | `ip`, subtun's own table + two rules | IP helper API |
+| Firewall | pf | nftables (next) | WFP |
+| DNS cache | `dscacheutil`, mDNSResponder | `resolvectl flush-caches` (next) | |
 | Resolver | dynamic store (`scutil`) | systemd-resolved (per-link domains) | NRPT |
 
 - Drivers run inside the root helper, because they all need root. The helper protocol carries the
@@ -320,6 +321,53 @@ type DNSRedirect struct {
 - Unsupported combinations fail with a clear message. Tests use fake drivers
   (`internal/platform/fake`), so the logic is tested without root on any OS: the helper's command
   loop (setup, undo on disconnect or interrupt, refused commands, driver failures) runs against them.
+
+### Linux
+
+Debian and Ubuntu first; other distributions may well work (they need `ip` from iproute2), and
+subtun can run in a container where they don't.
+
+- **Commands** (`ip`, `sudo`, later `nft` and `resolvectl`) are found by `internal/syscmd` in fixed
+  system directories (`/usr/sbin`, `/sbin`, `/usr/bin`, `/bin`, `/usr/local/sbin`, `/usr/local/bin`),
+  never through `$PATH` (the helper runs them as root), and run only if root owns the file and its
+  directory and nobody else can write either. Fixed argument lists, no shell, as on macOS.
+- **The TUN interface** (`subtunN`, picked by the kernel) carries plain IP packets: no packet
+  information header, no offloads. It gets **no address**: routes into it don't need one, and
+  connections through it use one of the machine's own addresses, to which the answers come back
+  (the netstack accepts any source). A new address makes other software react: microk8s's
+  apiserver-kicker added it to the API server certificate and restarted the API server, twice (when
+  it came and when it went), and mDNS responders announce addresses. IPv6 is switched off on it.
+  The interface isn't persistent: it goes, with its routes, when subtun's descriptor closes.
+- **Routes live in a table of subtun's own** (32761), and two rules send *this machine's own*
+  traffic (`iif lo`) there, right before `main` (32766), after any other policy rules (VPNs,
+  Cilium):
+  ```
+  32760: from all iif lo lookup main suppress_prefixlength 0   # main's specific routes first
+  32761: from all iif lo lookup 32761                          # then subtun's routes
+  32766: from all lookup main                                  # then main's default route
+  ```
+  - Traffic the machine forwards (containers, pods, VMs on a bridge) never uses subtun's routes. On
+    Linux a container's traffic goes through the host's routing: with subtun's routes in `main`, a
+    target on this machine (a local cluster, a Docker container) would send its connections to
+    routed addresses back into the tunnel. With these rules it doesn't, so no local-loop warning
+    at start on Linux (the loop guard still catches the rarer cases: an SSH target that is this
+    machine, userspace container networking).
+  - `main`'s specific routes win over subtun's: the LAN, container and pod networks and other VPNs'
+    routes keep working, also in a full tunnel. Unlike macOS (one table, the most specific route
+    wins), a route of subtun's inside a broader non-default route in `main` loses to it.
+  - The reverse-path check (`rp_filter`) looks the source up as if it came from `lo`, so answers
+    arriving on the TUN pass even with strict filtering.
+  - The rules don't go away with the interface (routes do), so on Linux the root helper always
+    stays up for the session and removes them when subtun stops, goes away or is killed
+    (`platform.RouteTable`: `Setup`, `Teardown`, `InUse`). If both are killed, the next start
+    replaces the rules and `subtun cleanup` removes them; neither touches them while a subtun
+    interface exists (a running session). Rules at those priorities that aren't subtun's are
+    refused, never removed.
+- **Not yet on Linux:** the firewall features (DNS capture, the kill switch, the IPv6 block; a full
+  tunnel turns the IPv6 block on by itself, so for now it needs `--block-ipv6 false`), the DNS cache
+  flush, and per-link DNS through systemd-resolved (distributions whose resolver library talks to
+  resolved directly instead of sending queries to 127.0.0.53 need it for DNS capture).
+- `--tun-addr` only matters on macOS.
 
 ## DNS
 

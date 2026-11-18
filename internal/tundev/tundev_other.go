@@ -1,4 +1,4 @@
-//go:build !darwin
+//go:build !darwin && !linux
 
 // Package tundev adapts the platform TUN interface to netstack.Device.
 package tundev
