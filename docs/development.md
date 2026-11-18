@@ -49,12 +49,15 @@ address), `ip rule` (32760 and 32761), `ip route show table 32761`, `ip route ge
 addresses: `dev subtun0 table 32761`; the LAN and container networks: as before). After it stops,
 none of those are left; `subtun cleanup` removes the rules if subtun and its helper were killed.
 
-For a full tunnel (`0.0.0.0/1 128.0.0.0/1 --block-ipv6 false`) on a machine you reach over the
-network, arm a dead-man switch first, so the machine repairs itself if you lose it:
+With DNS capture, the kill switch or the IPv6 block, `sudo nft list table inet subtun` shows the
+rules; after a deliberate stop the table is gone (lockdown: until `subtun cleanup`).
+
+For a full tunnel (`0.0.0.0/1 128.0.0.0/1`) or a kill switch on a machine you reach over the network,
+arm a dead-man switch first, so the machine repairs itself if you lose it:
 
 ```sh
 sudo systemd-run --unit=subtun-deadman --on-active=300 /bin/sh -c \
-  "pkill -x subtun; ip rule del pref 32760 iif lo lookup main suppress_prefixlength 0; ip rule del pref 32761 iif lo lookup 32761; ip route flush table 32761"
+  "pkill -x subtun; nft delete table inet subtun; ip rule del pref 32760 iif lo lookup main suppress_prefixlength 0; ip rule del pref 32761 iif lo lookup 32761; ip route flush table 32761"
 # ... the test ...
 sudo systemctl stop subtun-deadman.timer
 ```
@@ -104,7 +107,7 @@ script stops at preflight; run it with `GH_TOKEN=$(gh auth token -u <user>)`.
 | `internal/tundev` | the tunnel interface as a netstack device (macOS utun, Linux TUN) |
 | `internal/privhelper` | the root helper (`subtun helper`) and subtun's side of it; a session also takes route changes |
 | `internal/platform` | OS driver interfaces used by the helper (`Tun`, `Routes`, `Firewall`, `DNSCache`; `RouteTable` for routes with rules of their own) |
-| `internal/platform/darwin`, `.../linux`, `.../fake` | macOS drivers (utun, `/sbin/route`, pf, DNS cache); Linux drivers (TUN, routes in subtun's own table with `ip`; no firewall yet); recording fakes for tests |
+| `internal/platform/darwin`, `.../linux`, `.../fake` | macOS drivers (utun, `/sbin/route`, pf, DNS cache); Linux drivers (TUN, routes in subtun's own table with `ip`, nftables, resolved's cache); recording fakes for tests |
 | `internal/syscmd` | finds the system commands subtun runs, in fixed system directories, only if root owns them |
 | `internal/relay` | bidirectional copy with half-close; the error counts of a UDP flow (`errors.go`) |
 | `internal/testutil`, `internal/version` | in-memory connection pairs for tests; the version stamped in at build time |

@@ -311,8 +311,8 @@ type DNSRedirect struct {
 |---|---|---|---|
 | Tun | utun (wireguard-go) | TUN, plain IP packets, no address | wintun (wireguard-go) |
 | Routes | `/sbin/route` | `ip`, subtun's own table + two rules | IP helper API |
-| Firewall | pf | nftables (next) | WFP |
-| DNS cache | `dscacheutil`, mDNSResponder | `resolvectl flush-caches` (next) | |
+| Firewall | pf | nftables (subtun's table `inet subtun`) | WFP |
+| DNS cache | `dscacheutil`, mDNSResponder | `resolvectl flush-caches` | |
 | Resolver | dynamic store (`scutil`) | systemd-resolved (per-link domains) | NRPT |
 
 - Drivers run inside the root helper, because they all need root. The helper protocol carries the
@@ -363,10 +363,30 @@ subtun can run in a container where they don't.
     replaces the rules and `subtun cleanup` removes them; neither touches them while a subtun
     interface exists (a running session). Rules at those priorities that aren't subtun's are
     refused, never removed.
-- **Not yet on Linux:** the firewall features (DNS capture, the kill switch, the IPv6 block; a full
-  tunnel turns the IPv6 block on by itself, so for now it needs `--block-ipv6 false`), the DNS cache
-  flush, and per-link DNS through systemd-resolved (distributions whose resolver library talks to
-  resolved directly instead of sending queries to 127.0.0.53 need it for DNS capture).
+- **Firewall: nftables.** The same `Rules` intent as pf, rendered into subtun's own table
+  (`inet subtun`) and replaced in one transaction (`table inet subtun; delete table inet subtun;
+  table inet subtun { ... }` fed to `nft -f -`); `Flush` deletes the table, `Busy` asks whether it
+  exists, and nothing keeps nftables "enabled", so there is no token. Only output hooks (this
+  machine's own traffic); other tables (Docker's, Cilium's) are never touched.
+  - DNS: a nat output chain (priority -100) returns packets from the bypass port, then hands UDP and
+    TCP port 53 to the captured servers to 127.0.0.1:listen. DNAT happens before the filter chain,
+    so a captured server inside the kill switch's prefixes is still captured (pf: DNS rules first).
+  - Local resolvers are servers like any other on Linux (`dns.LocalServers`): systemd-resolved's
+    `127.0.0.53` (all Ubuntu's `/etc/resolv.conf` lists), a local dnsmasq. subtun's fallback goes
+    back to them from the bypass port; they ask their upstream servers from their own process,
+    which isn't captured, so nothing loops. pf can't redirect loopback, so macOS keeps refusing them.
+  - DNS block, kill switch and IPv6 block are filter output rules that reject (TCP reset, ICMP
+    unreachable), like pf's `block return`; the kill switch lets `oifname "subtunN"` through to its
+    prefixes (an interval set with auto-merge) and rejects the rest; the IPv6 block lets loopback,
+    link-local and multicast through.
+  - The DNS cache is systemd-resolved's (`resolvectl flush-caches`; no resolvectl: nothing to do).
+- **The helper ignores SIGPIPE.** Its log goes to subtun through a pipe; when subtun dies, Go would
+  end the helper at its first log line (SIGPIPE on stdout/stderr), before the kill switch's rules
+  are in place or the routing rules are removed. (Found on Linux, where the routing rules made the
+  order visible; the same holds on macOS.)
+- **Not yet on Linux:** per-link DNS through systemd-resolved (distributions whose resolver library
+  asks resolved directly instead of sending queries to 127.0.0.53 need it for DNS capture), and
+  testing on distributions other than Debian and Ubuntu.
 - `--tun-addr` only matters on macOS.
 
 ## DNS
