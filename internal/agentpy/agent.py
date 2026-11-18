@@ -9,7 +9,6 @@
 #
 # Python 3.6+, standard library only.
 
-import collections
 import errno
 import hashlib
 import os
@@ -38,9 +37,9 @@ KEEPALIVE = 10  # seconds; the client drops the session after 30 s of silence
 CMD_CONNECT, CMD_DNS, CMD_UDP = 1, 2, 3
 MAX_DATAGRAM = 65535
 UDP_SOCKET_BUFFER = 4 << 20  # asked for a flow's socket (Linux gives at most rmem_max, doubled)
-UDP_QUEUE_BYTES = 4 << 20  # read from a flow's socket, not in the stream yet
-DATAGRAM_OVERHEAD = 64  # what a queued datagram costs on top of its bytes
 UDP_ERROR_STREAK = 1000  # read errors in a row, with no datagram between, end a flow
+UDP_READ_BATCH = 64  # datagrams taken from the socket per wake-up, written at once
+DONTWAIT = getattr(socket, "MSG_DONTWAIT", 0)  # 0: one datagram per wake-up
 ST_OK, ST_FAILURE, ST_REFUSED, ST_UNREACHABLE, ST_TIMEOUT, ST_DNS, ST_BAD_REQUEST = range(7)
 MAX_ADDR = 512
 MAX_MSG = 512
@@ -379,48 +378,10 @@ def udp_dial(host, port):
     return sock
 
 
-class DatagramQueue(object):
-    """Datagrams between a flow's socket reader and its stream writer, up to a
-    byte limit (each costs its length plus DATAGRAM_OVERHEAD, so empty ones
-    count too). put never blocks: a full queue drops the datagram, as a full
-    socket buffer would."""
-
-    def __init__(self, limit):
-        self.cond = threading.Condition()
-        self.items = collections.deque()
-        self.size = 0
-        self.limit = limit
-        self.dropped = 0
-        self.closed = False
-
-    def put(self, data):
-        cost = len(data) + DATAGRAM_OVERHEAD
-        with self.cond:
-            if self.closed:
-                return False
-            if self.size + cost > self.limit:
-                self.dropped += 1
-                return False
-            self.items.append(data)
-            self.size += cost
-            self.cond.notify()
-            return True
-
-    def get(self):
-        """The next datagram, waiting for one; None once closed and empty."""
-        with self.cond:
-            while not self.items and not self.closed:
-                self.cond.wait()
-            if not self.items:
-                return None
-            data = self.items.popleft()
-            self.size -= len(data) + DATAGRAM_OVERHEAD
-            return data
-
-    def close(self):
-        with self.cond:
-            self.closed = True
-            self.cond.notify_all()
+def error_kind(err):
+    """The errno's name (the same on every libc), else the error's text."""
+    n = getattr(err, "errno", None)
+    return errno.errorcode.get(n, str(err)) if n else str(err)
 
 
 class FlowErrors(object):
@@ -431,10 +392,9 @@ class FlowErrors(object):
         self.counts = {}
         self.order = []
 
-    def add(self, direction, err):
-        """Counts err; True if it's the first of its kind."""
-        errno_ = getattr(err, "errno", None)
-        key = "%s: %s" % (direction, os.strerror(errno_) if errno_ else err)
+    def add(self, direction, kind):
+        """Counts one error; True if it's the first of its kind."""
+        key = "%s: %s" % (direction, kind)
         with self.lock:
             n = self.counts.get(key, 0) + 1
             self.counts[key] = n
@@ -450,9 +410,10 @@ class FlowErrors(object):
 def handle_udp(st, addr):
     """One UDP flow: framed datagrams from the stream go to addr from a socket
     of our own, and what comes back goes into the stream, until subtun closes
-    the stream. A reader drains the socket into a queue and a writer feeds the
-    stream from it, so a slow stream doesn't overflow the socket. An error for
-    one datagram (the ICMP errors a connected socket reports: port, host or
+    the stream. The reader takes what the socket holds at each wake-up and
+    writes it into the stream at once (in Python that beats a queue and a
+    writer thread: the handoff costs more than it saves). An error for one
+    datagram (the ICMP errors a connected socket reports: port, host or
     network unreachable, too big for the path) doesn't end the flow: it's
     counted, and the first of each kind is logged."""
     try:
@@ -466,28 +427,33 @@ def handle_udp(st, addr):
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, UDP_SOCKET_BUFFER)
     except OSError:
         pass
-    sock.settimeout(1.0)  # the reader checks for the end at least this often
+    # Blocking, no timeout (a timeout costs a poll per recv): shutdown wakes
+    # the reader.
+    sock.settimeout(None)
     counts = {"up": 0, "down": 0}
     start = time.time()
     closing = threading.Event()
     errs = FlowErrors()
-    queue = DatagramQueue(UDP_QUEUE_BYTES)
     why = []  # why the flow ended: the first to say wins
 
     def note(direction, err):
-        if errs.add(direction, err):
-            log("DEBUG", "udp flow error", stream=st.sid, dir=direction, err=err)
+        kind = error_kind(err)
+        if errs.add(direction, kind):
+            log("DEBUG", "udp flow error", stream=st.sid, dir=direction, kind=kind, err=err)
 
-    def sock_to_queue():
+    def sock_to_stream():
+        # Waits for a datagram, takes what else is there without waiting, and
+        # writes them all at once (the framing keeps them apart).
         streak = 0
         try:
             while True:
+                batch = []
                 try:
-                    data = sock.recv(MAX_DATAGRAM)
-                except socket.timeout:
-                    if closing.is_set():
-                        break
-                    continue
+                    batch.append(sock.recv(MAX_DATAGRAM))
+                    while DONTWAIT and len(batch) < UDP_READ_BATCH:
+                        batch.append(sock.recv(MAX_DATAGRAM, DONTWAIT))
+                except BlockingIOError:
+                    pass  # nothing more for now
                 except OSError as e:
                     if closing.is_set():
                         break
@@ -496,22 +462,17 @@ def handle_udp(st, addr):
                     if streak >= UDP_ERROR_STREAK:
                         why.append("%d read errors in a row" % streak)
                         break
-                    continue
                 if closing.is_set():
                     break  # after shutdown recv returns b"" for ever
+                if not batch:
+                    continue
                 streak = 0
-                queue.put(data)
-        finally:
-            queue.close()
-
-    def queue_to_stream():
-        try:
-            while True:
-                data = queue.get()
-                if data is None:
-                    break
-                st.write(struct.pack(">H", len(data)) + data)
-                counts["down"] += len(data)
+                buf = bytearray()
+                for data in batch:
+                    buf += struct.pack(">H", len(data))
+                    buf += data
+                st.write(buf)
+                counts["down"] += len(buf) - 2 * len(batch)
         except Exception as e:
             why.append("stream write: %s" % e)
         finally:
@@ -520,14 +481,11 @@ def handle_udp(st, addr):
             st.close_write()
             st.kill()
 
-    reader = threading.Thread(target=sock_to_queue)
+    reader = threading.Thread(target=sock_to_stream)
     reader.daemon = True
-    writer = threading.Thread(target=queue_to_stream)
-    writer.daemon = True
     try:
         reply(st, ST_OK)
         reader.start()
-        writer.start()
         while True:
             try:
                 n, = struct.unpack(">H", st.read_exact(2, None))
@@ -550,15 +508,12 @@ def handle_udp(st, addr):
             sock.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
-        st.kill()  # a writer waiting on the stream's window gives up
-        for t in (reader, writer):
-            if t.is_alive():
-                t.join(5)
+        st.kill()  # a reader waiting on the stream's window gives up
+        if reader.is_alive():
+            reader.join(5)
         sock.close()
     kv = dict(stream=st.sid, reason=why[0] if why else "unknown", up=counts["up"], down=counts["down"],
               dur="%.3fs" % (time.time() - start))
-    if queue.dropped:
-        kv["dropped"] = queue.dropped
     if str(errs):
         kv["errors"] = str(errs)
     log("DEBUG", "udp flow closed", **kv)

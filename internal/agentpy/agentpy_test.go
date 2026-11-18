@@ -8,8 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -297,11 +300,11 @@ func TestPythonAgentUDPSurvivesErrors(t *testing.T) {
 			t.Fatalf("%q after read errors: got %q, %v", d, buf[:n], err)
 		}
 	}
-	logs.waitLine(t, "udp flow error", "No route to host")
-	logs.waitLine(t, "udp flow error", "Message too long")
+	logs.waitLine(t, "udp flow error", "kind=EHOSTUNREACH")
+	logs.waitLine(t, "udp flow error", "kind=EMSGSIZE")
 	_ = conn.Close()
 	line := logs.waitLine(t, "udp flow closed", "reason=")
-	for _, want := range []string{"No route to host (2)", "Message too long (1)", "Connection refused (1)"} {
+	for _, want := range []string{"read: EHOSTUNREACH (2)", "read: EMSGSIZE (1)", "read: ECONNREFUSED (1)"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("the closing line doesn't count %q: %s", want, line)
 		}
@@ -322,7 +325,112 @@ func TestPythonAgentUDPEndsWhenItsSocketKeepsFailing(t *testing.T) {
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("read: %v, want EOF: the flow ended by the agent", err)
 	}
-	logs.waitLine(t, "udp flow closed", "reason=", "Network is unreachable")
+	logs.waitLine(t, "udp flow closed", "reason=", "ENETUNREACH")
+}
+
+// On a real UDP socket the agent ends the flow promptly when subtun closes it
+// (its reader, blocked in recv, wakes up).
+func TestPythonAgentUDPRealSocketCloses(t *testing.T) {
+	src, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	c, logs := startAgentLog(t)
+	conn, err := c.DialContext(context.Background(), "udp", src.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = src.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 100)
+	n, agentAddr, err := src.ReadFromUDP(buf)
+	if err != nil || string(buf[:n]) != "ping" {
+		t.Fatalf("at the destination: %q %v", buf[:n], err)
+	}
+	if _, err := src.WriteToUDP([]byte("pong"), agentAddr); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := conn.Read(buf); err != nil || string(buf[:n]) != "pong" {
+		t.Fatalf("answer: %q %v", buf[:n], err)
+	}
+	start := time.Now()
+	_ = conn.Close()
+	logs.waitLine(t, "udp flow closed", "closed by subtun")
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("the flow ended %v after the close: the reader didn't wake", d)
+	}
+}
+
+// TestPythonAgentUDPThroughput measures a paced UDP download through the
+// Python agent (real sockets on 127.0.0.1): how fast it reaches the client
+// and how much is lost. Set SUBTUN_UDP_BENCH=1 to run it; SUBTUN_UDP_RATE is
+// the sender's rate in MB/s (default 40), SUBTUN_UDP_COUNT the number of
+// datagrams (default 40000, 1350 bytes each).
+func TestPythonAgentUDPThroughput(t *testing.T) {
+	if os.Getenv("SUBTUN_UDP_BENCH") == "" {
+		t.Skip("set SUBTUN_UDP_BENCH=1 to run")
+	}
+	rate := 40.0
+	if v, err := strconv.ParseFloat(os.Getenv("SUBTUN_UDP_RATE"), 64); err == nil {
+		rate = v
+	}
+	src, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	c := startAgent(t)
+	conn, err := c.DialContext(context.Background(), "udp", src.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("go")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 65535)
+	_ = src.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, agentAddr, err := src.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, size := 40000, 1350
+	if v, err := strconv.Atoi(os.Getenv("SUBTUN_UDP_COUNT")); err == nil {
+		n = v
+	}
+	go func() {
+		d := make([]byte, size)
+		start := time.Now()
+		for i := range n {
+			_, _ = src.WriteToUDP(d, agentAddr)
+			if i%20 == 19 {
+				due := time.Duration(float64((i+1)*size) / (rate * 1e6) * float64(time.Second))
+				if wait := due - time.Since(start); wait > 0 {
+					time.Sleep(wait)
+				}
+			}
+		}
+	}()
+	got, total := 0, 0
+	start := time.Now()
+	last := start
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		k, err := conn.Read(buf)
+		if err != nil {
+			break // a second without a datagram: done
+		}
+		got++
+		total += k
+		last = time.Now()
+	}
+	el := last.Sub(start).Seconds()
+	t.Logf("sent %d datagrams of %d B at %.0f MB/s: got %d (%.1f %% lost), %.1f MB/s over %.2f s",
+		n, size, rate, got, 100*float64(n-got)/float64(n), float64(total)/el/1e6, el)
 }
 
 // A connection the agent aborts (the target reset it) ends for subtun too.

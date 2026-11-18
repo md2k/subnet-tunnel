@@ -52,7 +52,7 @@ class _Failing(object):
         self._errs = list(errs)
         self._forever = forever
 
-    def recv(self, n):
+    def recv(self, n, flags=0):
         if self._forever is not None:
             raise OSError(self._forever, os.strerror(self._forever))
         if self._errs:
@@ -60,7 +60,7 @@ class _Failing(object):
             if e == errno.ECONNRESET:
                 raise ConnectionResetError(e, os.strerror(e))
             raise OSError(e, os.strerror(e))
-        return self._sock.recv(n)
+        return self._sock.recv(n, flags)
 
     def __getattr__(self, name):
         return getattr(self._sock, name)
@@ -146,7 +146,12 @@ _FAIL_UDP = {
 }
 
 
+_real_udp_dial = udp_dial
+
+
 def udp_dial(host, port):
+    if host == "127.0.0.1":
+        return _real_udp_dial(host, port)  # a real socket: the throughput test
     key = "%s:%d" % (host, port)
     handler = _UDP.get(key)
     if handler is None:
