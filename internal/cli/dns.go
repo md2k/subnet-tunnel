@@ -40,7 +40,7 @@ func planDNS(s settings, rp *routePlan) (*capture.DNSOptions, []string, error) {
 	}
 	if rp == nil && s.dnsListen == "" {
 		// A profile without routes may inherit DNS settings from defaults.
-		return nil, []string{"DNS settings ignored: DNS capture works together with the utun capture, and there are no routes (CIDRs)"}, nil
+		return nil, []string{"DNS settings ignored: DNS capture works together with the route capture, and there are no routes (CIDRs)"}, nil
 	}
 	m, err := dns.NewMatcher(s.dnsDomains, s.dnsPatterns)
 	if err != nil {

@@ -92,10 +92,10 @@ func ValidateMTU(mtu int) error {
 func ValidateTunAddr(s string) (netip.Addr, error) {
 	a, err := netip.ParseAddr(s)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("utun address: %w", err)
+		return netip.Addr{}, fmt.Errorf("tunnel interface address: %w", err)
 	}
 	if !a.Is4() || a.IsLoopback() || a.IsMulticast() || a.IsUnspecified() || a.IsLinkLocalUnicast() {
-		return netip.Addr{}, fmt.Errorf("utun address %s: need a unicast IPv4 address", a)
+		return netip.Addr{}, fmt.Errorf("tunnel interface address %s: need a unicast IPv4 address", a)
 	}
 	return a, nil
 }
@@ -157,8 +157,8 @@ func ValidateRules(r *platform.Rules) error {
 				return fmt.Errorf("kill switch: %s is not an IPv4 prefix with host bits zero (and not the default route)", p)
 			}
 		}
-		if k.TunIface != "" && !utunName.MatchString(k.TunIface) {
-			return fmt.Errorf("kill switch: interface %q is not a utun", k.TunIface)
+		if k.TunIface != "" && !tunName.MatchString(k.TunIface) {
+			return fmt.Errorf("kill switch: interface %q is not a tunnel interface", k.TunIface)
 		}
 	}
 	return nil
@@ -176,7 +176,7 @@ func ValidatePersist(r *platform.Rules) error {
 	return nil
 }
 
-var utunName = regexp.MustCompile(`^utun[0-9]{1,5}$`)
+var tunName = regexp.MustCompile(`^(utun|subtun)[0-9]{1,5}$`) // macOS, Linux
 
 func validateServers(what string, servers []netip.Addr) error {
 	if len(servers) == 0 || len(servers) > maxServers {

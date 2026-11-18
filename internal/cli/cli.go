@@ -71,7 +71,7 @@ func newHelperCmd() *cobra.Command {
 	var socketPath string
 	cmd := &cobra.Command{
 		Use:    "helper",
-		Short:  "Root helper for utun setup (started by subtun through sudo)",
+		Short:  "Root helper for the tunnel interface and routes (started by subtun through sudo)",
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -142,8 +142,8 @@ func (s *settings) register(cmd *cobra.Command) {
 	f := cmd.Flags()
 	f.StringVar(&s.socks, "socks", "", "start a SOCKS5 proxy on this address (e.g. 127.0.0.1:1080)")
 	f.StringArrayVarP(&s.excludes, "exclude", "x", nil, "never route this CIDR or IP through the tunnel (repeatable; most specific rule wins)")
-	f.StringVar(&s.tunAddr, "tun-addr", capture.DefaultTunAddr, "subtun's own utun address")
-	f.IntVar(&s.mtu, "mtu", capture.DefaultMTU, "utun MTU")
+	f.StringVar(&s.tunAddr, "tun-addr", capture.DefaultTunAddr, "subtun's own tunnel interface address (macOS; Linux assigns none)")
+	f.IntVar(&s.mtu, "mtu", capture.DefaultMTU, "tunnel interface MTU")
 	f.BoolVar(&s.dryRun, "dry-run", false, "show the routes that would be installed and exit")
 	f.BoolVar(&s.tui, "tui", false, "run with the terminal UI (as subtun tui) in this terminal; q stops subtun, after asking")
 	f.StringVar(&s.agent, "agent", transport.AgentAuto,
@@ -575,13 +575,13 @@ func planRoutes(s settings) (*routePlan, []string, error) {
 			return nil, nil, err
 		}
 		plan.Redundant = append(plan.Redundant, routes.Note{Prefix: netip.PrefixFrom(tunAddr, 32), Exclude: true,
-			Reason: "subtun's own utun address, excluded automatically"})
+			Reason: "subtun's own tunnel interface address, excluded automatically"})
 	}
 	plan.Redundant = append(plan.Redundant, notes...)
 	if len(plan.Routes) == 0 {
 		return nil, nil, errors.New("the excludes remove every route")
 	}
-	reserved := []routes.Reserved{{Addr: tunAddr, What: "subtun's utun address"}}
+	reserved := []routes.Reserved{{Addr: tunAddr, What: "subtun's tunnel interface address"}}
 	if gw, ok := defaultGateway(); ok {
 		reserved = append(reserved, routes.Reserved{Addr: gw, What: "the default gateway", ViaLocal: true})
 	}
@@ -593,7 +593,7 @@ func planRoutes(s settings) (*routePlan, []string, error) {
 }
 
 func printPlan(w io.Writer, rp *routePlan, warns []string) {
-	fmt.Fprintf(w, "routes on the utun (%d, from %d given, %d excluded):\n", len(rp.plan.Routes), len(rp.includes), len(rp.excludes))
+	fmt.Fprintf(w, "routes on the tunnel interface (%d, from %d given, %d excluded):\n", len(rp.plan.Routes), len(rp.includes), len(rp.excludes))
 	for _, p := range rp.plan.Routes {
 		fmt.Fprintf(w, "  %s\n", p)
 	}
@@ -606,8 +606,8 @@ func printPlan(w io.Writer, rp *routePlan, warns []string) {
 	for _, wn := range warns {
 		fmt.Fprintf(w, "warning: %s\n", wn)
 	}
-	fmt.Fprintf(w, "utun %s, MTU %d. subtun's own connection (the API server, Docker daemon or SSH server) is excluded automatically when connecting.\n",
-		rp.opts.TunAddr, rp.opts.MTU)
+	fmt.Fprintf(w, "%s. subtun's own connection (the API server, Docker daemon or SSH server) is excluded automatically when connecting.\n",
+		tunIfaceText(rp.opts.TunAddr, rp.opts.MTU))
 }
 
 // run runs one profile (subtun up NAME, or a target given with --k8s or --docker): it plans

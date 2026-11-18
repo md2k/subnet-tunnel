@@ -13,7 +13,8 @@ import (
 // anything to remove.
 type Firewall struct{}
 
-var errNoFirewall = errors.New("DNS capture, the kill switch and the IPv6 block aren't implemented on Linux yet (routes and SOCKS are)")
+var errNoFirewall = errors.New("DNS capture, the kill switch and the IPv6 block aren't implemented on Linux yet (routes and SOCKS are); " +
+	"a full tunnel turns the IPv6 block on by itself: add --block-ipv6 false for now (IPv6 then bypasses the tunnel)")
 
 // Apply refuses everything but empty rules.
 func (Firewall) Apply(r platform.Rules) error {

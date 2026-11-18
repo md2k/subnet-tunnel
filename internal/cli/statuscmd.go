@@ -177,7 +177,11 @@ func writeStatus(w io.Writer, is instanceStatus, now time.Time) {
 	}
 	capturing := st.Utun != ""
 	if capturing {
-		fmt.Fprintf(w, "; %s (%s), %s root helper", st.Utun, st.TunAddr, st.Helper)
+		fmt.Fprintf(w, "; %s", st.Utun)
+		if st.TunAddr != "" {
+			fmt.Fprintf(w, " (%s)", st.TunAddr)
+		}
+		fmt.Fprintf(w, ", %s root helper", st.Helper)
 	}
 	fmt.Fprintln(w)
 	routed := slices.ContainsFunc(st.Tunnels, func(t control.Tunnel) bool { return len(t.Routes) > 0 })
@@ -195,7 +199,7 @@ func writeStatus(w io.Writer, is instanceStatus, now time.Time) {
 		if len(t.Routes) > 0 {
 			on := "not in use"
 			if t.RoutesOn {
-				on = "on the utun"
+				on = "on " + st.Utun
 			}
 			what = append(what, fmt.Sprintf("routes %s (%s)", summary(t.Routes, 4), on))
 		}

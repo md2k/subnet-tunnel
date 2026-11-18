@@ -474,9 +474,9 @@ func (a *app) statsText(t control.Tunnel) string {
 		lines = append(lines, fmt.Sprintf("[gray]guard  [-]  [yellow]loop guard refused %d[-]", c.Refused))
 	}
 	if len(t.Routes) > 0 {
-		on := "not on the utun"
+		on := "not on the tunnel interface"
 		if t.RoutesOn {
-			on = "on the utun"
+			on = "on the tunnel interface"
 		}
 		lines = append(lines, fmt.Sprintf("[gray]carries[-]  %s [gray](%s)[-]", tview.Escape(summary(t.Routes, 4)), on))
 	}

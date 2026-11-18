@@ -192,10 +192,10 @@ func TestHelperRefusesInvalidCommands(t *testing.T) {
 			t.Errorf("%+v: got %+v, want error containing %q", req, r, want)
 		}
 	}
-	refuse(Request{Op: OpAddRoute, CIDR: "10.244.0.0/16"}, "create the utun first")
+	refuse(Request{Op: OpAddRoute, CIDR: "10.244.0.0/16"}, "create the tunnel interface first")
 	refuse(Request{Op: OpCreateTun, MTU: 100, Addr: "198.18.249.1"}, "MTU")
 	refuse(Request{Op: OpCreateTun, MTU: 9000, Addr: "127.0.0.1"}, "unicast IPv4")
-	refuse(Request{Op: OpCreateTun, MTU: 9000, Addr: "utun0; rm"}, "utun address")
+	refuse(Request{Op: OpCreateTun, MTU: 9000, Addr: "utun0; rm"}, "tunnel interface address")
 	call(t, c, createReq)
 	refuse(createReq, "already created")
 	refuse(Request{Op: OpAddRoute, CIDR: "0.0.0.0/0"}, "default route")
@@ -277,7 +277,7 @@ func TestHelperSession(t *testing.T) {
 func TestHelperSessionRouteChanges(t *testing.T) {
 	d := &fake.Drivers{}
 	c, done := startHelper(t, context.Background(), d)
-	if r := call(t, c, Request{Op: OpAddRoute, CIDR: "10.0.0.0/8"}); r.OK || !strings.Contains(r.Error, "create the utun first") {
+	if r := call(t, c, Request{Op: OpAddRoute, CIDR: "10.0.0.0/8"}); r.OK || !strings.Contains(r.Error, "create the tunnel interface first") {
 		t.Fatalf("add_route before create_tun: %+v", r)
 	}
 	call(t, c, createReq)

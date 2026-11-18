@@ -40,7 +40,7 @@ func TestWriteStatus(t *testing.T) {
 		"subtun pid 4242, v0.1.0, up 1h0m0s, control full; utun10 (198.18.249.1), session root helper\n",
 		"changed while running: +route 10.50.0.0/16, -dns x.example\n",
 		"  work  up for 2m0s; pod ops/toolbox, binary agent\n",
-		"routes 0.0.0.0/1, 128.0.0.0/1 (on the utun); DNS .; kill switch on\n",
+		"routes 0.0.0.0/1, 128.0.0.0/1 (on utun10); DNS .; kill switch on\n",
 		"connections 3 open, 120 total, 2 failed (10 through SOCKS)\n",
 		"up 1.2 MB (5.0 kB/s), down 34.0 MB (120.0 kB/s); DNS 340 answered, 2 failed\n",
 		"  dev   reconnecting for 10s (attempt 2 of 10, next in 3s)\n",

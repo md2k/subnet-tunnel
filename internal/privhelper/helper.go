@@ -176,7 +176,7 @@ func (h *helper) handle(req Request) (Response, []int) {
 	switch req.Op {
 	case OpCreateTun:
 		if h.dev != nil {
-			return fail(errors.New("utun already created"))
+			return fail(errors.New("tunnel interface already created"))
 		}
 		if err := ValidateMTU(req.MTU); err != nil {
 			return fail(err)
@@ -197,7 +197,7 @@ func (h *helper) handle(req Request) (Response, []int) {
 			h.table = true
 		}
 		h.dev, h.ifname = dev, dev.Name()
-		h.log.Info("utun created", "name", dev.Name(), "mtu", req.MTU, "addr", addr)
+		h.log.Info("tunnel interface created", "name", dev.Name(), "mtu", req.MTU, "addr", addr)
 		fd, err := rawFD(dev.File())
 		if err != nil {
 			h.undo()
@@ -207,7 +207,7 @@ func (h *helper) handle(req Request) (Response, []int) {
 
 	case OpAddRoute:
 		if h.ifname == "" {
-			return fail(errors.New("create the utun first"))
+			return fail(errors.New("create the tunnel interface first"))
 		}
 		p, err := ParseCIDR(req.CIDR)
 		if err != nil {
@@ -543,7 +543,7 @@ func (h *helper) undo() {
 	h.routes = nil
 	_ = h.dev.Close()
 	h.dev = nil
-	h.log.Info("utun closed", "name", name)
+	h.log.Info("tunnel interface closed", "name", name)
 	h.teardownTable()
 }
 

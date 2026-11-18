@@ -168,7 +168,7 @@ func (es *engineStatus) status() control.Status {
 	c := es.capt.Load()
 	if c != nil {
 		st.BlockIPv6 = c.BlockingIPv6()
-		st.Utun, st.TunAddr = c.Name, mp.tunAddr.String()
+		st.Utun, st.TunAddr = c.Name, shownTunAddr(mp.tunAddr)
 		st.Helper = "one-shot"
 		if c.Session() {
 			st.Helper = "session"

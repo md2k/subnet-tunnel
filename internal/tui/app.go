@@ -472,7 +472,11 @@ func (a *app) renderHeader() {
 		st := a.st
 		s = fmt.Sprintf(" subtun · pid %d · up %s", st.PID, short(time.Since(st.Started)))
 		if st.Utun != "" {
-			s += fmt.Sprintf(" · %s %s · %s helper", st.Utun, st.TunAddr, st.Helper)
+			s += " · " + st.Utun
+			if st.TunAddr != "" {
+				s += " " + st.TunAddr
+			}
+			s += " · " + st.Helper + " helper"
 		} else if slices.ContainsFunc(st.Tunnels, func(t control.Tunnel) bool { return len(t.Include) > 0 }) {
 			s += " · capture not started yet"
 		}
