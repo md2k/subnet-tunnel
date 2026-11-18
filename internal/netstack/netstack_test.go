@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -222,6 +223,76 @@ func udpEcho(c net.Conn) {
 			return
 		}
 	}
+}
+
+// closingTunnel's connections answer one datagram, then fail as a tunnel
+// session that closed does (io.ErrClosedPipe).
+type closingTunnel struct{}
+
+func (closingTunnel) DialContext(context.Context, string, string) (net.Conn, error) {
+	local, remote := testutil.Pair()
+	go func() {
+		buf := make([]byte, 100)
+		n, _ := remote.Read(buf)
+		_, _ = remote.Write(append([]byte("re:"), buf[:n]...))
+	}()
+	return &closedPipeConn{Conn: local}, nil
+}
+
+type closedPipeConn struct {
+	net.Conn
+	reads atomic.Int32
+}
+
+func (c *closedPipeConn) Read(b []byte) (int, error) {
+	if c.reads.Add(1) > 1 {
+		return 0, io.ErrClosedPipe
+	}
+	return c.Conn.Read(b)
+}
+
+// lockedLog collects the stack's log lines.
+type lockedLog struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// A flow whose tunnel session closed says so when it ends.
+func TestUDPFlowEndReason(t *testing.T) {
+	logs := &lockedLog{}
+	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	client := setupDialer(t, closingTunnel{}, Options{DialTimeout: 5 * time.Second, Logger: log})
+	conn, err := gonet.DialUDP(client, nil, &tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4([4]byte{10, 1, 2, 3}), Port: 443}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 100)
+	if n, err := conn.Read(buf); err != nil || string(buf[:n]) != "re:x" {
+		t.Fatalf("got %q %v", buf[:n], err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if strings.Contains(logs.String(), `reason="tunnel closed"`) {
+			return
+		}
+	}
+	t.Fatalf("no closing line with the reason in:\n%s", logs.String())
 }
 
 // An ICMP error from the application's side (here: port unreachable, for a

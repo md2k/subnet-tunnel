@@ -119,9 +119,12 @@ func (st *Stack) relayUDP(conn *gonet.UDPConn, key, dst string, idle time.Durati
 		for {
 			n, err := up.Read(buf)
 			if err != nil {
-				if errors.Is(err, io.EOF) {
+				switch {
+				case errors.Is(err, io.EOF):
 					end("the agent ended the flow")
-				} else {
+				case errors.Is(err, io.ErrClosedPipe), errors.Is(err, net.ErrClosed):
+					end("tunnel closed") // lost, or subtun stopping
+				default:
 					end("tunnel: " + err.Error())
 				}
 				_ = conn.Close()
@@ -150,8 +153,8 @@ func (st *Stack) relayUDP(conn *gonet.UDPConn, key, dst string, idle time.Durati
 					continue
 				}
 				end("idle")
-			case errors.Is(err, io.EOF): // closed: by the other way, or the stack stopping
-				end("closed")
+			case errors.Is(err, io.EOF): // closed: by the other way (its reason won), or the stack stopping
+				end("stopped")
 			default:
 				note("read", err)
 				if streak++; streak < udpErrorStreak {
