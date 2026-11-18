@@ -206,7 +206,7 @@ func TestPythonAgentRelayStats(t *testing.T) {
 		t.Fatalf("echo: %d bytes, %v", len(got), err)
 	}
 	_ = conn.Close()
-	logs.waitLine(t, "msg=closed", "up=100000", "up_writes=", "up_wait=", "down=100000", "down_writes=", "down_wait=")
+	logs.waitLine(t, "msg=closed", "up=100000", "up_writes=", "up_wait=", "up_read=", "down=100000", "down_writes=", "down_wait=", "down_read=")
 }
 
 func TestPythonAgentHalfClose(t *testing.T) {

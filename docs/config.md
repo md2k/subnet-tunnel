@@ -711,6 +711,13 @@ log:
   firewall, kill switch), `helper` (the root helper), `control`, `socks` (every connection through
   the proxy at debug), `transport` (reaching the pod or container, the agent). `-v` is debug for
   all. `--log-level info,dns=debug` is all you need to follow DNS.
+- **Where a connection's time went:** at debug, the `closed` line of a TCP connection (in subtun's
+  `conn` and `socks` lines, and in the agent's) has per direction the bytes, the writes and the
+  time spent waiting to write (`sent`, `sent_writes`, `sent_wait`, `recv...` in subtun; `up...`,
+  `down...` in the agent). A direction that mostly waits to write is held back by the next hop
+  (for subtun's `sent` and the agent's `down`, the tunnel); the rest of its time it waited for
+  data. The Python agent also logs the time spent reading (`up_read`, `down_read`): what's left of
+  `dur` is the agent's own work.
 - **Masking** replaces DNS names and destinations (connections, the addresses answers point at, the
   ones errors repeat, and the agent's own lines at debug) by short hashes: the same name or address gives the same hash during a
   run, nothing links two runs. A masked name keeps the configured domain it falls under

@@ -617,11 +617,13 @@ def truncated(msg):
 
 
 def relay(st, sock):
-    # Per direction: bytes, writes and the time spent in them (the next hop
-    # holding the copy back); the rest of the time is waiting for data.
+    # Per direction: bytes, writes, the time spent writing (the next hop
+    # holding the copy back) and reading (waiting for data); what's left of
+    # the direction's time is the agent's own work.
     counts = {"up": 0, "down": 0}
     writes = {"up": 0, "down": 0}
     waits = {"up": 0.0, "down": 0.0}
+    reads = {"up": 0.0, "down": 0.0}
     start = time.time()
     clock = getattr(time, "monotonic", time.time)
 
@@ -635,7 +637,9 @@ def relay(st, sock):
     def sock_to_stream():
         try:
             while True:
+                t0 = clock()
                 data = sock.recv(65536)
+                reads["down"] += clock() - t0
                 if not data:
                     break
                 t0 = clock()
@@ -652,7 +656,9 @@ def relay(st, sock):
     t.start()
     try:
         while True:
+            t0 = clock()
             data = st.read(65536)
+            reads["up"] += clock() - t0
             if not data:
                 break
             t0 = clock()
@@ -665,9 +671,10 @@ def relay(st, sock):
     except Exception:
         abort()
     t.join()
-    log("DEBUG", "closed", stream=st.sid, up=counts["up"], up_writes=writes["up"], up_wait="%.3fs" % waits["up"],
+    log("DEBUG", "closed", stream=st.sid,
+        up=counts["up"], up_writes=writes["up"], up_wait="%.3fs" % waits["up"], up_read="%.3fs" % reads["up"],
         down=counts["down"], down_writes=writes["down"], down_wait="%.3fs" % waits["down"],
-        dur="%.3fs" % (time.time() - start))
+        down_read="%.3fs" % reads["down"], dur="%.3fs" % (time.time() - start))
 
 
 def main():
