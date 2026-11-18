@@ -2,6 +2,7 @@ package cli
 
 import (
 	"net/netip"
+	"runtime"
 
 	"github.com/md2k/subnet-tunnel/internal/dns"
 )
@@ -55,6 +56,14 @@ func covered(r netip.Prefix, set []netip.Prefix) bool {
 	hi := netip.PrefixFrom(netip.AddrFrom4([4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)}), r.Bits()+1)
 	return covered(lo, set) && covered(hi, set)
 }
+
+// localTargetsLoop: a target on this machine reaches routed addresses back
+// through this machine's routes (macOS: Docker Desktop's and VMs' traffic
+// leaves through the Mac's own network stack). Not on Linux: a container's
+// or pod's traffic is forwarded, and subtun's routes only take this
+// machine's own traffic; the rarer cases (an SSH target that is this
+// machine, userspace container networking) are caught by the loop guard.
+var localTargetsLoop = runtime.GOOS != "linux"
 
 const localLoopWarning = "the target seems to run on this machine (subtun connects to a local socket or loopback): " +
 	"its connections to the routed internet addresses leave through this machine and loop back into the tunnel. " +

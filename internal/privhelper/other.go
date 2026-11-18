@@ -1,4 +1,4 @@
-//go:build !darwin
+//go:build !darwin && !linux
 
 package privhelper
 
@@ -13,7 +13,7 @@ import (
 	"github.com/md2k/subnet-tunnel/internal/platform"
 )
 
-var errUnsupported = errors.New("utun capture is only implemented on macOS so far; use --socks")
+var errUnsupported = errors.New("capture (routes) is implemented on macOS and Linux so far; use --socks")
 
 // Client is subtun's side of a running helper.
 type Client struct{}
@@ -67,6 +67,9 @@ func (*Client) Done() error { return errUnsupported }
 
 // Close is not implemented on this platform yet.
 func (*Client) Close() error { return nil }
+
+// NeedsSession: no helper on this platform yet.
+func NeedsSession() bool { return false }
 
 // MarkLeftovers is not implemented on this platform yet.
 func MarkLeftovers() error { return nil }

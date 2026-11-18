@@ -1675,7 +1675,7 @@ func runEngine(ctx context.Context, g *globalOpts, mp *multiPlan, eo engineOpts)
 				} else {
 					tl.Info("reconnected", "via", ev.carrier.Desc, "after", time.Since(lost[ev.i]).Round(100*time.Millisecond))
 				}
-				if prev == stateConnecting && ev.carrier.Local && routesInternet(mp.final(ev.i)) {
+				if prev == stateConnecting && localTargetsLoop && ev.carrier.Local && routesInternet(mp.final(ev.i)) {
 					tl.Warn(localLoopWarning)
 				}
 				if changed, err := mp.addEndpoints(ev.carrier.Endpoints); err != nil {

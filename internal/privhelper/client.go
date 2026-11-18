@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 package privhelper
 
@@ -16,15 +16,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/md2k/subnet-tunnel/internal/platform"
+	"github.com/md2k/subnet-tunnel/internal/syscmd"
 	"github.com/md2k/subnet-tunnel/internal/xdg"
 )
 
-const sudoPrompt = "[subtun] root is needed to create the utun interface and routes (and firewall rules for DNS capture). Password for %u: "
+const sudoPrompt = "[subtun] root is needed to create the tunnel interface and routes (and firewall rules for DNS capture). Password for %u: "
 
 // Client is subtun's side of a running helper.
 type Client struct {
@@ -72,7 +74,7 @@ func Start(ctx context.Context, helperLog io.Writer, log *slog.Logger, lend Lend
 	}
 	token := hex.EncodeToString(raw)
 
-	cmd := exec.Command("/usr/bin/sudo", "-p", sudoPrompt, "--", exe, "helper", "--socket", sock)
+	cmd := exec.Command(sudoPath(), "-p", sudoPrompt, "--", exe, "helper", "--socket", sock)
 	cmd.Stdout = helperLog
 	cmd.Stderr = helperLog
 	stdin, err := cmd.StdinPipe()
@@ -155,8 +157,22 @@ func connectHelper(ctx context.Context, cmd *exec.Cmd, stdin io.WriteCloser, ln 
 func sudoReady(ctx context.Context) bool {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return exec.CommandContext(ctx, "/usr/bin/sudo", "-n", "-v").Run() == nil
+	return exec.CommandContext(ctx, sudoPath(), "-n", "-v").Run() == nil
 }
+
+// sudoPath finds sudo in the system directories (it's /usr/bin/sudo almost
+// everywhere).
+func sudoPath() string {
+	if p, err := syscmd.Find("sudo"); err == nil {
+		return p
+	}
+	return "/usr/bin/sudo"
+}
+
+// NeedsSession reports whether the helper must stay up for the whole run:
+// on Linux it removes subtun's routing rules when subtun stops (they don't
+// go away with the interface, as routes do).
+func NeedsSession() bool { return runtime.GOOS == "linux" }
 
 func (c *Client) call(req Request) (Response, []*os.File, error) {
 	c.mu.Lock()
