@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -221,6 +222,134 @@ func udpEcho(c net.Conn) {
 		if _, err := c.Write(append([]byte("re:"), buf[:n]...)); err != nil {
 			return
 		}
+	}
+}
+
+// closingTunnel's connections answer one datagram, then fail as a tunnel
+// session that closed does (io.ErrClosedPipe).
+type closingTunnel struct{}
+
+func (closingTunnel) DialContext(context.Context, string, string) (net.Conn, error) {
+	local, remote := testutil.Pair()
+	go func() {
+		buf := make([]byte, 100)
+		n, _ := remote.Read(buf)
+		_, _ = remote.Write(append([]byte("re:"), buf[:n]...))
+	}()
+	return &closedPipeConn{Conn: local}, nil
+}
+
+type closedPipeConn struct {
+	net.Conn
+	reads atomic.Int32
+}
+
+func (c *closedPipeConn) Read(b []byte) (int, error) {
+	if c.reads.Add(1) > 1 {
+		return 0, io.ErrClosedPipe
+	}
+	return c.Conn.Read(b)
+}
+
+// lockedLog collects the stack's log lines.
+type lockedLog struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// A flow whose tunnel session closed says so when it ends.
+func TestUDPFlowEndReason(t *testing.T) {
+	logs := &lockedLog{}
+	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	client := setupDialer(t, closingTunnel{}, Options{DialTimeout: 5 * time.Second, Logger: log})
+	conn, err := gonet.DialUDP(client, nil, &tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4([4]byte{10, 1, 2, 3}), Port: 443}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 100)
+	if n, err := conn.Read(buf); err != nil || string(buf[:n]) != "re:x" {
+		t.Fatalf("got %q %v", buf[:n], err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if strings.Contains(logs.String(), `reason="tunnel closed"`) {
+			return
+		}
+	}
+	t.Fatalf("no closing line with the reason in:\n%s", logs.String())
+}
+
+// An ICMP error from the application's side (here: port unreachable, for a
+// datagram that arrived after its socket closed) doesn't end the flow: the
+// next socket on the same port carries on in it. (gVisor reports the error on
+// the next read, so ending the flow there also lost the next datagram.)
+func TestUDPFlowSurvivesICMPError(t *testing.T) {
+	var opened atomic.Int32
+	lateSent := make(chan struct{})
+	handler := func(c net.Conn) {
+		opened.Add(1)
+		defer c.Close()
+		buf := make([]byte, 65535)
+		for {
+			n, err := c.Read(buf)
+			if err != nil {
+				return
+			}
+			_, _ = c.Write(append([]byte("re:"), buf[:n]...))
+			if string(buf[:n]) == "first" {
+				time.Sleep(200 * time.Millisecond) // the app's socket is closed by now
+				_, _ = c.Write([]byte("late"))
+				close(lateSent)
+			}
+		}
+	}
+	client := setupWith(t, map[string]func(net.Conn){"10.1.2.3:443": handler}, Options{DialTimeout: 5 * time.Second})
+	local := &tcpip.FullAddress{NIC: 1, Port: 40000}
+	remote := &tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4([4]byte{10, 1, 2, 3}), Port: 443}
+	exchange := func(conn *gonet.UDPConn, d string) {
+		t.Helper()
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		if _, err := conn.Write([]byte(d)); err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, 100)
+		n, err := conn.Read(buf)
+		if err != nil || string(buf[:n]) != "re:"+d {
+			t.Fatalf("%q: got %q %v", d, buf[:n], err)
+		}
+	}
+	first, err := gonet.DialUDP(client, local, remote, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchange(first, "first")
+	_ = first.Close()
+	<-lateSent
+	time.Sleep(200 * time.Millisecond) // the app's stack answers "late" with port unreachable
+	second, err := gonet.DialUDP(client, local, remote, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	exchange(second, "second")
+	if n := opened.Load(); n != 1 {
+		t.Errorf("%d flows opened, want 1: the ICMP error ended the flow", n)
 	}
 }
 

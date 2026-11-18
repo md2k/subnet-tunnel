@@ -395,8 +395,9 @@ the result.
 games and calls) to routed addresses go through the tunnel and leave from the target. A UDP flow
 (your program's address and port to one destination) is one stream to the agent, which sends from
 a socket of its own; a flow with no datagram either way for 2 minutes (15 s for DNS, port 53) is
-closed, and the next datagram opens a new one. `subtun status --connections` lists flows as `udp
-ADDR:PORT`. ICMP isn't carried (`ping` to a routed address gets no answer), nor is anything else
+closed, and the next datagram opens a new one. An error for one datagram (a "port unreachable",
+say) doesn't close a flow; with `-v` the log says why each flow ended and counts its errors.
+`subtun status --connections` lists flows as `udp ADDR:PORT`. ICMP isn't carried (`ping` to a routed address gets no answer), nor is anything else
 over IP. The SOCKS proxy carries TCP only.
 
 ## Full tunnel

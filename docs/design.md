@@ -112,11 +112,21 @@ app ──► SOCKS5 proxy  ───┘   smux streams    exec stdio   in the t
   through the tunnel *before* the handshake with the local app completes: an unreachable
   destination gets a TCP reset, as on a real network. TCP settings follow tun2socks (SACK, RACK, no
   Nagle delay). A UDP flow (the app's address and port to one destination) gets its endpoint at its
-  first datagram, which waits there while the flow is dialed (`CmdUDP`: one stream, datagrams
-  framed by a 16-bit length both ways; the agent sends from a connected socket of its own and
-  ignores ICMP errors for single datagrams); it closes after 2 minutes without a datagram either
-  way (15 s for port 53). The loop guard counts UDP flows apart from TCP connections. ICMP isn't
-  carried.
+  first datagram (a 4 MiB receive buffer), which waits there while the flow is dialed (`CmdUDP`: one
+  stream, datagrams framed by a 16-bit length both ways). The agent sends from a connected socket
+  of its own (asking for a 4 MiB receive buffer; Linux caps it at `net.core.rmem_max`). The Go
+  agent drains that socket into a queue of up to 4 MiB (full: the datagram is dropped and counted)
+  and a writer feeds the stream from it, so a busy stream doesn't overflow the socket; the Python
+  agent takes what the socket holds at each wake-up and writes it into the stream at once (a writer
+  thread costs Python more than it saves: it lost more at high rates). Several datagrams can share
+  a stream write; the framing keeps them apart. An error for one
+  datagram doesn't end a flow, on either side: the ICMP errors a connected socket reports (port,
+  host or network unreachable, too big for the path; gVisor reports a port unreachable from the
+  app's side on the next read) are counted, and the first of each kind is logged at debug; 1000
+  read errors in a row with no datagram between them do end it. A flow closes after 2 minutes
+  without a datagram either way (15 s for port 53). Both sides log at debug why a flow ended
+  (`reason`), with its errors and drops. The loop guard counts UDP flows apart from TCP
+  connections. ICMP isn't carried.
   SOCKS and capture call the same `DialContext` on the tunnel client; the agent can't tell them
   apart.
 - **Routes** (`internal/routes`). Routes and excludes combine like sshuttle's: for any address the
