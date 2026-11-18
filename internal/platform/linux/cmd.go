@@ -19,8 +19,18 @@ func run(name string, args ...string) error {
 	return err
 }
 
+// runInput runs a system command with stdin.
+func runInput(stdin, name string, args ...string) error {
+	_, err := command(stdin, name, args...)
+	return err
+}
+
 // output runs a system command and returns its standard output.
 func output(name string, args ...string) ([]byte, error) {
+	return command("", name, args...)
+}
+
+func command(stdin, name string, args ...string) ([]byte, error) {
 	path, err := syscmd.Find(name)
 	if err != nil {
 		return nil, err
@@ -29,6 +39,7 @@ func output(name string, args ...string) ([]byte, error) {
 	defer cancel()
 	var stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {

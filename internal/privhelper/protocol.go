@@ -183,7 +183,9 @@ func validateServers(what string, servers []netip.Addr) error {
 		return fmt.Errorf("%s: %d servers, want 1-%d", what, len(servers), maxServers)
 	}
 	for _, a := range servers {
-		if !a.Is4() || a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() {
+		// Loopback is allowed (a local resolver); the driver decides whether
+		// its OS can capture it (pf can't, nftables can).
+		if !a.Is4() || a.IsUnspecified() || a.IsMulticast() {
 			return fmt.Errorf("%s: server %s is not a unicast IPv4 address", what, a)
 		}
 	}
