@@ -1,8 +1,10 @@
 # subnet-tunnel (`subtun`)
 
 Route chosen subnets and DNS domains from your laptop through a Kubernetes pod, a Docker container
-or a host over SSH, as if you were on that network. A single static Go binary: no Python, no
-runtime dependencies, nothing to install on the far side.
+or a host over SSH, as if you were on that network. A single static Go binary with no runtime
+dependencies. Nothing to install on the far side either: subtun brings its agent along (a static
+Linux binary it uploads), or, where that can't run, sends a Python edition of it over, which then
+needs Python 3.6 or newer there ([agents](docs/config.md#targets)).
 
 Inspired by [sshuttle](https://github.com/sshuttle/sshuttle). Built because on macOS sshuttle's
 pf-based capture caps upload at a few MB/s, while a utun interface with a userspace TCP/IP stack
