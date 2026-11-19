@@ -12,38 +12,57 @@ reached ~170 MB/s end to end in the same test (see [docs/design.md](docs/design.
 > targets; transparent capture of CIDRs or a full tunnel (TUN + gVisor), split DNS, a kill switch,
 > several profiles at once, a SOCKS5 proxy, status and a terminal UI.
 
-## Quick start
+## Install
+
+Download the archive for your system from the [latest release](https://github.com/md2k/subnet-tunnel/releases/latest)
+(`subtun_darwin_arm64.tar.gz`, `subtun_linux_amd64.tar.gz`, ...; Windows `.zip`), check it against
+`checksums.txt` and put `subtun` on your `PATH`. With the GitHub CLI:
 
 ```sh
-git clone https://github.com/md2k/subnet-tunnel.git && cd subnet-tunnel
-make                      # tests, then build/subtun with its agents embedded (needs Go and make)
+gh release download -R md2k/subnet-tunnel -p 'subtun_darwin_arm64.tar.gz' -p checksums.txt
+shasum -a 256 --ignore-missing -c checksums.txt
+tar xzf subtun_darwin_arm64.tar.gz && install -m 0755 subtun ~/bin/   # or /usr/local/bin with sudo
+subtun version
 ```
+
+The agents subtun starts on the far side are inside the binary: nothing to install there.
+
+- **macOS:** the binary isn't signed or notarized. A copy downloaded with a browser carries the
+  quarantine flag; remove it with `xattr -d com.apple.quarantine subtun` (`gh` and `curl` downloads
+  don't get it).
+- **Linux (Debian, Ubuntu):** the capture needs `sudo` and `ip` (iproute2); DNS capture, the kill
+  switch and the IPv6 block need `nft` (the `nftables` package).
+- **Windows:** the SOCKS proxy only so far.
+
+Or build it yourself: [Build](#build).
+
+## Quick start
 
 Through a pod subtun creates for the run (and deletes on stop), with the cluster's names:
 
 ```sh
-build/subtun up --k8s --context dev -n team-a 10.96.0.0/12 10.244.0.0/16 --dns-domain cluster.local
+subtun up --k8s --context dev -n team-a 10.96.0.0/12 10.244.0.0/16 --dns-domain cluster.local
 curl http://my-svc.team-a.svc.cluster.local:8080/        # any program reaches them directly
 ```
 
 Through a host over SSH, as with sshuttle (your `~/.ssh/config`, keys and agent):
 
 ```sh
-build/subtun up --ssh me@gw.example.com 10.20.0.0/16
-build/subtun up --ssh db-host -J me@bastion.example.com 10.30.0.0/16     # through a jump host
+subtun up --ssh me@gw.example.com 10.20.0.0/16
+subtun up --ssh db-host -J me@bastion.example.com 10.30.0.0/16     # through a jump host
 ```
 
 Everything through a remote host, every name resolved there, nothing leaking if the tunnel goes:
 
 ```sh
-build/subtun up --ssh me@bastion.example.com 0.0.0.0/1 128.0.0.0/1 --dns-domain . --kill-switch on
+subtun up --ssh me@bastion.example.com 0.0.0.0/1 128.0.0.0/1 --dns-domain . --kill-switch on
 ```
 
 A SOCKS5 proxy only, no root needed; here through an existing pod and a Docker container:
 
 ```sh
-build/subtun up --k8s -n team-a --create=false --name debug-pod --socks 127.0.0.1:1080
-build/subtun up --docker --network my-app_default --socks 127.0.0.1:1081
+subtun up --k8s -n team-a --create=false --name debug-pod --socks 127.0.0.1:1080
+subtun up --docker --network my-app_default --socks 127.0.0.1:1081
 curl --socks5-hostname 127.0.0.1:1080 http://my-svc.team-a.svc.cluster.local
 ```
 
@@ -63,10 +82,10 @@ profiles:
 ```
 
 ```sh
-build/subtun up dev --dry-run          # what it would do, without root
-build/subtun up --profile dev,office   # both: each connection goes to the profile that routes it
-build/subtun up office --tui           # with the terminal UI in the same terminal
-build/subtun status                    # in another terminal: tunnels, routes, DNS, traffic
+subtun up dev --dry-run          # what it would do, without root
+subtun up --profile dev,office   # both: each connection goes to the profile that routes it
+subtun up office --tui           # with the terminal UI in the same terminal
+subtun status                    # in another terminal: tunnels, routes, DNS, traffic
 ```
 
 More examples: [Configuration → Examples](docs/config.md#examples).
@@ -103,6 +122,11 @@ More examples: [Configuration → Examples](docs/config.md#examples).
 
 Needs Go (version in [go.mod](go.mod)), `make` and `git`. No C toolchain: everything builds with
 `CGO_ENABLED=0`.
+
+```sh
+git clone https://github.com/md2k/subnet-tunnel.git && cd subnet-tunnel
+make                      # tests, then build/subtun with its agents embedded
+```
 
 | Target | What it does |
 |---|---|
